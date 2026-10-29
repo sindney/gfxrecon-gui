@@ -1,0 +1,34 @@
+# Build dirs
+build/
+build2/
+build-sfml*/
+out/
+dist/
+__pycache__/
+*.py[cod]
+
+# App-generated files next to the exe
+imgui.ini
+imgui_template.ini
+logs/
+crash/
+
+# Editor
+.vs/
+.idea/
+*.user
+
+# Local tool bundles, session artifacts, and machine configuration
+.tools/
+.sessions/
+local-tools.json
+gfxrecon_gui.ini
+gfxrecon_layout.ini
+gfxrecon_tools.json
+gfxrecon_preferences.json
+build-*/
+thirdparty/validation-binaries/
+
+# Local agent configuration
+.claude/
+.codex/

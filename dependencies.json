@@ -1,0 +1,106 @@
+{
+  "template": {
+    "project": "imgui-template",
+    "revision": "09751a407a0799055f23e8e1960aff417343c7db",
+    "license": "MIT"
+  },
+  "submodules": [
+    {
+      "name": "gfxreconstruct",
+      "revision": "a20d3dbf83df4f8e02d52e42f19f0ea060708237",
+      "url": "https://github.com/LunarG/gfxreconstruct.git"
+    },
+    {
+      "name": "imgui",
+      "revision": "b48d1afbe8ee8b238e2961dc363a949dd7304e23",
+      "url": "https://github.com/ocornut/imgui.git"
+    },
+    {
+      "name": "imgui-sfml",
+      "revision": "e8ee3667f1b1f731e5c9c32be4c544915291f987",
+      "url": "https://github.com/SFML/imgui-sfml.git"
+    },
+    {
+      "name": "imgui_test_engine",
+      "revision": "508a8fc8dacac2f346d353fed31b9bc90ed29adc",
+      "url": "https://github.com/ocornut/imgui_test_engine.git"
+    },
+    {
+      "name": "ImGuiColorTextEdit",
+      "revision": "ca2f9f1462e3b60e56351bc466acda448c5ea50d",
+      "url": "https://github.com/BalazsJako/ImGuiColorTextEdit.git"
+    },
+    {
+      "name": "json",
+      "revision": "2a56afc714d485870ae41cb1ac4fb0556f86726b",
+      "url": "https://github.com/nlohmann/json.git"
+    },
+    {
+      "name": "nativefiledialog-extended",
+      "revision": "65b2f070a0fcfee0d453a64e770a217ab0b6ff4f",
+      "url": "https://github.com/btzy/nativefiledialog-extended.git"
+    },
+    {
+      "name": "SDL",
+      "revision": "f5e5f6588921eed3d7d048ce43d9eb1ff0da0ffc",
+      "url": "https://github.com/libsdl-org/SDL.git"
+    },
+    {
+      "name": "SFML",
+      "revision": "0fa201c969e48ecc253581c5841ce73f44d42f49",
+      "url": "https://github.com/SFML/SFML.git"
+    },
+    {
+      "name": "SPIRV-Cross",
+      "revision": "300681bbcb8365a8d1eacdacdbdd0249bbf1d6b1",
+      "url": "https://github.com/KhronosGroup/SPIRV-Cross.git"
+    }
+  ],
+  "shader_tools": {
+    "compiler": {
+      "project": "glslang",
+      "version": "14.3.0",
+      "sha256": "5d5dbae8c7b325604ca2edfab56c243cf3603e50ac04c46db3b67f1336eed93c"
+    },
+    "assembler": {
+      "project": "SPIRV-Tools",
+      "version": "v2024.4.rc1-1-g01c8438e",
+      "sha256": "bff9d78c174731453a79914ac84cbed61ffecad75196871419a227507b158b10"
+    },
+    "disassembler": {
+      "project": "SPIRV-Tools",
+      "version": "v2024.4.rc1-1-g01c8438e",
+      "sha256": "d0dfd4b31afd3516fff8b4cf79116a52166197eb9b94295a9e5dd95f15322316"
+    },
+    "validator": {
+      "project": "SPIRV-Tools",
+      "version": "v2024.4.rc1-1-g01c8438e",
+      "sha256": "c30e2730d5e08af6e50c800912a0bdad26da976c84429f313d5954280ae1832d"
+    }
+  },
+  "gui_capture_extensions": {
+    "replay_cache_protocol": 1,
+    "replay_cache_build_hook": "cmake/gui_replay_cache.cmake",
+    "replay_cache_reader": "cmake/gui_pipeline_cache_loader.inl",
+    "host_protocol": 1,
+    "host_source": "cmake/gui_capture_event.inl",
+    "host_build_hook": "cmake/gui_capture_control.cmake",
+    "android_test_sample": "Generated long-running triangle; upstream tracked sources unchanged"
+  },
+  "android_bundle": {
+    "tag": "vulkan-sdk-1.4.363.0",
+    "sha256": "30c4c1bade07c646516326c7fe30e4fc4f8fbb2b040b28ba795c0f50c645e9c6"
+  },
+  "validation_layers": {
+    "android": {
+      "tag": "vulkan-sdk-1.4.363.0",
+      "archive_sha256": "9a3b8e32cb3330406dd4f3651594201635baee4528da8e2a5300e4f55e1a9cc7"
+    },
+    "windows": {
+      "release": "nightly 2026-10-27",
+      "api": "1.4.366",
+      "archive_sha256": "e6d5aebde6915386e0215824235db9b918f89e26824f8b083e037841f64258ba"
+    },
+    "source": "https://github.com/KhronosGroup/Vulkan-ValidationLayers"
+  }
+}

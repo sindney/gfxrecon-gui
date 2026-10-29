@@ -1,0 +1,30 @@
+[submodule "thirdparty/imgui"]
+	path = thirdparty/imgui
+	url = https://github.com/ocornut/imgui.git
+[submodule "thirdparty/imgui_test_engine"]
+	path = thirdparty/imgui_test_engine
+	url = https://github.com/ocornut/imgui_test_engine.git
+[submodule "thirdparty/SDL"]
+	path = thirdparty/SDL
+	url = https://github.com/libsdl-org/SDL.git
+[submodule "thirdparty/nativefiledialog-extended"]
+	path = thirdparty/nativefiledialog-extended
+	url = https://github.com/btzy/nativefiledialog-extended.git
+[submodule "thirdparty/SFML"]
+	path = thirdparty/SFML
+	url = https://github.com/SFML/SFML.git
+[submodule "thirdparty/imgui-sfml"]
+	path = thirdparty/imgui-sfml
+	url = https://github.com/SFML/imgui-sfml.git
+[submodule "thirdparty/ImGuiColorTextEdit"]
+	path = thirdparty/ImGuiColorTextEdit
+	url = https://github.com/BalazsJako/ImGuiColorTextEdit.git
+[submodule "thirdparty/json"]
+	path = thirdparty/json
+	url = https://github.com/nlohmann/json.git
+[submodule "thirdparty/SPIRV-Cross"]
+	path = thirdparty/SPIRV-Cross
+	url = https://github.com/KhronosGroup/SPIRV-Cross.git
+[submodule "thirdparty/gfxreconstruct"]
+	path = thirdparty/gfxreconstruct
+	url = https://github.com/LunarG/gfxreconstruct.git

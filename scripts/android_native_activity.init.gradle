@@ -1,0 +1,35 @@
+// The upstream NativeActivity apps declare hasCode=false but their AndroidX
+// dependencies merge Java ContentProviders. Android then refuses to load those
+// provider classes. Use a generated source manifest so the pinned checkout and
+// installed APK are never edited/repacked.
+gradle.beforeProject { project ->
+    project.plugins.withId('com.android.application') {
+        if (project.name == 'test_launcher') {
+            def hook = new File(gradle.startParameter.initScripts[0].parentFile.parentFile, 'cmake/android_live_test.cmake')
+            project.androidComponents.finalizeDsl { extension ->
+                extension.defaultConfig.externalNativeBuild.cmake.arguments.add("-DCMAKE_PROJECT_INCLUDE=${hook.absolutePath.replace('\\', '/')}")
+            }
+        }
+        if (project.name == 'replay') {
+            def validation = new File(gradle.startParameter.initScripts[0].parentFile.parentFile, 'thirdparty/validation-binaries/android')
+            def hook = new File(gradle.startParameter.initScripts[0].parentFile.parentFile, 'cmake/gui_replay_cache.cmake')
+            project.androidComponents.finalizeDsl { extension ->
+                extension.defaultConfig.externalNativeBuild.cmake.arguments.add("-DCMAKE_PROJECT_INCLUDE=${hook.absolutePath.replace('\\', '/')}")
+                if (validation.isDirectory()) extension.sourceSets.main.jniLibs.srcDir(validation)
+            }
+        }
+        project.afterEvaluate {
+            def manifest = project.android.sourceSets.main.manifest.srcFile
+            if (manifest.isFile()) {
+                def original = manifest.getText('UTF-8')
+                if (original.contains('android:hasCode="false"')) {
+                    def generated = new File(project.layout.buildDirectory.get().asFile,
+                                             'gfxrecon-gui-manifest/AndroidManifest.xml')
+                    generated.parentFile.mkdirs()
+                    generated.setText(original.replace('android:hasCode="false"', 'android:hasCode="true"'), 'UTF-8')
+                    project.android.sourceSets.main.manifest.srcFile generated
+                }
+            }
+        }
+    }
+}
