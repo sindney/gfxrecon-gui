@@ -116,6 +116,8 @@ public:
     int ImageSidebar()const{return imageSidebar_;}
     int SelectedSubdraw()const{return selectedSubdraw_;}
     bool PhoneScreenOff()const{return phoneScreenOff_;}
+    bool FullDrawReplay()const{return fullDrawReplay_;}
+    void SetFullDrawReplay(bool full);
     void RequestCapture();
     void RequestTools() { showTools_ = true; }
     void SaveCapture(bool saveAs = false);
@@ -248,6 +250,7 @@ private:
     bool optimizeReplay_ = true;
     bool validationReplay_ = false;
     bool phoneScreenOff_ = false;
+    bool fullDrawReplay_ = false;
     Json validationReport_;
     std::string androidSerial_, lastReplayTarget_;
     std::vector<AndroidDevice> devices_;

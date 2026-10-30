@@ -9,7 +9,7 @@ click a submitted draw in **Events** to inspect that execution.
 Search Events by API name, label or object. Pipeline/resource links open the
 corresponding inspector. **View > Reset Layout** restores the default docks.
 
-A draw click fetches shaders, geometry, images and diagnostic modes in the
+A draw click fetches shaders, geometry, images and the selected view in the
 background. Previous images stay visible under the refresh overlay. Select a
 different draw to supersede a query, or **File > Cancel current operation**.
 Event/frame dots show progress; **Console** contains diagnostics.
@@ -29,8 +29,10 @@ are in the footer; hover it for details.
 | Range / Auto / Reset | Adjust black/white points or restore the display range |
 
 Modes: **Original**, **Solid coverage**, **Wireframe**, **Depth pass & fail**,
-**UV density**, **Orange outline**. A completed query caches these modes locally;
-switching starts no replay. The initial query can take several replay passes.
+**UV density**, **Orange outline**. **Settings > Draw replay** defaults to
+**Light (on demand)**: fetch the selected view and its required passes only.
+**Full (all views)** preloads all six views. Both keep fetched views cached for
+instant switching; selecting an unfetched view in Light starts a new query.
 Indirect calls also offer All or one argument record.
 
 Depth uses green for passing coverage and red for failing coverage. UVs are
@@ -80,4 +82,4 @@ enabling its capture layer.
 Right-click a frame to choose replay target, validation, optimization or screen-off
 replay. Select a serial in **Tools and devices** when several phones are connected.
 Unlock secure locks on the phone, then choose **Retry replay**. **Settings** is a
-dialog for theme and logging preferences.
+dialog for theme, draw replay and logging preferences.

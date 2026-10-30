@@ -77,6 +77,7 @@ void Workspace::Init(const std::filesystem::path& dir) {
             const int mode = saved.value("replay_mode", 0);
             validationReplay_=saved.value("validation_replay",false);phoneScreenOff_=saved.value("phone_screen_off",false);
             optimizeReplay_ = saved.value("optimize_replay", true);
+            fullDrawReplay_ = saved.value("full_draw_replay", false);
             if (mode >= 0 && mode <= 2) replayMode_ = static_cast<ReplayMode>(mode);
             androidSerial_ = saved.value("android_serial", std::string{});
             captureMode_ = saved.value("capture_mode", 0) == 1 ? 1 : 0;
@@ -109,9 +110,14 @@ void Workspace::Init(const std::filesystem::path& dir) {
 void Workspace::SaveConfiguration() const {
     WriteText(settingsDir_ / "gfxrecon_tools.json", Json(tools_).dump(2));
     WriteText(settingsDir_ / "gfxrecon_preferences.json", Json{{"replay_mode", static_cast<int>(replayMode_)}, {"android_serial", androidSerial_}, {"optimize_replay",optimizeReplay_},{"validation_replay",validationReplay_},{"phone_screen_off",phoneScreenOff_},
+        {"full_draw_replay",fullDrawReplay_},
         {"capture_mode", captureMode_}, {"capture_package", capturePackage_}, {"capture_arguments", captureArguments_},
         {"capture_frames", captureFrames_}, {"capture_style", captureStyle_}, {"capture_length", captureLength_}, {"capture_executable", captureExecutable_},
         {"capture_working_directory", captureWorkingDirectory_}, {"windows_arguments", windowsArguments_}}.dump(2));
+}
+void Workspace::SetFullDrawReplay(bool full) {
+    fullDrawReplay_=full;
+    try { SaveConfiguration(); } catch(const std::exception& error) { LOGE("settings")<<error.what(); }
 }
 void Workspace::SetReplayMode(ReplayMode mode) {
     if (replayMode_ != mode) { replayMode_ = mode;InvalidateDrawResources(); ++selectionGeneration_; }
@@ -309,6 +315,11 @@ void Workspace::Poll() {
         status_ = result.message;
         if(validationErrors){resourceTab_=2;resourceTabRequest_=true;focusResources_=true;}
         CompleteOperation(validationErrors?PanelState::Failed:PanelState::Success, status_);
+        if(result.inspection&&result.drawPreview&&!diagnosticResources_.empty()&&
+            !diagnosticResources_.count(drawVisualization_)&&!diagnosticErrors_.count(drawVisualization_)){
+            pendingDraw_=true;previewPaused_=false;drawRequestedAt_=std::chrono::steady_clock::now();
+            if(selectedExecution_>=0)executionStatuses_[selectedExecution_]={PanelState::Running,"Queued requested view"};
+        }
         if (captureInProgress_) { captureInProgress_ = false; captureStep_ = 4; }
         LOGI("jobs") << status_;
         loggedStatus_ = status_;
@@ -407,9 +418,15 @@ void Workspace::SetDrawVisualization(int mode,int subdraw){
     if(drawVisualization_==mode&&selectedSubdraw_==subdraw)return;
     drawVisualization_=mode;
     if(selectedSubdraw_==subdraw){
-        if(imageShownGeneration_==selectionGeneration_&&diagnosticExecution_==selectedExecution_&&diagnosticSubdraw_==subdraw&&!diagnosticResources_.empty()){ShowDrawVisualization();return;}
-        // A pending bundle contains every mode; mode changes do not supersede it.
+        if(imageShownGeneration_==selectionGeneration_&&diagnosticExecution_==selectedExecution_&&diagnosticSubdraw_==subdraw&&
+            (diagnosticResources_.count(mode)||diagnosticErrors_.count(mode))){ShowDrawVisualization();return;}
+        // Let an in-flight query finish; Poll queues the latest missing mode.
         if(pendingDraw_||(Busy()&&autoReplayRunning_))return;
+        if(capture_->source.extension()==".gfxr"){
+            pendingDraw_=true;previewPaused_=false;imageView_=1;drawRequestedAt_=std::chrono::steady_clock::now();
+            executionStatuses_[selectedExecution_]={PanelState::Running,"Queued draw visualization"};
+        }
+        return;
     }
     selectedSubdraw_=subdraw;++selectionGeneration_;imageView_=1;
     if(Busy()&&autoReplayRunning_)cancel_=true;
@@ -583,10 +600,18 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
     const auto shaderDirectory = session_ / "shaders";
     const auto documents=shaderDocuments_;
     const auto subdraw=selectedSubdraw_;
+    const auto fullDrawReplay=fullDrawReplay_;
+    const auto requestedDrawMode=drawVisualization_;
+    const bool reuseDraw=drawPreview&&!fresh&&!validation&&imageShownGeneration_==generation&&
+        diagnosticExecution_==execution&&diagnosticSubdraw_==subdraw&&diagnosticResources_.count(0);
+    const auto cachedDiagnostics=reuseDraw?diagnosticResources_:decltype(diagnosticResources_){};
+    const auto cachedErrors=reuseDraw?diagnosticErrors_:decltype(diagnosticErrors_){};
+    const auto cachedUvDetail=reuseDraw?uvDetail_:std::string{};
+    const auto cachedIndirect=indirectParameters_;
     const auto frame = requestedFrame ? requestedFrame : dump && execution >= 0 ? capture->executions[execution].frame :
         frame_ > 0 ? static_cast<uint32_t>(frame_) : execution >= 0 ? capture->executions[execution].frame : 1u;
     if (dump && execution < 0) { status_ = "Select a submitted draw/dispatch occurrence before requesting its resources."; return; }
-    Start(drawPreview ? "Fetching selected draw data" : dump ? "Replaying selected event resources" : "Rendering frame " + std::to_string(frame), [this, capture, tools, generation, execution, frame, dump, revert, mode, serial, optimize, validation, overrides, thumbnailOnly, meshInstance, shaderDirectory, meshPreview, drawPreview, descriptorImages,documents,screenOff,subdraw,fresh] {
+    Start(drawPreview ? "Fetching selected draw data" : dump ? "Replaying selected event resources" : "Rendering frame " + std::to_string(frame), [this, capture, tools, generation, execution, frame, dump, revert, mode, serial, optimize, validation, overrides, thumbnailOnly, meshInstance, shaderDirectory, meshPreview, drawPreview, descriptorImages,documents,screenOff,subdraw,fresh,fullDrawReplay,requestedDrawMode,reuseDraw,cachedDiagnostics,cachedErrors,cachedUvDetail,cachedIndirect] {
         const auto queryStarted=std::chrono::steady_clock::now();
         WorkspaceResult r; r.selectionGeneration = generation;
         r.replayResult = true;
@@ -639,7 +664,9 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
 #ifdef IMGUI_TEMPLATE_TESTS
             if(std::getenv("GFXRECON_GUI_TEST_LOCKED_REPLAY"))throw AndroidUnlockRequired(ParseAndroidLockState("KeyguardServiceDelegate\n showing=true\n secure=true","test-phone"));
 #endif
-            result=ReplayCapture(request,target,tools,&cancel_);
+            if(reuseDraw){
+                result.resources=cachedDiagnostics.at(0);result.image=PrimaryOutputImage(result.resources);result.target=target.Label();result.timings=Json::object();
+            }else result=ReplayCapture(request,target,tools,&cancel_);
         }catch(const AndroidUnlockRequired& error){r.failed=true;r.message=error.what();r.unlockRequired=error.state;return r;}
         catch(const std::exception& error){
             if((!validation&&!drawPreview)||cancel_.load())throw;
@@ -649,11 +676,11 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
         }
         r.replayImage = result.image; r.replayTarget = result.target;
         r.resources = result.resources;
-        if(dump&&subdraw<0)r.indirectParameters=ReadDrawParameters(run,capture->events[capture->executions[execution].event].block);
+        if(dump&&subdraw<0)r.indirectParameters=reuseDraw?cachedIndirect:ReadDrawParameters(run,capture->events[capture->executions[execution].event].block);
         r.validationReport=result.validationReport;
         if (dump) r.dumpBlock = capture->events.at(capture->executions.at(static_cast<size_t>(execution)).event).block;
         if (dump) r.dumpExecution = execution;
-        if (dump) {
+        if (dump&&!reuseDraw) {
             try {
                 const auto& event = capture->events.at(capture->executions.at(static_cast<size_t>(execution)).event);
                 const auto& stages = capture->pipelines.at(event.pipeline);
@@ -665,9 +692,10 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
             } catch (const std::exception& error) { r.meshError = error.what(); LOGW("mesh") << error.what(); }
         }
         if(drawPreview&&request.visualizationPipeline){
+            r.diagnosticResources=cachedDiagnostics;r.diagnosticErrors=cachedErrors;r.uvDetail=cachedUvDetail;
             r.diagnosticResources[0]=result.resources;
             std::filesystem::path uv;
-            try{
+            if((fullDrawReplay||requestedDrawMode==4)&&!r.diagnosticResources.count(4)&&!r.diagnosticErrors.count(4))try{
                 const auto& stages=capture->pipelines.at(request.visualizationPipeline);
                 const auto stage=std::find_if(stages.begin(),stages.end(),[](const auto& s){return s.stage.find("FRAGMENT")!=std::string::npos;});
                 if(stage==stages.end())throw std::runtime_error("UV density unavailable: no fragment stage");
@@ -680,6 +708,8 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
             const char* modes[]={"original","solid","wireframe","depth","uv","silhouette"};
             for(int diagnostic=1;diagnostic<=5;++diagnostic){
                 if(cancel_.load())throw std::runtime_error("Draw diagnostic query cancelled");
+                if(!fullDrawReplay&&diagnostic!=requestedDrawMode&&!(requestedDrawMode==5&&diagnostic==1))continue;
+                if(r.diagnosticResources.count(diagnostic))continue;
                 if(r.diagnosticErrors.count(diagnostic))continue;
                 try{
                     for(const auto& stage:capture->pipelines.at(request.visualizationPipeline)){
@@ -699,7 +729,8 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
                     auto& assets=r.diagnosticResources[diagnostic];
                     for(const auto& asset:result.resources)if(asset.metadata.value("category","")!="output")assets.push_back(asset);
                     for(const auto& asset:output.resources)if(asset.metadata.value("category","")=="output")assets.push_back(asset);
-                }catch(const std::exception& error){if(cancel_.load())throw;r.diagnosticErrors[diagnostic]=error.what();LOGW("replay")<<modes[diagnostic]<<": "<<error.what();}
+                }catch(const AndroidUnlockRequired& error){r.failed=true;r.message=error.what();r.unlockRequired=error.state;return r;}
+                catch(const std::exception& error){if(cancel_.load())throw;r.diagnosticErrors[diagnostic]=error.what();LOGW("replay")<<modes[diagnostic]<<": "<<error.what();}
             }
         }
         r.message = "Replay artifacts: " + run.u8string() + " (" + result.target + ")";
@@ -707,6 +738,7 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
         r.message += " | " + std::to_string(elapsed) + " s";
         if(!r.diagnosticResources.empty())r.message+=" | "+std::to_string(r.diagnosticResources.size())+" cached display modes";
         if (result.timings.value("artifact_cache_hit", false)) r.message += " | verified cached output";
+        if(reuseDraw)r.message+=" | reused original draw data";
         if (result.timings.value("optimized_replay", false)) r.message += " | optimized replay copy";
         if (result.timings.value("optimizer_status", "").find("failed") == 0) r.message += " | optimizer failed; using original capture";
         if (result.timings.value("replay_update_required", false)) r.message += " | Install the bundled replay APK to enable pipeline-cache acceleration.";

@@ -212,6 +212,10 @@ void App::DrawSettings() {
         ImGui::EndCombo();
     }
 
+    int drawReplay=workspace_.FullDrawReplay()?1:0;
+    if(ImGui::Combo("Draw replay",&drawReplay,"Light (on demand)\0Full (all views)\0"))workspace_.SetFullDrawReplay(drawReplay==1);
+    ImGui::SetItemTooltip("Light loads the selected view and its required passes.\nFull preloads all six views for instant switching.\nFetched views stay cached with either setting.");
+
     // Logger minimum level.
     const char* levelNames[] = {"Error", "Warn", "Info", "Debug"};
     int level = (int)Log::Instance().MinLevel();

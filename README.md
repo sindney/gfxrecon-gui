@@ -1,5 +1,9 @@
 # GFXReconstruct Inspector
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Windows](https://img.shields.io/badge/platform-Windows-0078D4.svg)
+![MacOS](https://img.shields.io/badge/platform-MacOS-brightgreen.svg)
+
 A Vulkan capture inspector with a desktop GUI and a JSON CLI. Inspect draws,
 images, buffers and meshes; edit shaders and verify changes by replay.
 

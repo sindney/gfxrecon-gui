@@ -594,6 +594,37 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         };
     }
 
+    if(desktopFixture){
+        t=IM_REGISTER_TEST(engine,"integration","Light draw replay fetches missing views and Full preloads supported views");t->UserData=app;
+        t->TestFunc=[](ImGuiTestContext* ctx){
+            auto& w=static_cast<App*>(ctx->Test->UserData)->Workspace();WaitForWorkspace(ctx,w);
+            const bool originalPolicy=w.FullDrawReplay();
+            struct Restore{gfx::Workspace& w;bool full;~Restore(){w.SetFullDrawReplay(full);}} restore{w,originalPolicy};
+            w.SetFullDrawReplay(false);w.SetReplayMode(gfx::ReplayMode::Local);
+            w.Open(std::getenv("GFXRECON_GUI_TEST_CAPTURE"));WaitForWorkspace(ctx,w);
+            const auto settings=std::filesystem::u8path(ExeDirectory())/"test-state";
+            auto readPreference=[&](){std::ifstream file(settings/"gfxrecon_preferences.json");return gfx::Json::parse(file).at("full_draw_replay").get<bool>();};
+            auto replayCount=[&](){size_t n=0;for(const auto& f:std::filesystem::recursive_directory_iterator(settings/"sessions"))if(f.is_regular_file()&&f.path().filename()=="manifest.json"){
+                std::ifstream in(f.path());const auto j=gfx::Json::parse(in);const auto identity=j.value("request_identity",gfx::Json::object());
+                if(!identity.value("dump",gfx::Json{}).is_null())++n;
+            }return n;};
+            IM_CHECK(!readPreference());const auto before=replayCount();
+            w.SelectExecution(0,true);WaitForWorkspace(ctx,w);
+            IM_CHECK(w.ExecutionState(0)==gfx::PanelState::Success);IM_CHECK_EQ(w.CachedDrawModeCount(),1u);IM_CHECK_EQ(replayCount(),before+1);
+            w.SetDrawVisualization(2);
+            for(int i=0;i<300&&!w.Busy();++i){ctx->Yield();std::this_thread::sleep_for(std::chrono::milliseconds(5));}
+            IM_CHECK(w.Busy());w.SetDrawVisualization(5);WaitForWorkspace(ctx,w);
+            IM_CHECK_EQ(w.DrawVisualization(),5);IM_CHECK_EQ(w.CachedDrawModeCount(),4u);IM_CHECK_EQ(replayCount(),before+4);
+            w.SetDrawVisualization(0);IM_CHECK(!w.Busy()&&!w.HasPendingWork());
+            w.SetDrawVisualization(5);IM_CHECK(!w.Busy()&&!w.HasPendingWork());IM_CHECK_EQ(replayCount(),before+4);
+            ctx->MenuClick("//##MainMenuBar/File/Settings...");ctx->SetRef("//Settings");ctx->ComboClick("Draw replay/Full (all views)");
+            IM_CHECK(w.FullDrawReplay());IM_CHECK(readPreference());ctx->ItemClick("Close");
+            w.SelectExecution(0,true);WaitForWorkspace(ctx,w);
+            IM_CHECK(w.CachedDrawModeCount()>=5u);IM_CHECK_EQ(replayCount(),before+9);
+            ctx->MenuClick("//##MainMenuBar/File/Settings...");ctx->SetRef("//Settings");ctx->ComboClick("Draw replay/Light (on demand)");
+            IM_CHECK(!w.FullDrawReplay());IM_CHECK(!readPreference());ctx->ItemClick("Close");
+        };
+    }
     if(const auto indirect=std::getenv("GFXRECON_GUI_INDIRECT_CAPTURE")) {
         t=IM_REGISTER_TEST(engine,"integration","native indirect batch visualization and latest subdraw selection");t->UserData=app;
         t->TestFunc=[](ImGuiTestContext* ctx){

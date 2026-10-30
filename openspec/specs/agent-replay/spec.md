@@ -1,8 +1,6 @@
 ## Purpose
 Replay to a frame or a selected draw on local or Android targets, with shader overrides and shader-edit services, validation replay, performance measurement and image comparison.
-
 ## Requirements
-
 ### Requirement: Replay to frame
 `gfxrecon-cli replay frame --capture C --frame N` SHALL replay on the resolved local or Android target and return the frame image path, replay log, target, timings, cache-hit status and the replay manifest, using the shared replay core including optimization, pipeline caches and result caches.
 
@@ -11,7 +9,7 @@ Replay to a frame or a selected draw on local or Android targets, with shader ov
 - **THEN** the frame is replayed on that phone and the result records the device serial and the PNG frame image
 
 ### Requirement: Replay to draw
-`gfxrecon-cli replay draw` SHALL accept a draw by block number, by dump draw directory, or by execution index, and SHALL replay the frame with resource readback at that draw, returning output attachments and, with `--full`, bound inputs and vertex/index data. Draw visualization modes and indirect subdraw selection SHALL be available as in the GUI.
+`gfxrecon-cli replay draw` SHALL accept a draw by block number, by dump draw directory, or by global zero-based execution index, and SHALL replay the frame with resource readback at that draw, returning output attachments and, with `--full`, bound inputs and vertex/index data. Modes `original`, `solid`, `wireframe`, `depth`, `outline` and `uv` and supported indirect subdraw selection SHALL be available as in the GUI. Outline SHALL preserve original interior color and draw an orange boundary. UV SHALL use the effective fragment interface. Unsupported capabilities SHALL fail explicitly.
 
 #### Scenario: Draw from a dump path
 - **WHEN** an agent runs `replay draw --draw D/frames/0002/passes/003-renderpass-b5120/draws/0017-b5188-vkCmdDrawIndexed`
@@ -20,6 +18,14 @@ Replay to a frame or a selected draw on local or Android targets, with shader ov
 #### Scenario: Wireframe visualization
 - **WHEN** `replay draw --block B --visualize wireframe` runs on a supported backend
 - **THEN** the output shows the selected draw's wireframe and the result verifies the visualization provenance
+
+#### Scenario: Outline inspection
+- **WHEN** a supported draw is replayed with `--visualize outline`
+- **THEN** its output shows an orange boundary with original interior color and records auxiliary source manifests
+
+#### Scenario: Unsupported UV interface
+- **WHEN** UV mode is requested for a fragment interface without a compatible UV input
+- **THEN** the command returns `visualization_unsupported` before launching the diagnostic replay
 
 ### Requirement: Shader modification round trip
 The CLI SHALL let an agent export a captured module, compile an edited GLSL or SPIR-V assembly file for that module's captured stage and entry, check its interface against the original, and replay a frame or draw with one or more module overrides. The original capture SHALL NOT be modified. Interface-changing candidates SHALL be rejected unless explicitly allowed, and replay SHALL fail if the backend does not confirm each replacement.
@@ -67,3 +73,4 @@ Every replay result SHALL include the replay manifest path with capture hash, ba
 #### Scenario: Reproduce an agent's result
 - **WHEN** a user inspects a replay result directory produced by the CLI
 - **THEN** its manifest identifies the exact capture, backend, device and override files used, and the GUI can open the same capture and replay the same selection
+
