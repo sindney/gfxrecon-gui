@@ -3,6 +3,8 @@
 A Vulkan capture inspector with a desktop GUI and a JSON CLI. Inspect draws,
 images, buffers and meshes; edit shaders and verify changes by replay.
 
+![Wireframe draw inspection in GFXReconstruct Inspector](docs/images/inspector-wireframe.png)
+
 ## Start
 
 Extract the Windows x64 release and run `gfxrecon-gui.exe`. Keep the folder
@@ -49,4 +51,5 @@ ctest --test-dir build -C Release --output-on-failure
 ```
 
 See the [build guide](docs/BUILD.md) for replay tools and portable packaging.
-Third-party notices are in [licenses](licenses). Project license: [MIT](LICENSE).
+Licensed under [MIT](LICENSE). Third-party components retain their own licenses;
+see [licenses](licenses).
