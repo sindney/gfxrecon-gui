@@ -1,6 +1,7 @@
 #pragma once
 
 #include "analysis/capture.h"
+#include <optional>
 
 namespace gfx {
 struct ResourceArtifact {
@@ -23,6 +24,12 @@ std::vector<SamplerBinding> CollectStageSamplers(const Capture& capture,const Ex
 Json ReadDrawParameters(const std::filesystem::path& directory,uint64_t block);
 std::vector<ResourceArtifact> CollectResources(const std::filesystem::path& directory);
 std::filesystem::path PrimaryOutputImage(const std::vector<ResourceArtifact>& resources);
+struct OutputSelection {
+    std::string aspect;
+    std::optional<uint64_t> location, image, mip, layer;
+};
+std::filesystem::path SelectOutputImage(const std::vector<ResourceArtifact>& resources, const OutputSelection& selection);
+Json ReadDrawMetadata(const std::filesystem::path& directory, uint64_t block, uint64_t submit);
 ResourcePage ReadResourcePage(const std::filesystem::path& file, uint64_t offset, size_t limit = 65536);
 std::string DecodeResourceValue(const std::vector<uint8_t>& bytes, size_t offset, int type);
 } // namespace gfx

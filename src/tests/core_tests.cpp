@@ -274,6 +274,11 @@ void ResourceTests(const std::filesystem::path& dir) {
         {"04-color0-mip1.bmp",0,"",{{"category","output"},{"aspect","COLOR"},{"location",0},{"mipLevel",1}}},
         {"99-color0.bmp",0,"",{{"category","output"},{"aspect","COLOR"},{"location",0},{"mipLevel",0}}}};
     CHECK(gfx::PrimaryOutputImage(orderedImages)==std::filesystem::path("99-color0.bmp"));
+    gfx::OutputSelection output; output.aspect="COLOR"; output.location=1;
+    CHECK(gfx::SelectOutputImage(orderedImages,output)==std::filesystem::path("03-color1.bmp"));
+    output.location=0; output.mip=1;
+    CHECK(gfx::SelectOutputImage(orderedImages,output)==std::filesystem::path("04-color0-mip1.bmp"));
+    output.layer=9; CHECK(gfx::SelectOutputImage(orderedImages,output).empty());
     orderedImages.resize(3);CHECK(gfx::PrimaryOutputImage(orderedImages)==std::filesystem::path("02-depth.bmp"));
     orderedImages.resize(1);CHECK(gfx::PrimaryOutputImage(orderedImages).empty());
     CHECK(gfx::DescriptorUsesSampler(0));CHECK(gfx::DescriptorUsesSampler(1));CHECK(!gfx::DescriptorUsesSampler(2));

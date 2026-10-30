@@ -125,7 +125,7 @@ Json VisualizationConfig(const ReplayRequest& r){return {{"protocol",r.visualiza
 Json DumpOptions(const ReplayRequest& r, const std::string& output) {
     return {{"OutputDir", output}, {"ImageFormat", r.imageFormat},
         {"DumpAllDescriptors", !r.outputsOnly || r.descriptorImages || r.drawInspection}, {"DumpVertexIndexBuffer", !r.outputsOnly || r.drawInspection},
-        {"DumpDepth", true}, {"DumpBeforeCommand", false}};
+        {"DumpDepth", true}, {"DumpBeforeCommand", false}, {"DumpAllImageSubresources", r.allImageSubresources}};
 }
 std::filesystem::path ArtifactPath(const std::filesystem::path& root, const std::string& name) {
     const auto relative = std::filesystem::u8path(name);

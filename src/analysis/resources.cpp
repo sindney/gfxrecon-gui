@@ -10,6 +10,37 @@
 #include <functional>
 
 namespace gfx {
+std::filesystem::path SelectOutputImage(const std::vector<ResourceArtifact>& resources, const OutputSelection& s) {
+    std::vector<ResourceArtifact> candidates;
+    for (const auto& r : resources) {
+        const auto& m = r.metadata;
+        if (!m.is_object() || m.value("category", "") != "output") continue;
+        auto matches = [&](const char* key, const std::optional<uint64_t>& value) {
+            return !value || (m.contains(key) && m[key].is_number_integer() && m[key] >= 0 && m[key].get<uint64_t>() == *value);
+        };
+        if ((!s.aspect.empty() && m.value("aspect", "") != s.aspect) || !matches("location", s.location) ||
+            !matches("imageId", s.image) || !matches("mipLevel", s.mip) || !matches("arrayLayer", s.layer)) continue;
+        candidates.push_back(r);
+    }
+    return PrimaryOutputImage(candidates);
+}
+Json ReadDrawMetadata(const std::filesystem::path& directory, uint64_t block, uint64_t submit) {
+    std::function<Json(const Json&, unsigned)> find = [&](const Json& value, unsigned depth) -> Json {
+        if (depth > 32) throw std::runtime_error("Draw metadata nesting exceeds 32");
+        if (value.is_object() && value.value("drawIndex", uint64_t(0)) == block &&
+            value.value("queueSubmitIndex", uint64_t(0)) == submit && value.contains("parameters")) return value;
+        if (value.is_structured()) for (const auto& item : value) if (item.is_structured()) {
+            auto found = find(item, depth + 1); if (!found.is_null()) return found;
+        }
+        return {};
+    };
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        if (!entry.is_regular_file() || entry.path().filename().u8string().find("_dr.json") == std::string::npos) continue;
+        if (entry.file_size() > 64 * 1024 * 1024) throw std::runtime_error("Draw metadata exceeds 64 MiB");
+        std::ifstream input(entry.path()); auto found = find(Json::parse(input), 0); if (!found.is_null()) return found;
+    }
+    return {};
+}
 std::filesystem::path PrimaryOutputImage(const std::vector<ResourceArtifact>& resources){
     const Json empty=Json::object();const ResourceArtifact* primary=nullptr;
     std::tuple<int,uint64_t,uint64_t,uint64_t> best;
@@ -76,7 +107,8 @@ void Walk(const Json& value, Json inherited, const std::string& role, const std:
             const auto filename = std::filesystem::u8path(value["file"].get<std::string>()).filename();
             const auto path = root / filename;
             const auto key=filename.u8string()+"|"+inherited.value("category","")+"|"+inherited.value("stage","")+"|"+
-                inherited.value("set",Json()).dump()+"|"+inherited.value("binding",Json()).dump()+"|"+inherited.value("arrayIndex",Json()).dump();
+                inherited.value("set",Json()).dump()+"|"+inherited.value("binding",Json()).dump()+"|"+inherited.value("arrayIndex",Json()).dump()+"|"+
+                inherited.value("queueSubmitIndex",Json()).dump()+"|"+inherited.value("drawIndex",Json()).dump()+"|"+inherited.value("dispatchIndex",Json()).dump();
             if (std::filesystem::is_regular_file(path)) files[key] = {path, std::filesystem::file_size(path), role, inherited};
         }
         for (auto it = value.begin(); it != value.end(); ++it) if (it.value().is_structured()) {

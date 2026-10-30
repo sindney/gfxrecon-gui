@@ -47,6 +47,7 @@ struct ReplayRequest {
     bool optimize = true;
     ReplayMeasurement measurement;
     std::string imageFormat = "bmp"; // dump-resources image encoding: bmp | png (backend-side)
+    bool allImageSubresources = false;
     std::chrono::seconds timeout{120};
     std::function<void(const std::string&)> progress;
 };

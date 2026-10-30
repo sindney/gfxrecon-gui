@@ -6,6 +6,8 @@
 #include "shaders/interface.h"
 #include "shaders/metadata.h"
 #include "shaders/diagnostics.h"
+#include "analysis/dump_dynamic.h"
+#include "analysis/geometry_summary.h"
 
 #include <algorithm>
 #include <cmath>
@@ -112,6 +114,16 @@ std::chrono::seconds ReplayTimeout(const Context& context, const ReplayTarget& t
 }
 Json TargetJson(const ReplayTarget& target) { return {{"label", target.Label()}, {"android", target.android}, {"serial", target.serial}}; }
 struct Opened { ImportResult import; fs::path file; };
+struct InspectionTiming {
+    double replaySeconds = 0;
+    uint64_t replayCalls = 0;
+    Json Report(std::chrono::steady_clock::time_point start) const {
+        const double total = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        return {{"total_seconds", total}, {"replay_wall_seconds", replaySeconds},
+            {"frontend_seconds", std::max(0.0, total - replaySeconds)}, {"replay_calls", replayCalls},
+            {"scope", "Command processing including import, preparation and PNG conversion; excludes process startup and final result serialization. Replay calls include auxiliary passes and cache restores."}};
+    }
+};
 Opened OpenReplayable(const Context& context, const fs::path& file) {
     Opened opened{OpenCapture(context, file), file};
     if (opened.import.capture->source.extension() != ".gfxr")
@@ -132,7 +144,12 @@ ReplayRequest BaseRequest(const Context& context, const Capture& capture, const 
     return request;
 }
 // ReplayCapture with CLI error codes for the failures the contract names.
-ReplayResult RunReplay(const Context& context, const ReplayRequest& request, const ReplayTarget& target) {
+ReplayResult RunReplay(const Context& context, const ReplayRequest& request, const ReplayTarget& target, InspectionTiming* timing = nullptr) {
+    struct Measure {
+        InspectionTiming* timing;
+        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+        ~Measure() { if (timing) { ++timing->replayCalls; timing->replaySeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(); } }
+    } measure{timing};
     context.Progress("Replaying (" + request.prefix + ") on " + target.Label());
     try { return ReplayCapture(request, target, context.tools, context.cancel); }
     catch (const CliError&) { throw; }
@@ -184,6 +201,9 @@ Json RunJson(const ReplayRequest& request, const ReplayResult& result, const Rep
     if (!result.image.empty()) {
         std::string png; auto entry = WithPng(result.image, &png);
         run["image"] = U8(result.image); run["image_png"] = png; run["image_info"] = entry;
+        for (const auto& resource : result.resources) if (resource.file == result.image && Category(resource) == "output") {
+            run["selected_output"] = resource.metadata; break;
+        }
     }
     if (request.validation) run["validation"] = ValidationSummary(result, request.output);
     if (!request.dump.is_null()) {
@@ -228,7 +248,8 @@ Json CompareRuns(const ReplayResult& baseline, const ReplayResult& modified, con
 
 // Shared: runs the requested replay(s) and builds the result document.
 Json ExecuteReplay(const Context& context, const Args& args, const Opened& opened, const ReplayTarget& target, const Overrides& overrides,
-                   const fs::path& root, ReplayRequest request, Json scope, const std::function<void(ReplayRequest&, bool)>& prepare) {
+                   const fs::path& root, ReplayRequest request, Json scope, const std::function<void(ReplayRequest&, bool)>& prepare,
+                   InspectionTiming* timing = nullptr, const OutputSelection* selection = nullptr) {
     const bool validate = args.Has("validate"), baseline = args.Has("baseline");
     Json result{{"capture", {{"path", U8(opened.import.capture->source)}, {"sha256", opened.import.capture->fingerprint}, {"android", opened.import.capture->android}}},
         {"target", TargetJson(target)}, {"output_dir", U8(root)}};
@@ -240,7 +261,16 @@ Json ExecuteReplay(const Context& context, const Args& args, const Opened& opene
         if (withOverrides) r.overrides = overrides.files;
         if (fs::exists(r.output) && !fs::is_empty(r.output)) throw CliError(kFailed, "output_exists", "Output directory is not empty: " + U8(r.output), {{"output_dir", U8(r.output)}});
         prepare(r, withOverrides);
-        return std::make_pair(r, RunReplay(context, r, target));
+        auto replay = RunReplay(context, r, target, timing);
+        if (selection) {
+            replay.image = SelectOutputImage(replay.resources, *selection);
+            if (replay.image.empty() && (!selection->aspect.empty() || selection->image || selection->mip || selection->layer)) {
+                Json available = Json::array();
+                for (const auto& asset : replay.resources) if (Category(asset) == "output") available.push_back(asset.metadata);
+                throw CliError(kFailed, "output_unavailable", "Requested output was not returned by replay", {{"available_outputs", available}, {"output_dir", U8(r.output)}});
+            }
+        }
+        return std::make_pair(r, std::move(replay));
     };
     std::optional<std::pair<ReplayRequest, ReplayResult>> base, modifiedRunResult;
     if (baseline) base = launch("baseline", "baseline", false, false);
@@ -251,7 +281,7 @@ Json ExecuteReplay(const Context& context, const Args& args, const Opened& opene
     runs[modifiedRunResult->first.prefix] = RunJson(modifiedRunResult->first, modifiedRunResult->second, target);
     result["runs"] = runs;
     const auto& last = runs[modifiedRunResult->first.prefix];
-    for (const char* key : {"image", "image_png", "replay_log", "manifest", "timings", "cache_hit", "outputs", "inputs", "mesh", "validation"}) if (last.contains(key)) result[key] = last[key];
+    for (const char* key : {"image", "image_png", "selected_output", "replay_log", "manifest", "timings", "cache_hit", "outputs", "inputs", "mesh", "validation"}) if (last.contains(key)) result[key] = last[key];
     if (base) result["comparison"] = CompareRuns(base->second, modifiedRunResult->second, root);
     if (!overrides.files.empty()) {
         result["overrides"] = overrides.report;
@@ -289,6 +319,7 @@ fs::path RequireCapture(const Args& args) {
 
 // ---- replay frame -------------------------------------------------------------------------------------------
 Json ReplayFrame(Context& context, const Args& args) {
+    const auto started = std::chrono::steady_clock::now(); InspectionTiming timing;
     const auto opened = OpenReplayable(context, RequireCapture(args));
     const auto& capture = *opened.import.capture;
     const auto frame = args.Number("frame", 0);
@@ -298,10 +329,45 @@ Json ReplayFrame(Context& context, const Args& args) {
     const auto overrides = PrepareOverrides(context, opened.import, args, root / "overrides");
     auto request = BaseRequest(context, capture, target, args, false);
     request.frame = static_cast<uint32_t>(frame);
-    return ExecuteReplay(context, args, opened, target, overrides, root, request, {{"scope", "frame"}, {"frame", frame}}, [](ReplayRequest&, bool) {});
+    auto result = ExecuteReplay(context, args, opened, target, overrides, root, request, {{"scope", "frame"}, {"frame", frame}}, [](ReplayRequest&, bool) {}, &timing);
+    result["operation_timings"] = timing.Report(started);
+    AtomicJson(root / "result.json", result); return result;
 }
 
 // ---- replay draw --------------------------------------------------------------------------------------------
+uint64_t Decimal(const std::string& value, const std::string& option) {
+    if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos) throw Usage(option + " expects a nonnegative decimal integer");
+    try { return std::stoull(value); } catch (...) { throw Usage(option + " is out of range"); }
+}
+OutputSelection ReadOutputSelection(const Args& args) {
+    OutputSelection result;
+    if (args.Has("image") && args.Has("attachment")) throw Usage("--image and --attachment are mutually exclusive");
+    if (args.Has("image")) result.image = args.Number("image", 0);
+    if (args.Has("attachment")) {
+        const auto value = args.Get("attachment");
+        if (value == "depth") result.aspect = "DEPTH";
+        else if (value == "stencil") result.aspect = "STENCIL";
+        else if (value.rfind("color:", 0) == 0) { result.aspect = "COLOR"; result.location = Decimal(value.substr(6), "--attachment color:N"); }
+        else throw Usage("--attachment must be color:N, depth or stencil");
+    }
+    if (args.Has("mip")) result.mip = args.Number("mip", 0);
+    if (args.Has("layer")) result.layer = args.Number("layer", 0);
+    return result;
+}
+void AddGeometry(Json& run, const Capture& capture, size_t index) {
+    const auto& execution = capture.executions[index]; const auto& event = capture.events[execution.event];
+    try {
+        const auto dir = fs::u8path(run.value("output_dir", ""));
+        const auto draw = ReadDrawMetadata(dir, event.block, execution.submit);
+        Json parameters;
+        if (draw.is_object()) parameters = draw.value("parameters", Json::object());
+        else if (event.name.find("Indirect") == std::string::npos) parameters = capture.ReadEvent(execution.event)["function"].value("args", Json::object());
+        else parameters = Json::object();
+        if (draw.is_object()) run["draw_parameters"] = parameters;
+        const auto pipeline = capture.pipelineInfo.find(event.pipeline);
+        run["geometry"] = SummarizeGeometry(event.name, pipeline == capture.pipelineInfo.end() ? Json::object() : pipeline->second, parameters, draw, dir);
+    } catch (const std::exception& e) { run["geometry"] = {{"status", "unavailable"}, {"reason", e.what()}, {"submitted_triangles", nullptr}, {"unique_vertices", nullptr}}; }
+}
 struct DrawSelector { std::optional<fs::path> capture; std::optional<uint64_t> block, execution; uint64_t occurrence = 0; std::string sha256; };
 DrawSelector ReadDrawDirectory(const fs::path& directory) {
     DrawSelector selector;
@@ -330,30 +396,13 @@ DrawSelector ReadDrawDirectory(const fs::path& directory) {
     }
     return selector;
 }
-Json ReplayDraw(Context& context, const Args& args) {
-    const auto inspectionStarted=std::chrono::steady_clock::now();
-    const int selectors = int(args.Has("block")) + int(args.Has("draw")) + int(args.Has("execution"));
-    if (selectors != 1) throw Usage("Give exactly one of --block B, --draw <dump draw dir>, --execution I");
-    if (args.Has("outputs") && args.Has("full")) throw Usage("--outputs and --full are mutually exclusive");
-    DrawSelector selector;
-    if (args.Has("draw")) selector = ReadDrawDirectory(Path(args.Get("draw")));
-    else if (args.Has("block")) { selector.block = args.Number("block", 0); selector.occurrence = args.Number("occurrence", 0); }
-    else selector.execution = args.Number("execution", 0);
-    fs::path capturePath;
-    if (args.Has("capture")) capturePath = Path(args.Get("capture"));
-    else if (selector.capture) capturePath = *selector.capture;
-    else throw Usage("--capture FILE is required (the dump manifest does not name one)");
-    const auto opened = OpenReplayable(context, capturePath);
+Json InspectDraw(Context& context, const Args& args, const Opened& opened, size_t index,
+                 const ReplayTarget& target, const Overrides& overrides, const fs::path& root, InspectionTiming& timing,
+                 std::chrono::steady_clock::time_point inspectionStarted) {
     const auto& capture = *opened.import.capture;
-    if (!selector.sha256.empty() && selector.sha256 != capture.fingerprint)
-        throw CliError(kFailed, "capture_mismatch", "The capture differs from the one the dump was made from", {{"dump_sha256", selector.sha256}, {"capture_sha256", capture.fingerprint}});
-    size_t index;
-    if (selector.execution && *selector.execution < capture.executions.size() &&
-        (!selector.block || capture.events[capture.executions[*selector.execution].event].block == *selector.block)) index = static_cast<size_t>(*selector.execution);
-    else if (selector.block) index = FindExecution(capture, *selector.block, static_cast<size_t>(selector.occurrence));
-    else throw CliError(kFailed, "draw_not_found", "Execution index " + std::to_string(*selector.execution) + " is out of range (" + std::to_string(capture.executions.size()) + " executions)");
     const auto& execution = capture.executions[index];
     const auto& event = capture.events[execution.event];
+    const auto selection = ReadOutputSelection(args);
     const bool full = args.Has("full");
     const auto visualization = args.Get("visualize", "original");
     if (visualization != "original" && visualization != "solid" && visualization != "wireframe" && visualization != "depth" && visualization != "outline" && visualization != "uv")
@@ -364,9 +413,6 @@ Json ReplayDraw(Context& context, const Args& args) {
     if(subdraw&&event.name.find("Indirect")==std::string::npos)throw Usage("--subdraw requires an indirect draw call.");
     if(subdraw&&event.name.find("IndirectCount")!=std::string::npos)throw CliError(kFailed,"subdraw_unsupported","Individual GPU-counted indirect records are not supported; omit --subdraw to inspect All.");
     if (subdraw && args.Number("subdraw", 0) > 65535) throw Usage("--subdraw must be 0..65535");
-    const auto target = ResolveTarget(context, capture);
-    const auto root = ResolveRoot(context, args, "replay");
-    const auto overrides = PrepareOverrides(context, opened.import, args, root / "overrides");
     Json dump;
     try { dump = capture.DumpRequest(index); }
     catch (const std::exception& error) { throw CliError(kFailed, "draw_not_selectable", error.what(), {{"block", event.block}, {"execution", index}}); }
@@ -378,6 +424,7 @@ Json ReplayDraw(Context& context, const Args& args) {
     auto request = BaseRequest(context, capture, target, args, false);
     request.frame = execution.frame; request.dump = dump; request.outputsOnly = true;
     request.drawInspection = full; request.descriptorImages = full;
+    request.allImageSubresources = selection.mip.value_or(0) != 0 || selection.layer.value_or(0) != 0;
     request.visualization = visualization=="outline"?"silhouette":visualization; request.visualizationPipeline = pipeline;
     request.indirectSubdraw = subdraw ? static_cast<int>(args.Number("subdraw", 0)) : -1;
     Json scope{{"scope", "draw"}, {"frame", execution.frame}, {"draw", {{"block", event.block}, {"execution", index}, {"call", event.name}, {"pipeline", pipeline}, {"detail", full ? "full" : "outputs"}}},
@@ -411,7 +458,7 @@ Json ReplayDraw(Context& context, const Args& args) {
             auto contextRequest=r;contextRequest.visualization="original";contextRequest.drawInspection=false;contextRequest.descriptorImages=false;
             contextRequest.output=root/"diagnostic-sources"/r.prefix/"original";
             context.Progress("Preparing original color for the outline");
-            const auto original=RunReplay(context,contextRequest,target);
+            const auto original=RunReplay(context,contextRequest,target,&timing);
             auto color=[](const ReplayResult& run){
                 for(const auto& asset:run.resources)if(asset.metadata.value("category","")=="output"&&asset.metadata.value("aspect","")=="COLOR"&&asset.metadata.value("location",0u)==0&&asset.file.extension()==".bmp")return asset.file;
                 throw CliError(kFailed,"visualization_unsupported","Orange outline requires a readable COLOR 0 attachment.");
@@ -421,20 +468,185 @@ Json ReplayDraw(Context& context, const Args& args) {
             if(contextRequest.validation)sources["original"]["validation"]=ValidationSummary(original,contextRequest.output);
             contextRequest.visualization="solid";contextRequest.output=root/"diagnostic-sources"/r.prefix/"solid";
             context.Progress("Preparing solid coverage for the outline");
-            const auto coverage=RunReplay(context,contextRequest,target);r.outlineCoverageImage=color(coverage);
+            const auto coverage=RunReplay(context,contextRequest,target,&timing);r.outlineCoverageImage=color(coverage);
             sources["solid"]={{"image",U8(r.outlineCoverageImage)},{"output_dir",U8(contextRequest.output)},{"manifest",U8(contextRequest.output/"manifest.json")},{"timings",coverage.timings}};
             if(contextRequest.validation)sources["solid"]["validation"]=ValidationSummary(coverage,contextRequest.output);
             diagnosticSources[r.prefix]=sources;
         }
-    });
+    }, &timing, &selection);
     if(!diagnosticSources.empty())result["diagnostic_sources"]=diagnosticSources;
     if(visualization=="outline")result["notes"].push_back("Outline automatically replays original color and solid coverage before compositing its boundary. Auxiliary manifests and timings are in diagnostic_sources.");
-    for (auto& [name, run] : result["runs"].items()) {
-        try { const auto parameters = ReadDrawParameters(fs::u8path(run.value("output_dir", "")), event.block); if (!parameters.is_null()) run["draw_parameters"] = parameters; } catch (...) {}
-    }
+    for (auto& [name, run] : result["runs"].items()) AddGeometry(run, capture, index);
+    const auto last = result["runs"].contains("modified") ? "modified" : "baseline";
+    result["geometry"] = result["runs"][last]["geometry"];
     result["notes"].push_back("Replay-to-draw replays the whole frame with resource readback at the selected draw; it does not truncate the command buffer.");
-    result["inspection_seconds"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-inspectionStarted).count();
+    result["operation_timings"] = timing.Report(inspectionStarted);
+    result["inspection_seconds"] = result["operation_timings"]["total_seconds"];
     AtomicJson(root / "result.json", result);
+    return result;
+}
+
+Json ReplayDraw(Context& context, const Args& args) {
+    const auto inspectionStarted=std::chrono::steady_clock::now();
+    ReadOutputSelection(args);
+    const int selectors = int(args.Has("block")) + int(args.Has("draw")) + int(args.Has("execution"));
+    if (selectors != 1) throw Usage("Give exactly one of --block B, --draw <dump draw dir>, --execution I");
+    if (args.Has("outputs") && args.Has("full")) throw Usage("--outputs and --full are mutually exclusive");
+    DrawSelector selector;
+    if (args.Has("draw")) selector = ReadDrawDirectory(Path(args.Get("draw")));
+    else if (args.Has("block")) { selector.block = args.Number("block", 0); selector.occurrence = args.Number("occurrence", 0); }
+    else selector.execution = args.Number("execution", 0);
+    fs::path capturePath;
+    if (args.Has("capture")) capturePath = Path(args.Get("capture"));
+    else if (selector.capture) capturePath = *selector.capture;
+    else throw Usage("--capture FILE is required (the dump manifest does not name one)");
+    const auto opened = OpenReplayable(context, capturePath);
+    const auto& capture = *opened.import.capture;
+    if (!selector.sha256.empty() && selector.sha256 != capture.fingerprint)
+        throw CliError(kFailed, "capture_mismatch", "The capture differs from the one the dump was made from", {{"dump_sha256", selector.sha256}, {"capture_sha256", capture.fingerprint}});
+    size_t index;
+    if (selector.execution && *selector.execution < capture.executions.size() &&
+        (!selector.block || capture.events[capture.executions[*selector.execution].event].block == *selector.block)) index = static_cast<size_t>(*selector.execution);
+    else if (selector.block) index = FindExecution(capture, *selector.block, static_cast<size_t>(selector.occurrence));
+    else throw CliError(kFailed, "draw_not_found", "Execution index " + std::to_string(*selector.execution) + " is out of range (" + std::to_string(capture.executions.size()) + " executions)");
+    const auto target = ResolveTarget(context, capture);
+    const auto root = ResolveRoot(context, args, "replay");
+    const auto overrides = PrepareOverrides(context, opened.import, args, root / "overrides");
+    InspectionTiming timing;
+    return InspectDraw(context, args, opened, index, target, overrides, root, timing, inspectionStarted);
+}
+
+std::vector<size_t> ExecutionList(const std::string& text, size_t count) {
+    std::vector<size_t> result; std::set<size_t> seen;
+    std::istringstream stream(text); std::string token;
+    if (text.empty() || text.back() == ',') throw Usage("--executions expects indexes or inclusive ranges, e.g. 0,2-5");
+    while (std::getline(stream, token, ',')) {
+        const auto dash = token.find('-');
+        const auto first = Decimal(token.substr(0, dash), "--executions");
+        const auto last = dash == std::string::npos ? first : Decimal(token.substr(dash + 1), "--executions");
+        if (last < first || last >= count) throw Usage("--executions range is outside the capture or reversed");
+        if (last - first >= 4096 || result.size() + (last - first + 1) > 4096) throw Usage("At most 4096 executions can be inspected per command");
+        for (auto n = first; n <= last; ++n) {
+            if (!seen.insert(static_cast<size_t>(n)).second) throw Usage("--executions contains a duplicate index");
+            result.push_back(static_cast<size_t>(n));
+        }
+    }
+    return result;
+}
+Json ReplayDraws(Context& context, const Args& args) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto selection = ReadOutputSelection(args);
+    if (args.Has("outputs") && args.Has("full")) throw Usage("--outputs and --full are mutually exclusive");
+    const auto limit = args.Number("batch-draws", 32);
+    if (!limit || limit > 256) throw Usage("--batch-draws must be 1..256");
+    const auto opened = OpenReplayable(context, RequireCapture(args)); const auto& capture = *opened.import.capture;
+    const auto executions = ExecutionList(args.Get("executions"), capture.executions.size());
+    // Validate every selector before launching any replay, including repeated secondary invocations.
+    Json rejected; BuildBatchDumpRequest(capture, executions, rejected);
+    if (!rejected.empty()) throw CliError(kFailed, "draw_not_selectable", "Some batch executions cannot be selected unambiguously", {{"rejected", rejected}});
+    const auto mode = args.Get("visualize", "original");
+    if (mode != "original" && mode != "solid" && mode != "wireframe" && mode != "depth" && mode != "outline" && mode != "uv")
+        throw Usage("--visualize must be original, solid, wireframe, depth, outline or uv");
+    const bool isolated = mode != "original" || args.Has("subdraw") || args.Has("baseline");
+    if (!isolated) {
+        std::set<std::pair<uint64_t, uint64_t>> identities;
+        for (const auto index : executions) {
+            const auto& e = capture.executions[index]; const auto block = capture.events[e.event].block;
+            if (!identities.insert({e.submit, block}).second)
+                throw CliError(kFailed, "draw_not_selectable", "Batch artifact metadata cannot distinguish these executions sharing a submit and call block; inspect them separately", {{"execution", index}, {"submit", e.submit}, {"block", block}});
+        }
+    }
+    const auto target = ResolveTarget(context, capture);
+    const auto root = args.Has("out") ? Path(args.Get("out")) : context.NewSession("inspect-batch");
+    if (fs::exists(root) && !fs::is_empty(root)) throw CliError(kFailed, "output_exists", "Output directory is not empty: " + U8(root));
+    fs::create_directories(root);
+    const auto overrides = PrepareOverrides(context, opened.import, args, root / "overrides");
+    InspectionTiming timing;
+    Json result{{"scope", "draws"}, {"strategy", isolated ? "isolated" : "merged"}, {"visualization", mode}, {"output_dir", U8(root)},
+        {"capture", {{"path", U8(capture.source)}, {"sha256", capture.fingerprint}}}, {"target", TargetJson(target)},
+        {"draws", Json::array()}, {"batches", Json::array()}};
+    std::map<size_t, size_t> positions;
+    for (const auto index : executions) {
+        positions[index] = result["draws"].size();
+        const auto& e = capture.executions[index]; const auto& event = capture.events[e.event];
+        result["draws"].push_back({{"execution", index}, {"block", event.block}, {"frame", e.frame}, {"status", "pending"}});
+    }
+    auto save = [&] {
+        result["operation_timings"] = timing.Report(started);
+        size_t ok = 0, failed = 0;
+        for (const auto& row : result["draws"]) { ok += row.value("status", "") == "ok"; failed += row.value("status", "") == "failed"; }
+        result["summary"] = {{"requested", executions.size()}, {"succeeded", ok}, {"failed", failed}, {"pending", executions.size() - ok - failed}};
+        AtomicJson(root / "result.json", result);
+    };
+    auto errorOrStop = [&]() -> Json {
+        const auto error = ErrorJson(std::current_exception());
+        if (error.first != kFailed) {
+            save(); auto detail = error.second.value("detail", Json::object()); detail["batch_result"] = U8(root / "result.json");
+            throw CliError(error.first, error.second.value("code", "failed"), error.second.value("message", "Batch interrupted"), detail);
+        }
+        return error.second;
+    };
+    save();
+    if (isolated) {
+        result["notes"] = {"Diagnostic modes, subdraws and baseline comparison use isolated draws to preserve per-draw pipeline and outline context. Import and override compilation are shared."};
+        for (const auto index : executions) {
+            auto& row = result["draws"][positions.at(index)]; InspectionTiming one;
+            const auto drawStarted = std::chrono::steady_clock::now();
+            try {
+                row["result"] = InspectDraw(context, args, opened, index, target, overrides, root / ("execution-" + std::to_string(index)), one, drawStarted);
+                row["status"] = "ok";
+            } catch (const std::exception&) {
+                if (context.cancel && context.cancel->load()) throw;
+                row["status"] = "failed"; row["error"] = errorOrStop();
+            }
+            timing.replaySeconds += one.replaySeconds; timing.replayCalls += one.replayCalls;
+            save();
+        }
+    } else {
+        std::map<uint32_t, std::vector<size_t>> byFrame;
+        for (const auto index : executions) byFrame[capture.executions[index].frame].push_back(index);
+        size_t batchId = 0;
+        for (const auto& [frame, list] : byFrame) for (size_t offset = 0; offset < list.size(); offset += static_cast<size_t>(limit)) {
+            const std::vector<size_t> batch(list.begin() + offset, list.begin() + std::min(list.size(), offset + static_cast<size_t>(limit)));
+            auto request = BaseRequest(context, capture, target, args, args.Has("validate"));
+            request.frame = frame; request.output = root / ("batch-" + std::to_string(batchId++)); request.prefix = overrides.files.empty() ? "baseline" : "modified";
+            request.dump = BuildBatchDumpRequest(capture, batch, rejected); request.outputsOnly = true;
+            request.drawInspection = args.Has("full"); request.descriptorImages = args.Has("full"); request.overrides = overrides.files;
+            request.allImageSubresources = selection.mip.value_or(0) != 0 || selection.layer.value_or(0) != 0;
+            Json record{{"executions", batch}, {"frame", frame}, {"output_dir", U8(request.output)}};
+            try {
+                const auto replay = RunReplay(context, request, target, &timing);
+                record["status"] = "ok"; record["manifest"] = U8(request.output / "manifest.json"); record["timings"] = replay.timings;
+                for (const auto index : batch) {
+                    auto& row = result["draws"][positions.at(index)]; const auto& e = capture.executions[index]; const auto& event = capture.events[e.event];
+                    try {
+                        ReplayResult one = replay; one.resources.clear();
+                        for (const auto& asset : replay.resources) {
+                            const auto& m = asset.metadata;
+                            if (m.is_object() && m.value("queueSubmitIndex", uint64_t(0)) == e.submit &&
+                                (m.value("drawIndex", uint64_t(0)) == event.block || m.value("dispatchIndex", uint64_t(0)) == event.block)) one.resources.push_back(asset);
+                        }
+                        one.image = SelectOutputImage(one.resources, selection);
+                        if (one.image.empty() && (!selection.aspect.empty() || selection.image || selection.mip || selection.layer)) {
+                            Json available = Json::array(); for (const auto& asset : one.resources) if (Category(asset) == "output") available.push_back(asset.metadata);
+                            throw CliError(kFailed, "output_unavailable", "Requested output was not returned for this execution", {{"available_outputs", available}});
+                        }
+                        auto run = RunJson(request, one, target); AddGeometry(run, capture, index);
+                        if (!overrides.files.empty()) { run["overrides"] = overrides.report; for (auto& item : run["overrides"]) item["confirmed"] = true; }
+                        run["timing_scope"] = "Shared batch replay; timings are not attributable to this draw alone.";
+                        row["result"] = run; row["status"] = "ok";
+                    } catch (const std::exception&) { if (context.cancel && context.cancel->load()) throw; row["status"] = "failed"; row["error"] = errorOrStop(); }
+                }
+            } catch (const std::exception&) {
+                if (context.cancel && context.cancel->load()) throw;
+                record["status"] = "failed"; record["error"] = errorOrStop();
+                for (const auto index : batch) { auto& row = result["draws"][positions.at(index)]; row["status"] = "failed"; row["error"] = record["error"]; }
+            }
+            result["batches"].push_back(record); save();
+        }
+    }
+    save();
+    if (result["summary"]["failed"] != 0) throw CliError(kFailed, "batch_incomplete", "Some executions failed; completed results were preserved", {{"result", U8(root / "result.json")}, {"summary", result["summary"]}, {"operation_timings", result["operation_timings"]}});
     return result;
 }
 
@@ -625,13 +837,26 @@ Json Perf(Context& context, const Args& args) {
 } // namespace
 
 void RegisterReplayCommands() {
+    const std::vector<Option> inspectionOptions{
+        {"outputs", "", "Return output attachments only (default)"}, {"full", "", "Also read bound inputs and vertex/index buffers for geometry evidence"},
+        {"visualize", "original|solid|wireframe|depth|outline|uv", "Inspect mode (graphics draws only); outline prepares original and coverage automatically"},
+        {"subdraw", "K", "Inspect only record K of a supported indirect draw (default: all)"},
+        {"attachment", "color:N|depth|stencil", "Select primary output attachment (default: prefer COLOR 0); mutually exclusive with --image"},
+        {"image", "ID", "Select primary output by captured image ID; excludes descriptor inputs"},
+        {"mip", "N", "Select output mip level; nonzero enables all-subresource readback"},
+        {"layer", "N", "Select output array layer; nonzero enables all-subresource readback"}};
+    auto drawOptions = [&](std::vector<Option> options) {
+        options.insert(options.end(), inspectionOptions.begin(), inspectionOptions.end()); return ReplayOptions(options);
+    };
     Register({"replay", "frame", "Replay a capture to a frame (optionally with shader overrides, baseline comparison and validation)", {},
         ReplayOptions({{"frame", "N", "Frame number (1-based)", false, true}}), ReplayFrame});
     Register({"replay", "draw", "Replay the frame of one draw/dispatch with resource readback at that draw", {},
-        ReplayOptions({{"block", "B", "Block number of the draw/dispatch call"}, {"occurrence", "K", "K-th submitted execution of that block (default 0)"},
+        drawOptions({{"block", "B", "Block number of the draw/dispatch call"}, {"occurrence", "K", "K-th submitted execution of that block (default 0)"},
                        {"draw", "DIR", "A dump draw directory (contains draw.json); the capture is taken from the dump manifest"}, {"execution", "I", "Global submitted execution index (0-based); --block selects an API call ID"},
-                       {"outputs", "", "Return output attachments only (default)"}, {"full", "", "Also return bound inputs, descriptor images and vertex/index data"},
-                       {"visualize", "original|solid|wireframe|depth|outline|uv", "Inspect mode (vkCmdDraw* only); outline prepares its source passes automatically"}, {"subdraw", "K", "Replay only record K of an indirect draw"}}), ReplayDraw});
+                       }), ReplayDraw});
+    Register({"replay", "draws", "Inspect execution indexes/ranges without a static export; original mode batches readbacks per frame", {},
+        drawOptions({{"executions", "LIST", "Global zero-based indexes and inclusive ranges, e.g. 0,2-5 (max 4096, no duplicates)", false, true},
+            {"batch-draws", "N", "Maximum draws per merged original replay (1..256, default 32); diagnostics/baseline/subdraws use isolated strategy"}}), ReplayDraws});
     Register({"compare", "", "Compare two images: extent, per-channel max/mean difference, differing pixels, PSNR", {"A", "B"},
         {{"out", "FILE.png", "Write a difference image"}}, Compare});
     Register({"shader", "show", "Show a captured shader module as GLSL, SPIR-V assembly and/or reflection", {"MOD"},

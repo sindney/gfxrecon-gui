@@ -1,6 +1,7 @@
 // CLI replay/compare/shader/perf contracts. Desktop replays need local-tools.json and samples/; skipped with a note otherwise.
 #include "cli/cli.h"
 #include "core/image_io.h"
+#include "analysis/geometry_summary.h"
 #include <array>
 #include <fstream>
 #include <iostream>
@@ -22,6 +23,66 @@ Image Solid(uint32_t w, uint32_t h, std::array<uint8_t, 4> color) {
     Image image; image.width = w; image.height = h; image.rgba.resize(size_t(w) * h * 4);
     for (size_t p = 0; p < size_t(w) * h; ++p) for (int c = 0; c < 4; ++c) image.rgba[p * 4 + c] = color[c];
     return image;
+}
+// Derive a multi-draw fixture from the public triangle without changing its API arguments.
+// GFXR stores little-endian block payload sizes; function IDs remain outside compression.
+void DuplicateTriangleDraws(const fs::path& source, const fs::path& output, uint32_t call = 0x1106a) {
+    std::ifstream in(source, std::ios::binary); std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), {});
+    auto u = [&](size_t offset, size_t width) { Require(offset + width <= bytes.size(), "fixture block bounds"); uint64_t n=0; for(size_t i=0;i<width;++i)n|=uint64_t(bytes[offset+i])<<(8*i); return n; };
+    const auto header = 16 + u(12,4)*8; Require(header <= bytes.size(), "fixture header");
+    std::ofstream out(output, std::ios::binary); out.write(reinterpret_cast<const char*>(bytes.data()), header);
+    size_t duplicated=0;
+    for (size_t offset=header; offset<bytes.size();) {
+        const auto length=u(offset,8)+12; Require(length <= bytes.size()-offset, "fixture payload bounds");
+        out.write(reinterpret_cast<const char*>(bytes.data()+offset),length);
+        if ((u(offset+8,4)&0x7fffffffu)==4 && u(offset+12,4)==call) {
+            out.write(reinterpret_cast<const char*>(bytes.data()+offset),length); ++duplicated;
+        }
+        offset+=length;
+    }
+    Require(duplicated>=3,"public triangle contains three frames of draw calls");
+}
+void GeometryTests(const fs::path& root) {
+    const auto dir = root / "geometry-summary"; fs::create_directories(dir);
+    Json pipeline{{"pInputAssemblyState", {{"topology", 3}, {"primitiveRestartEnable", false}}}};
+    Json parameters{{"indexCount", 36}, {"instanceCount", 1}, {"firstIndex", 0}, {"vertexOffset", 0}};
+    Json draw{{"parameters", parameters}, {"vertexInputState", {{"indexBuffer", {{"file", "indices.bin"}, {"indexType", "VK_INDEX_TYPE_UINT16"}}}}}};
+    const std::vector<uint16_t> cube{0,1,2,2,3,0,4,5,6,6,7,4,0,1,5,5,4,0,2,3,7,7,6,2,0,3,7,7,4,0,1,2,6,6,5,1};
+    auto write = [&](const std::vector<uint16_t>& ids) { std::ofstream out(dir / "indices.bin", std::ios::binary); out.write(reinterpret_cast<const char*>(ids.data()), ids.size()*2); };
+    write(cube);
+    auto summary = SummarizeGeometry("vkCmdDrawIndexed", pipeline, parameters, draw, dir);
+    Require(summary["submitted_triangles"] == 12 && summary["unique_vertices"] == 8 && summary["buffers"]["status"] == "available", "cube counts: " + summary.dump());
+    auto second = parameters; second["indexCount"] = 3; second["instanceCount"] = 3;
+    auto first = parameters; first["instanceCount"] = 2;
+    auto indirect = Json{{"indirectParams", Json::array({first, second})}};
+    summary = SummarizeGeometry("vkCmdDrawIndexedIndirect", pipeline, indirect, draw, dir);
+    Require(summary["submitted_triangles"] == 27 && summary["unique_vertices"] == 8 && summary["record_count"] == 2, "indirect instances count and shared vertex IDs");
+    pipeline["pInputAssemblyState"] = {{"topology", "VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP"}, {"primitiveRestartEnable", true}};
+    write({0,1,2,3,65535,4,5,6}); parameters["indexCount"] = 8; parameters["instanceCount"] = 2;
+    summary = SummarizeGeometry("vkCmdDrawIndexed", pipeline, parameters, draw, dir);
+    Require(summary["submitted_triangles"] == 6 && summary["unique_vertices"] == 7, "restart segments and instances");
+    fs::remove(dir / "indices.bin");
+    summary = SummarizeGeometry("vkCmdDrawIndexed", pipeline, parameters, draw, dir);
+    Require(summary["submitted_triangles"].is_null() && summary["unique_vertices"].is_null() && summary["buffers"]["status"] == "incomplete", "missing restart evidence remains unavailable");
+    pipeline["pInputAssemblyState"] = {{"topology", 3}, {"primitiveRestartEnable", false}};
+    summary = SummarizeGeometry("vkCmdDrawIndexed", pipeline, parameters, draw, dir);
+    Require(summary["submitted_triangles"] == 4 && summary["unique_vertices"].is_null(), "list triangles known without index bytes");
+    parameters["instanceCount"] = 0;
+    summary = SummarizeGeometry("vkCmdDrawIndexed", pipeline, parameters, draw, dir);
+    Require(summary["submitted_triangles"] == 0 && summary["unique_vertices"] == 0, "empty draw exact zero");
+    Json direct{{"vertexCount", 6}, {"instanceCount", 3}, {"firstVertex", 4}};
+    summary = SummarizeGeometry("vkCmdDraw", pipeline, direct, Json::object(), dir);
+    Require(summary["submitted_triangles"] == 6 && summary["unique_vertices"] == 6, "generated/direct geometry needs no vertex bytes");
+    pipeline["pDynamicState"] = {{"pDynamicStates", {"VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY"}}};
+    summary = SummarizeGeometry("vkCmdDraw", pipeline, direct, Json::object(), dir);
+    Require(summary["submitted_triangles"].is_null() && summary["status"] == "unavailable", "dynamic topology not guessed");
+    pipeline.erase("pDynamicState");
+    summary = SummarizeGeometry("vkCmdDrawIndexedIndirect", pipeline, Json::object(), draw, dir);
+    Require(summary["submitted_triangles"].is_null() && summary["status"] == "unavailable", "missing GPU argument records");
+    summary = SummarizeGeometry("vkCmdDrawIndexedIndirectCount", pipeline, Json{{"actualDrawCount",0},{"indirectParams",nullptr}}, draw, dir);
+    Require(summary["submitted_triangles"]==0 && summary["unique_vertices"]==0,"GPU-counted empty draw is known zero");
+    Require(SummarizeGeometry("vkCmdDispatch", pipeline, direct, Json::object(), dir)["status"] == "not_applicable", "compute is not geometry");
+    fs::remove(dir);
 }
 // Bottom-up 24-bit BMP as written by gfxrecon-replay.
 void WriteBmp24(const fs::path& file, const Image& image) {
@@ -90,6 +151,7 @@ void RunReplayCliTests(const fs::path& root) {
     for (const auto* name : {"replay frame", "replay draw", "compare", "shader show", "shader export", "shader compile", "shader check", "perf"})
         Require(std::any_of(Commands().begin(), Commands().end(), [&](const Command& c) { return c.Name() == name; }), std::string("registered: ") + name);
     ImageTests(root, global);
+    GeometryTests(root);
     // Option contract errors need no tools.
     Require(Invoke(Join({"replay", "frame", "--capture", "x.gfxr"}, global)).exit == kUsage, "frame requires --frame");
     Require(Invoke(Join({"replay", "draw", "--capture", "x.gfxr"}, global)).exit == kUsage, "draw requires a selector");
@@ -160,6 +222,7 @@ void RunReplayCliTests(const fs::path& root) {
     Require(f["cache_hit"] == false && f["target"]["android"] == false && fs::is_regular_file(fs::u8path(f["image"].get<std::string>())) && fs::is_regular_file(fs::u8path(f["image_png"].get<std::string>())) &&
         fs::is_regular_file(fs::u8path(f["manifest"].get<std::string>())) && fs::is_regular_file(fs::u8path(f["replay_log"].get<std::string>())), "frame artifacts");
     const auto png = LoadImage(fs::u8path(f["image_png"].get<std::string>())); Require(png.width > 0 && png.height > 0, "frame png");
+    Require(f["operation_timings"]["replay_calls"]==1 && f["operation_timings"]["total_seconds"].get<double>()>=f["operation_timings"]["replay_wall_seconds"].get<double>(),"frame wall time includes replay and frontend");
     const auto cached = Invoke(Join({"replay", "frame", "--capture", cap, "--frame", "1", "--out", (work / "frame2").u8string()}, tools));
     Require(cached.exit == 0 && cached.document["result"]["cache_hit"] == true, "second frame replay hits the shared result cache");
     const auto cmp = Invoke(Join({"compare", f["image_png"].get<std::string>(), cached.document["result"]["image_png"].get<std::string>()}, tools));
@@ -169,6 +232,33 @@ void RunReplayCliTests(const fs::path& root) {
     Require(draw.exit == 0, "draw replay: " + draw.text);
     const auto& r = draw.document["result"];
     Require(r["draw"]["block"] == 82 && r["outputs"].size() >= 1 && fs::is_regular_file(fs::u8path(r["outputs"][0]["png"].get<std::string>())) && r["outputs"][0]["metadata"]["category"] == "output", "draw outputs");
+    Require(r["selected_output"]["aspect"] == "COLOR" && r["selected_output"]["location"] == 0 && r["geometry"]["submitted_triangles"] == 1, "default selected output and triangle evidence: " + r.dump());
+    const auto selected = Invoke(Join({"replay","draw","--capture",cap,"--execution","0","--image",r["selected_output"]["imageId"].dump(),"--mip","0","--layer","0","--out",(work/"selected").u8string()},tools));
+    Require(selected.exit==0 && selected.document["result"]["selected_output"]==r["selected_output"],"explicit image and base subresource: "+selected.text);
+    const auto missing=Invoke(Join({"replay","draw","--capture",cap,"--execution","0","--attachment","depth","--out",(work/"missing-output").u8string()},tools));
+    Require(Code(missing)=="output_unavailable" && !missing.document["error"]["detail"]["available_outputs"].empty(),"unavailable selection has alternatives");
+    const auto missingMip=Invoke(Join({"replay","draw","--capture",cap,"--execution","0","--mip","9","--out",(work/"missing-mip").u8string()},tools));
+    Require(Code(missingMip)=="output_unavailable","missing mip is explicit: "+missingMip.text);
+    {std::ifstream in(work/"missing-mip/replay/dump-request.json");const auto request=Json::parse(in);Require(request["DumpResourcesOptions"]["DumpAllImageSubresources"]==true,"nonzero mip requests backend subresources");}
+    const auto multi=work/"multi.gfxr";DuplicateTriangleDraws(capture,multi);
+    auto batch=[&](const char* list,const char* name,std::vector<std::string> extra=std::vector<std::string>{}){
+        return Invoke(Join(Join({"replay","draws","--capture",multi.u8string(),"--executions",list,"--out",(work/name).u8string()},extra),tools));
+    };
+    const auto grouped=batch("1,0","batch",{"--full"});
+    Require(grouped.exit==0,"merged batch: "+grouped.text);
+    const auto& groupedResult=grouped.document["result"];
+    Require(groupedResult["operation_timings"]["replay_calls"]==1 && groupedResult["draws"][0]["execution"]==1 && groupedResult["draws"][1]["execution"]==0,"one native replay and caller order");
+    Require(groupedResult["draws"][0]["result"]["selected_output"]["drawIndex"]!=groupedResult["draws"][1]["result"]["selected_output"]["drawIndex"],"outputs routed to exact draw");
+    Require(groupedResult["draws"][0]["result"]["geometry"]["submitted_triangles"]==1 && groupedResult["draws"][1]["result"]["geometry"]["unique_vertices"]==3,"full batch supports shader-generated geometry without vertex buffers");
+    Require(!fs::exists(work/"batch/shaders") && !fs::exists(work/"batch/frames"),"batch avoids static export");
+    const auto chunked=batch("0-2","chunked",{"--batch-draws","1"});
+    Require(chunked.exit==0 && chunked.document["result"]["operation_timings"]["replay_calls"]==3,"bounded chunks across frames");
+    Require(batch("0,0","duplicate").exit==kUsage && batch("2-1","reversed").exit==kUsage && batch("0,","trailing").exit==kUsage,"malformed/duplicate batch selectors rejected");
+    const auto partial=batch("0-1","batch-failed",{"--attachment","depth"});
+    Require(Code(partial)=="batch_incomplete" && partial.document["error"]["detail"]["summary"]["failed"]==2,"batch errors preserve structured state");
+    {std::ifstream in(work/"batch-failed/result.json");const auto saved=Json::parse(in);Require(saved["draws"][0]["status"]=="failed" && saved["draws"][0]["error"]["code"]=="output_unavailable","per-draw failure retained");}
+    const auto diagnosticBatch=batch("0-1","batch-outline",{"--visualize","outline"});
+    Require(diagnosticBatch.exit==0 && diagnosticBatch.document["result"]["strategy"]=="isolated" && diagnosticBatch.document["result"]["operation_timings"]["replay_calls"]==6,"diagnostics use isolated contexts and count auxiliary passes: "+diagnosticBatch.text);
     Require(Code(Invoke(Join({"replay", "draw", "--capture", cap, "--block", "1"}, tools))) == "draw_not_found", "draw not found");
     Require(Invoke(Join({"replay","draw","--capture",cap,"--execution","0","--subdraw","1"},tools)).exit==kUsage,"subdraw rejects ordinary direct draws before replay");
     // Native public-sample diagnostics: outline preserves original interiors and is thinner than solid.
@@ -178,6 +268,7 @@ void RunReplayCliTests(const fs::path& root) {
     };
     const auto solid=diagnostic("solid","solid"),outline=diagnostic("outline","outline");
     Require(solid.exit==0&&outline.exit==0,"solid/outline diagnostics: "+outline.text);
+    Require(outline.document["result"]["operation_timings"]["replay_calls"]==3 && outline.document["result"]["operation_timings"]["total_seconds"].get<double>()>=outline.document["result"]["operation_timings"]["replay_wall_seconds"].get<double>(),"outline total covers three replay calls");
     Require(outline.document["result"]["visualization"]=="outline"&&outline.document["result"]["diagnostic_sources"]["baseline"].contains("original"),"outline source provenance");
     auto imageOf=[](const Outcome& result){return LoadImage(fs::u8path(result.document["result"]["image_png"].get<std::string>()));};
     auto orange=[](const Image& image){size_t count=0;for(size_t p=0;p<image.rgba.size();p+=4)if(image.rgba[p]>250&&image.rgba[p+1]>100&&image.rgba[p+1]<240&&image.rgba[p+2]<5)++count;return count;};
@@ -220,6 +311,17 @@ void RunReplayCliTests(const fs::path& root) {
         const auto single=Invoke(Join({"replay","draw","--capture",indirect.u8string(),"--execution","0","--subdraw","1","--visualize","outline","--out",(work/"indirect-outline").u8string()},tools));
         Require(single.exit==0,"indirect outline: "+single.text);
         Require(single.document["result"]["subdraw"]==1&&single.document["result"]["runs"]["baseline"]["draw_parameters"]["indirectParams"].size()==1&&orange(imageOf(single))>0,"selected record outline and actual indirect arguments");
+        const auto all=Invoke(Join({"replay","draw","--capture",indirect.u8string(),"--execution","0","--full","--out",(work/"indirect-full").u8string()},tools));
+        Require(all.exit==0 && all.document["result"]["geometry"]["submitted_triangles"]==3 && all.document["result"]["geometry"]["unique_vertices"]==9,"native indirect counts all records: "+all.text);
+    }
+    const auto cube=FindUpwards(fs::current_path(),"samples/indexed-cube.gfxr");
+    if(!cube.empty()){
+        const auto full=Invoke(Join({"replay","draw","--capture",cube.u8string(),"--execution","0","--full","--out",(work/"cube-full").u8string()},tools));
+        Require(full.exit==0 && full.document["result"]["geometry"]["submitted_triangles"]==12 && full.document["result"]["geometry"]["unique_vertices"]==8,"native indexed cube geometry: "+full.text);
+        const auto multiCube=work/"multi-cube.gfxr";DuplicateTriangleDraws(cube,multiCube,0x1106b);
+        const auto shared=Invoke(Join({"replay","draws","--capture",multiCube.u8string(),"--executions","1,0","--full","--out",(work/"cube-batch").u8string()},tools));
+        Require(shared.exit==0 && shared.document["result"]["operation_timings"]["replay_calls"]==1,"native indexed batch: "+shared.text);
+        for(const auto& row:shared.document["result"]["draws"])Require(!row["result"]["mesh"].empty() && row["result"]["geometry"]["submitted_triangles"]==12 && row["result"]["geometry"]["unique_vertices"]==8 && row["result"]["geometry"]["buffers"]["status"]=="available","shared index/vertex bytes are attributed to both draws");
     }
     // Draw-scoped override + validation: validation either reports or maps a missing layer to exit 4 with status unavailable.
     const auto validated = Invoke(Join({"replay", "frame", "--capture", cap, "--frame", "1", "--validate", "--out", (work / "validated").u8string()}, tools));

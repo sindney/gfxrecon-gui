@@ -77,14 +77,34 @@ changes and later overwrites can break a simple monotonic search.
 ```
 
 `image_png` selects COLOR 0 when available. All attachments remain in `outputs`.
+Choose a specific output with `--attachment color:1|depth|stencil` or `--image ID`;
+add `--mip N --layer N` for a subresource. `selected_output` identifies the chosen
+image. Missing selections return `output_unavailable` with available metadata.
+Nonzero mips/layers enable all-subresource readback, which can increase memory use.
 Outline automatically prepares original/solid source passes; `diagnostic_sources`
 records their manifests and timings. UV uses a compatible interpolated UV varying
 from the effective fragment shader and reports unavailable when none exists.
 Combine any mode with `--full`, shader overrides or indirect `--subdraw K`.
 Wireframe requires device support. Diagnostic geometry ignores fragment discard
 and stencil, as in the GUI.
-`inspection_seconds` includes preparation and PNG generation; `timings` describes
-the final backend replay. `--execution` is global across the capture, not frame-local.
+`operation_timings` reports total processing wall time, accumulated replay wall
+time, remaining frontend time and replay call count (including outline sources
+and baseline runs). It excludes process startup and final JSON serialization.
+`inspection_seconds` remains the single-draw total; `timings` describes the final
+backend replay. `--execution` is global across the capture, not frame-local.
+
+Inspect several candidates without exporting the static dump again:
+
+```powershell
+.\gfxrecon-cli.exe replay draws --capture samples/indexed-cube.gfxr --executions 0-2 --full --out inspect/candidates
+```
+
+Indexes/ranges are comma-separated, ordered and unique (maximum 4096). Original
+mode merges readbacks per frame in chunks of `--batch-draws N` (default 32, maximum
+256). Modes, `--subdraw` and `--baseline` use isolated strategy with shared import
+and override compilation. `draws` lists each execution's status and result;
+`batches` records shared replay provenance. On partial failure, exit 1 and
+`batch_incomplete` point to the saved `result.json`, including completed draws.
 
 ## 3. Probe
 
@@ -96,6 +116,14 @@ the final backend replay. `--execution` is global across the capture, not frame-
 uniform/storage accesses alongside the vertex layout. Compare readbacks across
 frames to distinguish changing geometry from changing transforms; a shader name
 alone is not proof of skinning or animation.
+
+`geometry` reports `submitted_triangles`, `unique_vertices`, per-record counts and
+referenced buffer availability. Triangles include instances and degenerates at
+input assembly, before tessellation/geometry amplification. Unique vertices are
+distinct adjusted IDs across active records, independent of instances. Missing
+indices can leave triangle-list counts known while unique vertices remain null;
+restart needs index bytes. Unresolved dynamic topology and unsupported paths
+include a reason. These counts describe submitted geometry, not visible pixels.
 
 For batches, `dump --dynamic draws --draws pass=1/000` collects a pass's outputs.
 `--dynamic full` requires `--draws`, such as `block=B` or `pipeline=P`. These tiers

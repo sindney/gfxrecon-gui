@@ -207,6 +207,7 @@ set(CORE_SOURCES
     src/analysis/export.cpp
     src/analysis/dump_dynamic.cpp
     src/analysis/resources.cpp
+    src/analysis/geometry_summary.cpp
     src/analysis/mesh.cpp
     src/replay/replay.cpp
     src/capture/capture.cpp
