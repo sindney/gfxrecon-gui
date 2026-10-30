@@ -12,6 +12,7 @@ namespace gfx {
 class ImageViewer {
 public:
     void LoadBmp(const std::filesystem::path& path,const std::string& aspect = {},const std::string& format = {});
+    void LoadPng(const std::filesystem::path& path);
     void Draw();
     void Release();
     void AbsoluteDifference(const ImageViewer& baseline, const ImageViewer& modified);

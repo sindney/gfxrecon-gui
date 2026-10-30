@@ -78,6 +78,19 @@
       "sha256": "c30e2730d5e08af6e50c800912a0bdad26da976c84429f313d5954280ae1832d"
     }
   },
+  "astcenc": {
+    "project": "ARM-software/astc-encoder",
+    "version": "5.7.0",
+    "license": "Apache-2.0",
+    "license_file": "licenses/astc-encoder.txt",
+    "url": "https://github.com/ARM-software/astc-encoder/releases/download/5.7.0/astcenc-5.7.0-windows-x64.zip",
+    "archive_sha256": "cbde7c78adcc90d0d90ecf10f32d03f3340fbe1720cb6d6c892147d625e74d2d",
+    "files": {
+      "tools/astcenc/astcenc-avx2.exe": "2c46c047d3ec53378641e252501b8faa872b6d384f8baec1ff259020a8941b83",
+      "tools/astcenc/astcenc-sse2.exe": "ded446f477755af96875c7f4f8e85216a73c06367fdba3fda2744f6bb15b87aa"
+    },
+    "acquisition": "vendored in thirdparty/astcenc/ from the release zip; hash-checked by cmake/astcenc.cmake"
+  },
   "gui_capture_extensions": {
     "replay_cache_protocol": 1,
     "replay_cache_build_hook": "cmake/gui_replay_cache.cmake",

@@ -1,10 +1,12 @@
 #include "gui/image_viewer.h"
 #include "analysis/depth_sample.h"
+#include "core/image_io.h"
 
 #include <imgui.h>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#undef LoadImage // windows.h macro; gfx::LoadImage is used below
 #endif
 #ifdef __APPLE__
 #include <OpenGL/gl.h>
@@ -138,6 +140,13 @@ void ImageViewer::LoadBmp(const std::filesystem::path& path,const std::string& a
         std::ifstream raw(sidecar,std::ios::binary);std::vector<uint8_t> data(static_cast<size_t>(width_)*height_*sampleBytes);raw.read(reinterpret_cast<char*>(data.data()),data.size());
         if(raw){depthValues_.resize(static_cast<size_t>(width_)*height_);for(size_t i=0;i<depthValues_.size();++i)depthValues_[i]=DecodeDepthSample(data.data()+i*sampleBytes,format);}
     }
+    Upload();
+}
+void ImageViewer::LoadPng(const std::filesystem::path& path) {
+    auto image = LoadImage(path);  // decoded host-side (e.g. from raw ASTC blocks); opaque/straight alpha as written by astcenc
+    width_ = static_cast<int>(image.width); height_ = static_cast<int>(image.height); rgba_ = std::move(image.rgba);
+    fitToView_ = true;
+    name_ = path.filename().u8string();scalar_=false;range_={};rangeDomainMaximum_=1;depthValues_.clear();
     Upload();
 }
 void ImageViewer::Upload() {

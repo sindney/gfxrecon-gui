@@ -12,7 +12,10 @@ import time
 
 ROOT=Path(__file__).resolve().parents[1]
 DIST=ROOT/'dist'
-CANONICAL=DIST/'GfxReconGui'
+CANONICAL=DIST/'gfxrecon-gui'
+# Distribution-owned binaries (rebuilt by packaging), never user data: the agent CLI beside the GUI and bundled astcenc.
+DISTRIBUTION_BINARIES={'gfxrecon-cli.exe'}
+DISTRIBUTION_PREFIXES=('tools/astcenc/',)
 SETTINGS={'gfxrecon_gui.ini','gfxrecon_layout.ini','gfxrecon_tools.json','gfxrecon_preferences.json'}
 
 
@@ -21,6 +24,10 @@ def digest(path):
     with path.open('rb') as source:
         for data in iter(lambda:source.read(1024*1024),b''):h.update(data)
     return h.hexdigest()
+
+
+def distribution_owned(relative):
+    return relative in DISTRIBUTION_BINARIES or relative.startswith(DISTRIBUTION_PREFIXES)
 
 
 def inside(path,parent):
@@ -43,7 +50,7 @@ def stage():
             if file.is_symlink():raise ValueError(f'Unexpected release link: {file}')
             if not file.is_file():continue
             relative=file.relative_to(release).as_posix()
-            if relative=='build-info.json':continue
+            if relative=='build-info.json' or distribution_owned(relative):continue
             sha=digest(file)
             if relative in generated and generated[relative]==sha:continue
             saved=backup/str(index)/relative
@@ -107,7 +114,7 @@ def finish(path):
     for name in ['GfxreconGui.zip','GfxreconGui-windows-x64.zip','GfxreconGui-windows-x64.zip.sha256']:
         target=DIST/name
         # The case-insensitive canonical archive names are retained on Windows.
-        if name.casefold() in {'gfxrecongui-windows-x64.zip','gfxrecongui-windows-x64.zip.sha256'}:continue
+        if name.casefold() in {'gfxrecon-gui-windows-x64.zip','gfxrecon-gui-windows-x64.zip.sha256'}:continue
         if target.exists():inside(target,DIST);target.unlink()
     plan['complete']=True
     (backup/'completed.json').write_text(json.dumps(plan,indent=2)+'\n',encoding='utf-8')

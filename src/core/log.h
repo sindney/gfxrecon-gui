@@ -30,6 +30,8 @@ public:
     LogLevel MinLevel() const { return minLevel_.load(); }
 
     bool SetFileOutput(const std::string& path, bool append);
+    // Console echo target; the CLI routes logs to stderr to keep stdout machine-readable.
+    void SetConsoleStream(std::ostream* stream) { std::lock_guard lock(mutex_); console_ = stream; }
     void ClearFileOutput();
 
     // Ring buffer the console window reads.
@@ -47,6 +49,7 @@ private:
     mutable std::mutex mutex_;
     std::atomic<LogLevel> minLevel_{LogLevel::Info};
     std::ofstream file_;
+    std::ostream* console_ = nullptr; // null: std::cout
     std::deque<LogRecord> history_;
 };
 

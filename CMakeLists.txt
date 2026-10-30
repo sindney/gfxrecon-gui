@@ -195,6 +195,38 @@ target_link_libraries(imgui_te PUBLIC ${TEST_IMGUI_LIB})
 target_compile_definitions(imgui_te PUBLIC IMGUI_ENABLE_TEST_ENGINE
     IMGUI_TEST_ENGINE_ENABLE_COROUTINE_STDTHREAD_IMPL=1 IMGUI_TEST_ENGINE_ENABLE_CAPTURE=1)
 
+# --- Shared core ---------------------------------------------------------------
+# UI-independent capture, analysis, replay and shader services shared by the GUI,
+# the agent CLI and the native tests.
+set(CORE_SOURCES
+    src/analysis/capture.cpp
+    src/analysis/state.cpp
+    src/analysis/index.cpp
+    src/analysis/cache.cpp
+    src/analysis/import.cpp
+    src/analysis/export.cpp
+    src/analysis/dump_dynamic.cpp
+    src/analysis/resources.cpp
+    src/analysis/mesh.cpp
+    src/replay/replay.cpp
+    src/capture/capture.cpp
+    src/capture/live_capture.cpp
+    src/capture/save_capture.cpp
+    src/shaders/interface.cpp
+    src/shaders/metadata.cpp
+    src/shaders/decode.cpp
+    src/core/log.cpp
+    src/core/artifacts.cpp
+    src/core/settings.cpp
+    src/core/tools.cpp
+    src/core/image_io.cpp
+    src/core/image_decode.cpp
+    src/platform/process.cpp
+    src/platform/adb.cpp
+    src/platform/android_display.cpp
+    src/platform/device_lock.cpp
+)
+
 # --- App sources --------------------------------------------------------------
 set(APP_SOURCES
     src/app.cpp
@@ -211,27 +243,9 @@ set(APP_SOURCES
     src/gui/mesh_window.cpp
     src/gui/image_viewer.cpp
     src/shaders/syntax.cpp
-    src/shaders/interface.cpp
-    src/shaders/metadata.cpp
-    src/platform/process.cpp
-    src/analysis/capture.cpp
-    src/analysis/state.cpp
-    src/analysis/index.cpp
-    src/analysis/cache.cpp
-    src/analysis/resources.cpp
-    src/analysis/mesh.cpp
-    src/replay/replay.cpp
-    src/platform/adb.cpp
-    src/platform/android_display.cpp
-    src/capture/capture.cpp
-    src/capture/live_capture.cpp
-    src/capture/save_capture.cpp
     src/gui/capture_save.cpp
     src/gui/image_inspection.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/TextEditor.cpp
-    src/core/log.cpp
-    src/core/artifacts.cpp
-    src/core/settings.cpp
     src/gui/about.cpp
     src/gui/command_palette.cpp
     src/gui/console_window.cpp
@@ -270,12 +284,25 @@ set(SPIRV_CROSS_ENABLE_MSL OFF CACHE BOOL "" FORCE)
 set(SPIRV_CROSS_ENABLE_CPP OFF CACHE BOOL "" FORCE)
 set(SPIRV_CROSS_ENABLE_C_API OFF CACHE BOOL "" FORCE)
 add_subdirectory(thirdparty/SPIRV-Cross EXCLUDE_FROM_ALL)
-set(APP_LIBS ${APP_IMGUI_LIB} ${OSLAYER_LIBS} OpenGL::GL Threads::Threads nfd::nfd spirv-cross-glsl)
+
+add_library(gfxrecon_core STATIC ${CORE_SOURCES})
+target_include_directories(gfxrecon_core PUBLIC src thirdparty/json/include)
+target_include_directories(gfxrecon_core PRIVATE thirdparty/gfxreconstruct/external/stb thirdparty/SDL/src/video)
+target_link_libraries(gfxrecon_core PUBLIC Threads::Threads spirv-cross-glsl)
+if(WIN32)
+    target_link_libraries(gfxrecon_core PUBLIC shell32 bcrypt)
+endif()
+if(MSVC)
+    target_compile_options(gfxrecon_core PRIVATE /utf-8 /Zc:__cplusplus /Zi)
+    target_compile_definitions(gfxrecon_core PUBLIC NOMINMAX PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+
+set(APP_LIBS gfxrecon_core ${APP_IMGUI_LIB} ${OSLAYER_LIBS} OpenGL::GL Threads::Threads nfd::nfd spirv-cross-glsl)
 if(WIN32)
     list(APPEND APP_LIBS dbghelp imm32 shell32 bcrypt)
 endif()
 # Tests exe links the instrumented imgui instead of the plain one.
-set(TEST_APP_LIBS ${TEST_IMGUI_LIB} ${OSLAYER_LIBS} OpenGL::GL Threads::Threads nfd::nfd spirv-cross-glsl)
+set(TEST_APP_LIBS gfxrecon_core ${TEST_IMGUI_LIB} ${OSLAYER_LIBS} OpenGL::GL Threads::Threads nfd::nfd spirv-cross-glsl)
 if(WIN32)
     list(APPEND TEST_APP_LIBS dbghelp imm32 shell32 bcrypt)
 endif()
@@ -288,7 +315,7 @@ elseif(APPLE)
 endif()
 
 add_executable(gfxrecon_gui ${_os_bundle} src/main.cpp ${APP_SOURCES})
-set_target_properties(gfxrecon_gui PROPERTIES OUTPUT_NAME GfxReconGui)
+set_target_properties(gfxrecon_gui PROPERTIES OUTPUT_NAME gfxrecon-gui)
 if(MSVC)
     # Launch as a native GUI on double-click while retaining redirected stdout
     # for CLI/package verification through the normal C/C++ main entry point.
@@ -296,7 +323,8 @@ if(MSVC)
 endif()
 add_custom_target(gfxrecon_samples ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/samples" "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/samples")
-add_dependencies(gfxrecon_gui gfxrecon_samples)
+include(cmake/astcenc.cmake)
+add_dependencies(gfxrecon_gui gfxrecon_samples gfxrecon_astcenc)
 target_include_directories(gfxrecon_gui PRIVATE src thirdparty/ImGuiColorTextEdit thirdparty/json/include thirdparty/SDL/include)
 target_link_libraries(gfxrecon_gui PRIVATE ${APP_LIBS})
 target_compile_definitions(gfxrecon_gui PRIVATE ${OSLAYER_DEFINE})
@@ -337,21 +365,44 @@ if(APPLE)
 endif()
 
 enable_testing()
-add_executable(gfxrecon_core_tests src/tests/core_tests.cpp src/tests/analysis_tests.cpp src/tests/cache_tests.cpp src/tests/pipeline_cache_tests.cpp src/tests/optimizer_tests.cpp src/tests/device_tests.cpp src/tests/mesh_tests.cpp src/tests/live_capture_tests.cpp src/tests/replay_performance_tests.cpp src/capture/live_capture.cpp src/core/log.cpp src/analysis/mesh.cpp src/shaders/syntax.cpp src/shaders/metadata.cpp
-    src/core/artifacts.cpp src/platform/process.cpp src/platform/adb.cpp src/platform/android_display.cpp src/capture/capture.cpp src/analysis/capture.cpp src/analysis/state.cpp src/analysis/index.cpp src/analysis/cache.cpp src/analysis/resources.cpp src/shaders/interface.cpp src/replay/replay.cpp)
-target_sources(gfxrecon_core_tests PRIVATE src/capture/save_capture.cpp src/tests/capture_save_tests.cpp)
+# Agent CLI: console executable over the shared core (same tools, caches and sessions as the GUI).
+set(CLI_SOURCES
+    src/cli/cli.cpp
+    src/cli/commands_core.cpp
+    src/cli/commands_query.cpp
+    src/cli/commands_dump.cpp
+    src/cli/commands_replay.cpp
+    src/cli/commands_capture.cpp
+)
+add_library(gfxrecon_cli_lib STATIC ${CLI_SOURCES})
+target_link_libraries(gfxrecon_cli_lib PUBLIC gfxrecon_core)
+target_include_directories(gfxrecon_cli_lib PRIVATE thirdparty/gfxreconstruct/external/stb)
+add_executable(gfxrecon_cli src/cli/main.cpp)
+add_dependencies(gfxrecon_cli gfxrecon_astcenc)
+set_target_properties(gfxrecon_cli PROPERTIES OUTPUT_NAME gfxrecon-cli)
+target_link_libraries(gfxrecon_cli PRIVATE gfxrecon_cli_lib)
+if(MSVC)
+    target_compile_options(gfxrecon_cli_lib PRIVATE /utf-8 /Zc:__cplusplus /Zi)
+    target_compile_options(gfxrecon_cli PRIVATE /utf-8 /Zc:__cplusplus /Zi)
+    target_link_options(gfxrecon_cli PRIVATE /SUBSYSTEM:CONSOLE /DEBUG /OPT:REF /OPT:ICF)
+endif()
+add_executable(gfxrecon_core_tests src/tests/core_tests.cpp src/tests/analysis_tests.cpp src/tests/cache_tests.cpp src/tests/pipeline_cache_tests.cpp src/tests/optimizer_tests.cpp src/tests/device_tests.cpp src/tests/mesh_tests.cpp src/tests/live_capture_tests.cpp src/tests/replay_performance_tests.cpp src/tests/dump_feasibility.cpp
+    src/tests/capture_save_tests.cpp src/shaders/syntax.cpp
+    src/tests/export_tests.cpp src/tests/image_decode_tests.cpp src/tests/cli_tests.cpp src/tests/replay_cli_tests.cpp)
 target_include_directories(gfxrecon_core_tests PRIVATE src thirdparty/ImGuiColorTextEdit thirdparty/json/include)
-target_link_libraries(gfxrecon_core_tests PRIVATE imgui Threads::Threads spirv-cross-glsl)
+target_link_libraries(gfxrecon_core_tests PRIVATE gfxrecon_cli_lib gfxrecon_core imgui Threads::Threads spirv-cross-glsl)
 if(MSVC)
     target_compile_options(gfxrecon_core_tests PRIVATE /utf-8)
     target_compile_definitions(gfxrecon_core_tests PRIVATE NOMINMAX)
     target_link_libraries(gfxrecon_core_tests PRIVATE shell32 bcrypt psapi)
 endif()
+add_dependencies(gfxrecon_core_tests gfxrecon_astcenc gfxrecon_samples)
 add_test(NAME core COMMAND gfxrecon_core_tests)
 add_test(NAME ui_auto COMMAND gfxrecon_gui_tests --test)
 set_tests_properties(ui_auto PROPERTIES TIMEOUT 300 WORKING_DIRECTORY "$<TARGET_FILE_DIR:gfxrecon_gui_tests>")
 
 # --- Install -------------------------------------------------------------------
 install(TARGETS gfxrecon_gui RUNTIME DESTINATION . BUNDLE DESTINATION .)
+install(TARGETS gfxrecon_cli RUNTIME DESTINATION .)
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/licenses/" DESTINATION licenses)
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/samples/" DESTINATION samples)

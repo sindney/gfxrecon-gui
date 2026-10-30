@@ -1,5 +1,6 @@
 #include "platform/android_display.h"
 #include "core/artifacts.h"
+#include "platform/device_lock.h"
 #include <fstream>
 #include <sstream>
 #include <cstdio>
@@ -30,6 +31,7 @@ AndroidPanelState ReadAndroidPanelState(const AdbConnection& adb,bool cleanup){
     return {id,PanelOff(adb.Shell({"dumpsys","display"},cleanup),id)};
 }
 void RestoreAndroidReplayDisplay(const AdbConnection& adb,const std::filesystem::path& path){
+    DeviceLock lock(adb.serial);
     auto state=Read(path);
     if(state.value("owner","")!="gfxrecon_gui"||state.value("version",0)!=1||state.value("serial","")!=adb.serial||state.value("display",-1)!=0||state.value("restore_command","")!="power-reset")
         throw std::runtime_error("Display recovery journal does not belong to this device.");

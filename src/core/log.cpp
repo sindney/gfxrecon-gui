@@ -92,8 +92,9 @@ void Log::Publish(LogLevel level, const char* category, const char* file,
     record.formatted = header.str() + message;
 
     std::lock_guard lock(mutex_);
-    std::cout << record.formatted << "\n";
-    std::cout.flush();
+    auto& console = console_ ? *console_ : std::cout;
+    console << record.formatted << "\n";
+    console.flush();
     if (file_.is_open()) {
         file_ << record.formatted << "\n";
         file_.flush(); // flush per record so a crash loses at most this line

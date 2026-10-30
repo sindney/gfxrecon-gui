@@ -2,6 +2,7 @@
 #include "platform/android_display.h"
 #include "platform/process.h"
 #include "core/artifacts.h"
+#include "platform/device_lock.h"
 
 #include <algorithm>
 #include <fstream>
@@ -119,7 +120,7 @@ Json PrepareOptimized(ReplayRequest& replay, const std::string& sourceHash,
 bool HasVisualization(const ReplayRequest& r){return r.visualization!="original"||r.indirectSubdraw>=0;}
 Json VisualizationConfig(const ReplayRequest& r){return {{"protocol",1},{"mode",r.visualization},{"pipeline",r.visualizationPipeline},{"subdraw",r.indirectSubdraw},{"draw_id_safe",r.indirectDrawIdSafe}};}
 Json DumpOptions(const ReplayRequest& r, const std::string& output) {
-    return {{"OutputDir", output}, {"ImageFormat", "bmp"},
+    return {{"OutputDir", output}, {"ImageFormat", r.imageFormat},
         {"DumpAllDescriptors", !r.outputsOnly || r.descriptorImages || r.drawInspection}, {"DumpVertexIndexBuffer", !r.outputsOnly || r.drawInspection},
         {"DumpDepth", true}, {"DumpBeforeCommand", false}};
 }
@@ -152,7 +153,7 @@ bool RestoreArtifacts(const std::filesystem::path& root, const ReplayRequest& r,
     } catch (...) { if (cancel && cancel->load()) throw; return false; }
 }
 void CacheArtifacts(const std::filesystem::path& root, const ReplayRequest& r, const Json& manifest) {
-    if (root.empty() || r.validation || (!r.dump.is_null() && !r.outputsOnly)) return;
+    if (root.empty() || r.validation || r.measurement.enabled || (!r.dump.is_null() && !r.outputsOnly)) return;
     try {
         std::filesystem::create_directories(root);
         for (const auto& artifact : manifest.at("artifacts")) {
@@ -187,7 +188,13 @@ ReplayResult RunLocal(const ReplayRequest& r, const std::map<std::string, std::s
         "--screenshot-dir", r.output.u8string(), "--screenshot-prefix", r.prefix,
         "--quit-after-frame", std::to_string(r.frame), "--omit-pipeline-cache-data"};
     if (r.outputsOnly) args.erase(args.begin(), args.begin() + 8);
+    if (r.measurement.enabled) {
+        args.erase(args.begin(), args.end() - 1); // no screenshots; the measurement range replaces --quit-after-frame (keeps --omit-pipeline-cache-data)
+        args.insert(args.end(), {"--measurement-frame-range", r.measurement.frameRange, "--measurement-file", (r.output / "measurement.json").u8string()});
+        if (r.measurement.quitAfter) args.push_back("--quit-after-measurement-range");
+    }
     std::filesystem::path pendingCache, readyCache;
+    bool cacheLoaded = false;
     const auto backend = tools.find("replay");
     if (!r.validation && !r.cacheDirectory.empty() && backend != tools.end() && CacheCapable(std::filesystem::u8path(backend->second), Sha256File(std::filesystem::u8path(backend->second), cancel))) {
         const auto directory = r.cacheDirectory / "pipelines"; std::filesystem::create_directories(directory);
@@ -195,6 +202,7 @@ ReplayResult RunLocal(const ReplayRequest& r, const std::map<std::string, std::s
         if (std::filesystem::is_regular_file(readyCache)) {
             args.erase(std::find(args.begin(), args.end(), "--omit-pipeline-cache-data"));
             args.insert(args.end(), {"--load-pipeline-cache", readyCache.u8string(), "--add-new-pipeline-caches"});
+            cacheLoaded = true;
         } else {
             pendingCache = r.output / "pipeline-cache.partial";
             args.insert(args.end(), {"--save-pipeline-cache", pendingCache.u8string(), "--add-new-pipeline-caches"});
@@ -234,7 +242,9 @@ ReplayResult RunLocal(const ReplayRequest& r, const std::map<std::string, std::s
     }
     if (!result.Success() && result.output.find("VK_ERROR_EXTENSION_NOT_PRESENT") != std::string::npos)
         throw std::runtime_error("The local GPU lacks a Vulkan extension required by this capture. For an Android capture, choose Automatic or Android device under Frames > Replay.\n" + result.output);
-    return {{}, Checked(result, "Local replay"), "Local Windows"};
+    ReplayResult local{{}, Checked(result, "Local replay"), "Local Windows"};
+    local.timings = {{"pipeline_cache_loaded", cacheLoaded}, {"screen_off", false}};
+    return local;
 }
 
 ReplayResult RunAndroid(const ReplayRequest& r, const ReplayTarget& target, const std::string& identity, const std::string& captureHash, bool pipelineCapable,
@@ -278,6 +288,11 @@ ReplayResult RunAndroid(const ReplayRequest& r, const ReplayTarget& target, cons
         " --screenshot-prefix " + r.prefix + " --quit-after-frame " + std::to_string(r.frame) +
         " --omit-pipeline-cache-data --log-file " + remote + "/replay.log";
     if (r.outputsOnly) args = "--quit-after-frame " + std::to_string(r.frame) + " --omit-pipeline-cache-data --log-file " + remote + "/replay.log";
+    if (r.measurement.enabled) {
+        // Single-space separated, no leading option removed below: the SDK parser rejects empty arguments.
+        args = "--measurement-frame-range " + r.measurement.frameRange + " --measurement-file " + remote + "/measurement.json" +
+            (r.measurement.quitAfter ? " --quit-after-measurement-range" : "") + " --omit-pipeline-cache-data --log-file " + remote + "/replay.log";
+    }
     if (!pipelineFile.empty()) {
         if (pipelineReady) {
             // Android's SDK parser treats consecutive spaces as empty positional
@@ -389,7 +404,7 @@ ReplayResult RunAndroid(const ReplayRequest& r, const ReplayTarget& target, cons
                 throw std::runtime_error("Replay returned an unexpected artifact path");
             const auto basename = std::filesystem::path(file).filename();
             const auto extension = basename.extension().u8string();
-            if (extension == ".bmp" || (extension == ".bin"&&!r.descriptorImages) || (extension == ".json" && basename != "dump-request.json")){
+            if (extension == ".bmp" || extension == ".png" || (extension == ".bin"&&!r.descriptorImages) || (extension == ".json" && basename != "dump-request.json")){
                 adb.Get(kPackage, file, r.output / basename);
                 if(r.progress&&++received%8==0)r.progress("Received "+std::to_string(received)+" replay artifacts");
             }
@@ -460,12 +475,20 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
                             const std::map<std::string, std::string>& tools, const std::atomic_bool* cancel) {
     auto replay=request;
     if(replay.validation){replay.optimize=false;replay.reuseArtifacts=false;}
+    if(replay.measurement.enabled){
+        replay.reuseArtifacts=false;
+        static const std::regex range("[0-9]+-[0-9]+");
+        if(!std::regex_match(replay.measurement.frameRange,range))throw std::runtime_error("Measurement frame range must be <start>-<end> (end exclusive)");
+    }
     const auto& r=replay;
     const auto started = std::chrono::steady_clock::now();
+    std::optional<DeviceLock> deviceLock;
+    if (target.android) deviceLock.emplace(target.serial);
     if(r.visualization!="original"&&r.visualization!="solid"&&r.visualization!="wireframe"&&r.visualization!="depth")throw std::runtime_error("Unknown draw visualization");
     if(r.indirectSubdraw < -1||r.indirectSubdraw>65535)throw std::runtime_error("Invalid indirect subdraw index");
     if(HasVisualization(r)&&r.dump.is_null())throw std::runtime_error("Draw visualization requires a selected draw");
     if (r.prefix != "baseline" && r.prefix != "modified") throw std::runtime_error("Invalid replay output prefix");
+    if (r.imageFormat != "bmp" && r.imageFormat != "png") throw std::runtime_error("Invalid replay image format");
     if (!r.frame || !std::filesystem::is_regular_file(r.capture)) throw std::runtime_error("Replay requires a capture and a positive frame number");
     const auto sourceHash = Sha256File(request.capture, cancel);
     if (!r.expectedCaptureHash.empty() && sourceHash != r.expectedCaptureHash)
@@ -522,6 +545,7 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
     identity["draw_inspection"]=r.drawInspection;
     identity["visualization"]=VisualizationConfig(r);
     identity["screen_off"]=r.screenOff;
+    if(r.measurement.enabled)identity["measurement"]={{"frame_range",r.measurement.frameRange},{"quit_after",r.measurement.quitAfter}};
     identity["readback_options"]=r.dump.is_null()?Json():DumpOptions(r,"<session-output>");
     manifest["request_identity"] = identity;
     const auto cache = r.cacheDirectory.empty() ? std::filesystem::path{} : r.cacheDirectory / "results" / Sha256Text(identity.dump());
@@ -541,10 +565,15 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
         result.validationReport["source_capture"]=request.capture.u8string();AtomicJson(r.output/"validation.json",result.validationReport);
         if(!result.validationReport.value("enabled",false))throw std::runtime_error("Vulkan validation was requested but VK_LAYER_KHRONOS_validation was not enabled. Install/configure the validation layer. See "+(r.output/"validation.json").u8string());
     }
+    if(r.measurement.enabled){
+        const auto file=r.output/"measurement.json";
+        if(!std::filesystem::is_regular_file(file))throw std::runtime_error("Replay completed without a measurement file (is the measurement range inside the capture?). See "+(r.output/"replay.log").u8string());
+        result.measurement=ReadJson(file);
+    }
     if (!r.dump.is_null()) result.resources = CollectResources(r.output);
     if (r.outputsOnly) {
-        for (const auto& resource : result.resources) if (resource.file.extension() == ".bmp" && resource.metadata.value("category","")!="input" && resource.metadata.value("category","")!="mesh") { result.image = resource.file; break; }
-    } else {
+        for (const auto& resource : result.resources) if ((resource.file.extension() == ".bmp" || resource.file.extension() == ".png") && resource.metadata.value("category","")!="input" && resource.metadata.value("category","")!="mesh") { result.image = resource.file; break; }
+    } else if (!r.measurement.enabled) {
         result.image = r.output / (r.prefix + "_frame_" + std::to_string(r.frame) + ".bmp");
         if (!std::filesystem::is_regular_file(result.image) || std::filesystem::file_size(result.image) < 54)
             throw std::runtime_error("Replay completed without the requested frame image. See " + r.output.u8string());
@@ -587,6 +616,7 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
     manifest["complete"] = true; manifest["image"] = result.image.filename().u8string();
     manifest["artifact_cache_hit"] = hit;
     manifest["validation"]=result.validationReport;
+    if(r.measurement.enabled)manifest["measurement"]=result.measurement;
     manifest["backend_timing"] = result.timings;
     manifest["elapsed_seconds"] = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     manifest["override_count"] = r.overrides.size();

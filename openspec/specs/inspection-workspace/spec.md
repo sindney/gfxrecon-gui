@@ -72,11 +72,15 @@ Completed scheduled and on-demand captures SHALL offer Save at the default local
 - **AND** a completed publication is reported as saved even if a late cancellation arrives afterwards
 
 ### Requirement: Full-width shader editing and one public distribution
-Pipeline references SHALL appear in a resizable area below the shader editor and remain clickable for pipeline navigation. The public Windows executable SHALL be GfxReconGui.exe in one canonical distribution. Retiring review distributions SHALL preserve runtime settings, sessions and authored files with verified backups before replacement.
+Pipeline references SHALL appear in a resizable area below the shader editor and remain clickable for pipeline navigation. The public Windows executable SHALL be gfxrecon-gui.exe in one canonical distribution. The companion console executable gfxrecon-cli.exe SHALL ship in the same distribution directory, sharing its bundled tools, configuration, sessions and caches. Retiring review distributions SHALL preserve runtime settings, sessions and authored files with verified backups before replacement.
 
 #### Scenario: Narrow shader dock
 - **WHEN** a shader with pipeline references is opened in a narrow dock
 - **THEN** the editor occupies the full content width and references remain accessible beneath it
+
+#### Scenario: CLI in the distribution
+- **WHEN** the canonical distribution is packaged
+- **THEN** `gfxrecon-cli.exe` is present beside `gfxrecon-gui.exe`, is included in the release inventory hashes, and resolves the same bundled tools as the GUI
 
 ### Requirement: Template-based native workspace
 The application SHALL provide a Windows C++/Dear ImGui workspace based on the supplied ImGui template, retaining docking, DPI scaling, native capture-file selection, themes, console logging, command palette, and layout reset.

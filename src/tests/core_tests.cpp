@@ -34,15 +34,21 @@
 #define CHECK(x) do { if (!(x)) throw std::runtime_error("Check failed: " #x); } while (false)
 namespace gfx::tests {
 void ProfileReplay(const std::filesystem::path&,const std::filesystem::path&,const std::string&,const std::filesystem::path&,const std::filesystem::path&,bool);
+void DumpFeasibility(const std::filesystem::path&,const std::filesystem::path&,const std::string&,const std::filesystem::path&,const std::filesystem::path&,uint32_t,const std::string&);
 void RunAnalysisTests(const std::filesystem::path& root);
 void RunCacheTests(const std::filesystem::path& root);
 void RunPipelineCacheTests(const std::filesystem::path& root);
 void RunOptimizerTests(const std::filesystem::path& root);
 void RunCaptureSaveTests(const std::filesystem::path& root);
 void RunDeviceTests(const std::filesystem::path& root);
+void RunAndroidCaptureTests(const std::filesystem::path& root);
 void RunMeshTests(const std::filesystem::path& root);
 void RunLiveCaptureTests(const std::string&,const std::string&,const std::string&,const std::string&,const std::filesystem::path&);
 void BenchmarkIndex(const std::filesystem::path& root);
+void RunExportTests(const std::filesystem::path& root);
+void RunImageDecodeTests(const std::filesystem::path& root);
+void RunCliTests(const std::filesystem::path& root);
+void RunReplayCliTests(const std::filesystem::path& root);
 }
 namespace {
 using Color = TextEditor::PaletteIndex;
@@ -414,6 +420,10 @@ int main(int argc, char** argv) {
         try { gfx::tests::ProfileReplay(std::filesystem::u8path(argv[2]),std::filesystem::u8path(argv[3]),argv[4],std::filesystem::u8path(argv[5]),std::filesystem::u8path(argv[6]),std::string(argv[1])=="--profile-replay-auto"); return 0; }
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
     }
+    if (argc == 9 && std::string(argv[1]) == "--dump-feasibility") {
+        try { gfx::tests::DumpFeasibility(std::filesystem::u8path(argv[2]),std::filesystem::u8path(argv[3]),argv[4],std::filesystem::u8path(argv[5]),std::filesystem::u8path(argv[6]),static_cast<uint32_t>(std::stoul(argv[7])),argv[8]); return 0; }
+        catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }
     if (argc == 7 && std::string(argv[1]) == "--live-capture") {
         try { gfx::tests::RunLiveCaptureTests(argv[2],argv[3],argv[4],argv[5],std::filesystem::u8path(argv[6])); return 0; }
         catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
@@ -517,7 +527,12 @@ int main(int argc, char** argv) {
         gfx::tests::RunOptimizerTests(dir);
         gfx::tests::RunCaptureSaveTests(dir);
         gfx::tests::RunDeviceTests(dir);
+        gfx::tests::RunAndroidCaptureTests(dir);
         gfx::tests::RunMeshTests(dir);
+        gfx::tests::RunExportTests(dir);
+        gfx::tests::RunImageDecodeTests(dir);
+        gfx::tests::RunCliTests(dir);
+        gfx::tests::RunReplayCliTests(dir);
         std::filesystem::remove(dir / "fixture.jsonl"); std::filesystem::remove(dir);
         std::cout << "Core checks passed\n"; return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

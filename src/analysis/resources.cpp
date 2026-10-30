@@ -101,8 +101,9 @@ std::vector<ResourceArtifact> CollectResources(const std::filesystem::path& dire
         const auto name = entry.path().filename().u8string(), extension = entry.path().extension().u8string();
         if(name.size()>10&&name.compare(name.size()-10,10,".depth.bin")==0)continue;
         const bool listed=std::any_of(files.begin(),files.end(),[&](const auto& item){return item.second.file.filename()==entry.path().filename();});
-        if ((extension == ".bin" || (extension == ".bmp" && name.find("_frame_") == std::string::npos)) && !listed)
-            files[name] = {entry.path(), entry.file_size(), extension == ".bmp" ? "Image" : "Buffer / raw data", Json::object()};
+        const bool image = extension == ".bmp" || extension == ".png";
+        if ((extension == ".bin" || (image && name.find("_frame_") == std::string::npos)) && !listed)
+            files[name] = {entry.path(), entry.file_size(), image ? "Image" : "Buffer / raw data", Json::object()};
     }
     std::vector<ResourceArtifact> result;
     for (auto& [name, artifact] : files) result.push_back(std::move(artifact));

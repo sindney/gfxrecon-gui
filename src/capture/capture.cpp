@@ -1,4 +1,5 @@
 #include "capture/capture.h"
+#include "platform/device_lock.h"
 
 #include <algorithm>
 #include <cctype>
@@ -93,6 +94,7 @@ AndroidInfo InspectAndroidDevice(const AdbConnection& adb) {
     return info;
 }
 void RestoreAndroidCapture(const AdbConnection& adb, const std::filesystem::path& path) {
+    DeviceLock lock(adb.serial);
     auto journal = Load(path);
     if (journal.at("serial") != adb.serial) throw std::runtime_error("Capture recovery journal belongs to another device.");
     if (journal.value("requires_game_exit", false) && adb.TryShell({"pidof", journal.at("package").get<std::string>()}, true).Success())
@@ -112,6 +114,7 @@ void RestoreAndroidCapture(const AdbConnection& adb, const std::filesystem::path
     if (conflicts) throw std::runtime_error("Device settings changed outside this capture session. Recovery conflict recorded in " + path.u8string());
 }
 CaptureResult CaptureAndroid(const AdbConnection& adb, const CaptureRequest& r) {
+    DeviceLock lock(adb.serial);
     if (r.progress) r.progress("Checking the application and device");
     CheckPackage(r.package); ValidateCaptureFrames(r.frames); CheckDevice(adb);
     if (adb.Shell({"pm", "path", "com.lunarg.gfxreconstruct.replay"}).find("package:") == std::string::npos)

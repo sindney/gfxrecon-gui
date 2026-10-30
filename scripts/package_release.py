@@ -16,8 +16,16 @@ import time
 from contextlib import contextmanager
 
 ROOT = Path(__file__).resolve().parents[1]
-NAME = "GfxReconGui"
+NAME = "gfxrecon-gui"
 ARCHIVE = NAME + "-windows-x64.zip"
+CLI = "gfxrecon-cli.exe"
+# astcenc ships as two CPU variants; the core picks AVX2 when supported, else SSE2 (design D9).
+ASTCENC = ("astcenc-avx2.exe", "astcenc-sse2.exe")
+ASTCENC_LICENSE = "licenses/astc-encoder.txt"
+# Tool keys that doctor must resolve to the bundled tools/ directory (same resolution as the GUI).
+BUNDLED_TOOL_KEYS = dict(convert="gfxrecon-convert", info="gfxrecon-info", extract="gfxrecon-extract", optimize="gfxrecon-optimize",
+                         replay="gfxrecon-replay", compiler="glslangValidator", disassembler="spirv-dis", assembler="spirv-as",
+                         validator="spirv-val", adb="adb")
 
 
 @contextmanager
@@ -65,8 +73,9 @@ def require_x64(path):
 
 
 def release_files(stage):
-    required = {"GfxReconGui.exe", "README.md", "LICENSE", "build-info.json",
-                "msvcp140.dll", "vcruntime140.dll", "licenses/MSVC-RUNTIME-NOTICE.txt"}
+    required = {"gfxrecon-gui.exe", CLI, "README.md", "LICENSE", "build-info.json",
+                "msvcp140.dll", "vcruntime140.dll", "licenses/MSVC-RUNTIME-NOTICE.txt", ASTCENC_LICENSE,
+                *("tools/astcenc/" + name for name in ASTCENC)}
     files = []
     for path in sorted(stage.rglob("*")):
         relative = path.relative_to(stage)
@@ -149,6 +158,78 @@ def bundle_tools(stage, config, runtimes):
     (stage / "tool-versions.json").write_text(json.dumps(versions, indent=2) + "\n", encoding="utf-8")
 
 
+def bundle_cli(stage, build):
+    """Ship the agent CLI beside the GUI and astcenc under tools/astcenc. Both are mandatory: fail clearly if absent."""
+    cli = build / "Release" / CLI
+    if not cli.is_file():
+        raise ValueError(f"Missing {cli}; build the gfxrecon_cli target (cmake --build <build> --config Release --target gfxrecon_cli)")
+    require_x64(cli)
+    shutil.copy2(cli, stage / CLI)
+    source_directory = build / "Release/tools/astcenc"
+    missing = [name for name in ASTCENC if not (source_directory / name).is_file()]
+    if missing:
+        raise ValueError(f"Missing astcenc binaries in {source_directory}: {', '.join(missing)}; "
+                         "configure/build with cmake/astcenc.cmake (set GFXRECON_ASTCENC_ZIP for offline builds)")
+    target = stage / "tools/astcenc"
+    target.mkdir(parents=True, exist_ok=True)
+    for name in ASTCENC:
+        require_x64(source_directory / name)
+        shutil.copy2(source_directory / name, target / name)
+
+
+def run_cli(package, arguments, cwd, environment):
+    """Run the packaged CLI and return (exit code, the single JSON document on stdout)."""
+    result = subprocess.run([str(package / CLI), *arguments], cwd=cwd, env=environment, capture_output=True,
+                            text=True, encoding="utf-8", errors="replace", timeout=120)
+    try:
+        document = json.loads(result.stdout)
+    except ValueError as error:
+        raise ValueError(f"{CLI} {' '.join(arguments)} did not print exactly one JSON document ({error}):\n"
+                         f"{result.stdout}\n{result.stderr}")
+    if not isinstance(document, dict):
+        raise ValueError(f"{CLI} {' '.join(arguments)} printed a JSON value that is not an object")
+    return result.returncode, document
+
+
+def verify_cli(package, settings_dir):
+    """Smoke-test the CLI inside an extracted package with a clean PATH; raises ValueError on any violation."""
+    package, settings_dir = Path(package).resolve(), Path(settings_dir).resolve()
+    environment = dict(os.environ, PATH=str(Path(os.environ["SystemRoot"]) / "System32"))
+    cwd = settings_dir  # not the package directory: nothing may depend on the working directory
+    code, document = run_cli(package, ["describe"], cwd, environment)
+    if code or document.get("ok") is not True:
+        raise ValueError(f"{CLI} describe failed ({code}): {document}")
+    names = {item.get("name") for item in document["result"].get("commands", [])}
+    if "doctor" not in names:
+        raise ValueError(f"{CLI} describe does not list doctor: {sorted(names)}")
+    code, document = run_cli(package, ["doctor", "--no-versions", "--settings-dir", str(settings_dir)], cwd, environment)
+    if code or document.get("ok") is not True:
+        raise ValueError(f"{CLI} doctor failed ({code}): {document}")
+    tools = document["result"].get("tools", {})
+    expected = {key: package / "tools" / (name + ".exe") for key, name in BUNDLED_TOOL_KEYS.items()}
+    expected["astcenc"] = package / "tools/astcenc" / ASTCENC[0]
+    for key, path in expected.items():
+        entry = tools.get(key)
+        if entry is None:
+            raise ValueError(f"{CLI} doctor does not report tool '{key}'")
+        reported = Path(entry.get("path", ""))
+        # astcenc selects AVX2 or SSE2 by CPU; any bundled variant is correct.
+        accepted = [package / "tools/astcenc" / name for name in ASTCENC] if key == "astcenc" else [path]
+        if not any(str(reported).casefold() == str(item).casefold() for item in accepted):
+            raise ValueError(f"{CLI} doctor resolved '{key}' to {reported}, expected the bundled {path}")
+        if entry.get("available") is not True:
+            raise ValueError(f"{CLI} doctor reports bundled tool '{key}' unavailable: {entry}")
+    code, document = run_cli(package, ["bogus"], cwd, environment)
+    if code != 2 or document.get("ok") is not False or document.get("error", {}).get("code") != "usage":
+        raise ValueError(f"{CLI} bogus must exit 2 with a usage error, got {code}: {document}")
+    manifest_path = package / "build-info.json"
+    if manifest_path.is_file():
+        files = json.loads(manifest_path.read_text(encoding="utf-8")).get("files", {})
+        for name in [CLI, *("tools/astcenc/" + item for item in ASTCENC)]:
+            if name not in files:
+                raise ValueError(f"{name} is missing from the release inventory in build-info.json")
+
+
 def verify_manifest(stage):
     files = release_files(stage)
     actual = {p.relative_to(stage).as_posix(): sha256(p) for p in files if p.name != "build-info.json"}
@@ -188,7 +269,7 @@ def package_runtime(args):
     cache = (build / "CMakeCache.txt").read_text(encoding="utf-8")
     if f"IMGUI_TEMPLATE_OS_LAYER:STRING={args.os_layer}\n" not in cache:
         raise ValueError("Build OS layer does not match --os-layer; configure or select the matching build")
-    executable = build / "Release/GfxReconGui.exe"
+    executable = build / "Release/gfxrecon-gui.exe"
     require_x64(executable)
     sources = [Path(line) for line in (build / "runtime-redistributables.txt").read_text(encoding="utf-8").splitlines() if line.strip()]
     if not {"msvcp140.dll", "vcruntime140.dll"}.issubset({p.name.lower() for p in sources}):
@@ -215,6 +296,7 @@ def package_runtime(args):
             shutil.copy2(source, stage / source.name)
         tool_config = json.loads(args.tools_config.read_text(encoding="utf-8"))
         bundle_tools(stage, tool_config, sources)
+        bundle_cli(stage, build)
         (stage / "licenses/MSVC-RUNTIME-NOTICE.txt").write_text(
             "Microsoft Visual C++ runtime redistributables from the selected Visual Studio toolchain.\n"
             "Copyright Microsoft Corporation. Redistribution is subject to the Visual Studio license terms.\n"
@@ -222,7 +304,7 @@ def package_runtime(args):
             encoding="utf-8")
         (stage / "README.md").write_text(
             "# GFXReconstruct Inspector for Windows x64\n\n"
-            "Extract the complete folder to a writable location and run `GfxReconGui.exe`.\n"
+            "Extract the complete folder to a writable location and run `gfxrecon-gui.exe`.\n"
             "Windows 10/11 x64 and an OpenGL-capable graphics driver are required.\n"
             "The MSVC runtime is bundled. No Python, Visual Studio or FFmpeg installation is needed.\n\n"
             "Change themes with File > Settings > Theme. Open the command palette with Ctrl+P.\n"
@@ -291,13 +373,16 @@ def package_runtime(args):
         unpacked = extracted / NAME
         verify_manifest(unpacked)
         environment = dict(os.environ, PATH=str(Path(os.environ["SystemRoot"]) / "System32"))
-        result = subprocess.run([str(unpacked / "GfxReconGui.exe"), "--open", str(unpacked / "samples/windows-triangle.gfxr"), "--quit-when-ready"],
+        result = subprocess.run([str(unpacked / "gfxrecon-gui.exe"), "--open", str(unpacked / "samples/windows-triangle.gfxr"), "--quit-when-ready"],
                                 cwd=unpacked, env=environment, capture_output=True, text=True,
                                 encoding="utf-8", errors="replace", timeout=30)
         if result.returncode:
             raise ValueError(f"Extracted app smoke test failed ({result.returncode}):\n{result.stdout}\n{result.stderr}")
         if "Indexed " not in result.stdout:
             raise ValueError("Extracted app could not open its bundled capture with a clean PATH")
+        with tempfile.TemporaryDirectory(prefix="cli-smoke-", dir=temporary) as settings:
+            verify_cli(unpacked, settings)
+        print("Extracted ZIP: gfxrecon-cli describe/doctor/usage smoke test passed", flush=True)
         # Tests are staged only in the extracted verification copy, never shipped.
         shutil.copy2(build / "Release/gfxrecon_gui_tests.exe", unpacked / "gfxrecon_gui_tests.exe")
         shutil.copy2(build / "Release/gfxrecon_core_tests.exe", unpacked / "gfxrecon_core_tests.exe")

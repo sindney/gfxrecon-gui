@@ -1,17 +1,28 @@
 #include "gui/workspace.h"
 #include "gui/refresh_overlay.h"
 #include "core/log.h"
+#include "core/image_decode.h"
 
 #include <algorithm>
 #include <iomanip>
+#include <map>
+#include <mutex>
 #include <sstream>
 
 namespace gfx {
+namespace {
+// Raw ASTC artifacts whose decode failed (path -> reason), so the per-frame tab refresh does not retry forever.
+std::mutex g_decodeFailuresMutex;
+std::map<std::filesystem::path, std::string> g_decodeFailures;
+// Decoded PNGs live in a "decoded" subdirectory so resource scans of the dump directory do not list them.
+std::filesystem::path DecodedPngPath(const std::filesystem::path& raw) { return raw.parent_path() / "decoded" / (raw.filename().u8string() + ".png"); }
+}
 void Workspace::OpenResource(const ResourceArtifact& artifact, uint64_t offset,bool activate) {
     if (Busy() && !autoReplayRunning_) return;
     resourceOffset_ = offset;
     const auto file = artifact.file; const auto generation = selectionGeneration_;
-    if(file.extension()==".bmp"){
+    const bool astc=IsAstcArtifact(file,artifact.metadata);
+    if(file.extension()==".bmp"||astc){
         resourceMetadata_=artifact.metadata;
         auto found=std::find_if(imageTabs_.begin(),imageTabs_.end(),[&](const auto& tab){return tab.file==file&&tab.metadata==artifact.metadata;});
         if(found==imageTabs_.end()){
@@ -19,6 +30,29 @@ void Workspace::OpenResource(const ResourceArtifact& artifact, uint64_t offset,b
             imageTabs_.push_back(artifact);imageTab_=static_cast<int>(imageTabs_.size()-1);
         }else imageTab_=static_cast<int>(found-imageTabs_.begin());
         imageTabRequest_=true;imageView_=artifact.metadata.value("category","")=="input"?2:1;selectedDrawImage_=file;
+        if(astc){
+            const auto png=DecodedPngPath(file);std::error_code ec;
+            {std::lock_guard<std::mutex> lock(g_decodeFailuresMutex);const auto failed=g_decodeFailures.find(file);
+                if(failed!=g_decodeFailures.end()){resourceImage_.Release();status_=failed->second;return;}}
+            if(!(std::filesystem::is_regular_file(png,ec)&&std::filesystem::last_write_time(png,ec)>=std::filesystem::last_write_time(file,ec))){
+                const auto metadata=artifact.metadata;const auto tools=tools_;
+                Start("Decoding ASTC image",[file,png,metadata,tools,generation,this]{
+                    WorkspaceResult result;result.selectionGeneration=generation;
+                    const auto decoded=DecodeCompressedImage(file,metadata,png,tools,&cancel_);
+                    if(decoded.value("status",std::string{})=="ok"){result.resourceImage=png;result.message="Decoded ASTC image with "+decoded.value("decoded_by",std::string{});}
+                    else{
+                        const auto reason="ASTC image not decoded: "+decoded.value("reason",std::string{"unknown"});
+                        {std::lock_guard<std::mutex> lock(g_decodeFailuresMutex);g_decodeFailures[file]=reason;}
+                        result.message=reason;
+                    }
+                    return result;
+                },JobKind::Resource);
+                return;
+            }
+            try{resourceImage_.LoadPng(png);resourceMode_=1;if(activate){focusImage_=true;status_="Replay resource: "+png.u8string();}}
+            catch(const std::exception& error){resourceImage_.Release();status_=error.what();LOGE("resources")<<status_;}
+            return;
+        }
         try{resourceImage_.LoadBmp(file,artifact.metadata.value("aspect",std::string{}),artifact.metadata.value("format",std::string{}));resourceMode_=1;if(activate){focusImage_=true;status_="Replay resource: "+file.u8string();LOGI("resources")<<status_;}}
         catch(const std::exception& error){resourceImage_.Release();status_=error.what();LOGE("resources")<<status_;}
         return;

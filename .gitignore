@@ -28,6 +28,8 @@ gfxrecon_tools.json
 gfxrecon_preferences.json
 build-*/
 thirdparty/validation-binaries/
+# Locally provided third-party binaries (fetched/verified by CMake, never committed)
+astcenc-*-windows-x64/
 
 # Local agent configuration
 .claude/

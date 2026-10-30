@@ -21,7 +21,7 @@ def parser():
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("mode", nargs="?", choices=("release", "package"), default="release")
     result.add_argument("--build-dir", type=Path, default=ROOT / "build")
-    result.add_argument("--output-dir", type=Path, default=ROOT / "dist/GfxReconGui")
+    result.add_argument("--output-dir", type=Path, default=ROOT / "dist/gfxrecon-gui")
     result.add_argument("--os-layer", choices=("SDL3", "SFML"), default="SDL3")
     result.add_argument("--parallel", type=positive, default=min(os.cpu_count() or 1, 8))
     result.add_argument("--noninteractive", action="store_true", help="Accepted for scripted builds; no prompts are used")
@@ -46,7 +46,7 @@ def commands(args):
     return [
         configure,
         ["cmake", "--build", str(args.build_dir), "--config", "Release", "--parallel", str(args.parallel),
-         "--target", "gfxrecon_gui", "gfxrecon_gui_tests", "gfxrecon_core_tests"],
+         "--target", "gfxrecon_gui", "gfxrecon_cli", "gfxrecon_gui_tests", "gfxrecon_core_tests"],
         ["ctest", "--test-dir", str(args.build_dir), "-C", "Release", "--output-on-failure"],
     ]
 

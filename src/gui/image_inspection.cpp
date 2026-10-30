@@ -3,10 +3,12 @@
 #include <misc/cpp/imgui_stdlib.h>
 #include <tuple>
 #include "gui/refresh_overlay.h"
+#include "core/image_decode.h"
 #include <algorithm>
 
 namespace gfx {
 namespace {
+bool IsViewableImage(const ResourceArtifact& a){return a.file.extension()==".bmp"||IsAstcArtifact(a.file,a.metadata);}
 uint64_t Number(const Json& m,const char* key){const auto it=m.find(key);return it!=m.end()&&it->is_number()?it->get<uint64_t>():0;}
 std::string ImageBinding(const ResourceArtifact& asset){const auto& m=asset.metadata;
     if(m.value("category","")=="input")return m.value("stage",std::string("shader"))+" s"+std::to_string(Number(m,"set"))+" b"+std::to_string(Number(m,"binding"))+"["+std::to_string(Number(m,"arrayIndex"))+"]";
@@ -24,7 +26,7 @@ void Workspace::DrawBoundImages(const char* id,bool compact){
     for(const auto& category:{std::string("output"),std::string("input")}){
         ImGui::SeparatorText(category=="output"?"Render targets":"Textures");
         std::vector<const ResourceArtifact*> images;
-        for(const auto& image:resources_)if(image.file.extension()==".bmp"&&image.metadata.value("category","")==category)images.push_back(&image);
+        for(const auto& image:resources_)if(IsViewableImage(image)&&image.metadata.value("category","")==category)images.push_back(&image);
         auto number=[](const Json& object,const char* key){const auto value=object.find(key);return value!=object.end()&&value->is_number()?value->get<uint64_t>():0;};
         std::stable_sort(images.begin(),images.end(),[&](const auto* a,const auto* b){return std::make_tuple(a->metadata.value("stage",std::string{}),number(a->metadata,"set"),number(a->metadata,"binding"),number(a->metadata,"arrayIndex"),number(a->metadata,"location"),a->metadata.value("aspect",std::string{}))<std::make_tuple(b->metadata.value("stage",std::string{}),number(b->metadata,"set"),number(b->metadata,"binding"),number(b->metadata,"arrayIndex"),number(b->metadata,"location"),b->metadata.value("aspect",std::string{}));});
         if(images.empty()){ImGui::TextDisabled("None readable");continue;}
@@ -51,7 +53,7 @@ void Workspace::InvalidateDrawResources(){
 }
 void Workspace::DrawStageImages(const std::string& stage,bool outputs){
     std::vector<const ResourceArtifact*> images;
-    for(const auto& asset:resources_)if(asset.file.extension()==".bmp"&&asset.metadata.value("category","")== (outputs?"output":"input")&&(outputs||asset.metadata.value("stage","")==stage))images.push_back(&asset);
+    for(const auto& asset:resources_)if(IsViewableImage(asset)&&asset.metadata.value("category","")== (outputs?"output":"input")&&(outputs||asset.metadata.value("stage","")==stage))images.push_back(&asset);
     std::stable_sort(images.begin(),images.end(),[](const auto* a,const auto* b){return std::make_tuple(Number(a->metadata,"set"),Number(a->metadata,"binding"),Number(a->metadata,"arrayIndex"),Number(a->metadata,"location"))<std::make_tuple(Number(b->metadata,"set"),Number(b->metadata,"binding"),Number(b->metadata,"arrayIndex"),Number(b->metadata,"location"));});
     if(images.empty()){ImGui::TextDisabled("None bound / no readable images");return;}
     if(ImGui::BeginTable("stage-images",5,ImGuiTableFlags_RowBg|ImGuiTableFlags_Resizable|ImGuiTableFlags_BordersInnerV)){
@@ -123,7 +125,7 @@ void Workspace::DrawImages(){
         // Every selection initially opens color, independently of the previously viewed input slot.
         if(matches&&imageView_!=0&&imageTabs_.empty()&&!Refreshing("Image")){
             const ResourceArtifact* initial=nullptr;
-            for(const auto& asset:resources_)if(asset.file.extension()==".bmp"&&asset.metadata.value("category","")=="output"){
+            for(const auto& asset:resources_)if(IsViewableImage(asset)&&asset.metadata.value("category","")=="output"){
                 if(!initial)initial=&asset;
                 if(asset.metadata.value("aspect","")=="COLOR"){initial=&asset;break;}
             }
@@ -168,7 +170,7 @@ void Workspace::DrawImages(){
         else{
             int row=0;bool decoded=false,any=false;
             std::vector<const ResourceArtifact*> assets;
-            for(const auto& asset:resources_)if(asset.file.extension()==".bmp"&&asset.metadata.value("category","")== (imageSidebar_?"output":"input"))assets.push_back(&asset);
+            for(const auto& asset:resources_)if(IsViewableImage(asset)&&asset.metadata.value("category","")== (imageSidebar_?"output":"input"))assets.push_back(&asset);
             std::stable_sort(assets.begin(),assets.end(),[](const auto* a,const auto* b){return std::make_tuple(a->metadata.value("stage",std::string{}),Number(a->metadata,"set"),Number(a->metadata,"binding"),Number(a->metadata,"arrayIndex"),Number(a->metadata,"location"),a->metadata.value("aspect",std::string{}))<std::make_tuple(b->metadata.value("stage",std::string{}),Number(b->metadata,"set"),Number(b->metadata,"binding"),Number(b->metadata,"arrayIndex"),Number(b->metadata,"location"),b->metadata.value("aspect",std::string{}));});
             for(const auto* item:assets){const auto& asset=*item;
                 any=true;ImGui::PushID(row++);auto& thumbnail=assetThumbnails_[asset.file];

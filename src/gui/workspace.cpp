@@ -4,6 +4,10 @@
 #include "core/settings.h"
 #include "core/artifacts.h"
 #include "analysis/cache.h"
+#include "analysis/import.h"
+#include "core/tools.h"
+#include "shaders/decode.h"
+#include "platform/device_lock.h"
 #include "platform/process.h"
 #include "shaders/syntax.h"
 #include "shaders/interface.h"
@@ -12,7 +16,6 @@
 #include "gui/refresh_overlay.h"
 #include "platform/dialogs.h"
 #include <misc/cpp/imgui_stdlib.h>
-#include <spirv_glsl.hpp>
 #include <fstream>
 #include <sstream>
 #include <cstring>
@@ -29,95 +32,25 @@ void WriteText(const std::filesystem::path& file, const std::string& text) {
     std::ofstream out(file, std::ios::binary);
     if (!(out << text)) throw std::runtime_error("Cannot write " + file.u8string());
 }
-std::string Run(const std::string& exe, const std::vector<std::string>& args,
-                const std::atomic_bool* cancel) {
-    auto result = RunProcess({exe, args}, cancel);
-    if (!result.Success()) throw std::runtime_error(result.cancelled ? "Operation cancelled" :
-        result.timedOut ? "Tool timed out" : "Tool exited " + std::to_string(result.exitCode) + ":\n" + result.output);
-    return result.output;
-}
 std::filesystem::path NewSession(const std::filesystem::path& root) {
     const auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
     auto path = root / std::to_string(stamp);
     if (!std::filesystem::create_directories(path)) throw std::runtime_error("Could not create a unique session directory");
     return path;
 }
-std::string StageFlag(const std::string& s) {
-    if (s.find("VERTEX") != std::string::npos) return "vert";
-    if (s.find("COMPUTE") != std::string::npos) return "comp";
-    if (s.find("FRAGMENT") != std::string::npos) return "frag";
-    throw std::runtime_error("Shader compilation currently supports vertex, fragment, and compute stages");
-}
 std::string ShaderKey(const ShaderStage& stage){return std::to_string(stage.module)+"|"+stage.stage+"|"+stage.entry+"|"+stage.specialization.dump();}
-WorkspaceResult DecodeShader(const std::filesystem::path& path, const ShaderStage& stage,
+WorkspaceResult LoadShaderDocument(const std::filesystem::path& path, const ShaderStage& stage,
                              const std::map<std::string, std::string>& tools, const std::atomic_bool* cancel) {
-    const auto words = ReadSpirvBinary(path);
+    const auto decoded = gfx::DecodeShader(path, stage, tools, cancel);
     WorkspaceResult r;
     r.shader = true;
-    r.shaderInfo = stage;
+    r.shaderInfo = decoded.stage;
     r.shaderPath = path.u8string();
-    const auto debug = ReadShaderMetadata(words);
-    r.capturedSource = debug.capturedSource;
-    auto metadata = debug.debug;
-    metadata["binary_sha256"] = Sha256File(path, cancel);
-    metadata["module"] = stage.module; metadata["stage"] = stage.stage;
-    metadata["entry"] = stage.entry; metadata["specialization"] = stage.specialization;
-    r.shaderMetadata = metadata.dump(2);
-    try {
-        spirv_cross::CompilerGLSL compiler(words);
-        const auto entryPoints = compiler.get_entry_points_and_stages();
-        bool found = false;
-        for (const auto& entry : entryPoints) {
-            if (entry.name == stage.entry && (entryPoints.size() == 1 ||
-                (stage.stage.find("VERTEX") != std::string::npos && entry.execution_model == spv::ExecutionModelVertex) ||
-                (stage.stage.find("FRAGMENT") != std::string::npos && entry.execution_model == spv::ExecutionModelFragment) ||
-                (stage.stage.find("COMPUTE") != std::string::npos && entry.execution_model == spv::ExecutionModelGLCompute))) {
-                compiler.set_entry_point(entry.name, entry.execution_model);
-                if (entry.execution_model == spv::ExecutionModelVertex) r.shaderInfo.stage = "VK_SHADER_STAGE_VERTEX_BIT";
-                if (entry.execution_model == spv::ExecutionModelFragment) r.shaderInfo.stage = "VK_SHADER_STAGE_FRAGMENT_BIT";
-                if (entry.execution_model == spv::ExecutionModelGLCompute) r.shaderInfo.stage = "VK_SHADER_STAGE_COMPUTE_BIT";
-                found = true; break;
-            }
-        }
-        if (!found) throw std::runtime_error("Captured entry point not found in binary");
-        auto options = compiler.get_common_options();
-        options.version = 450;
-        options.vulkan_semantics = true;
-        options.separate_shader_objects = true;
-        compiler.set_common_options(options);
-        const auto resources = compiler.get_shader_resources();
-        std::ostringstream metadata;
-        metadata << "SPIR-V " << ((words[1] >> 16) & 255) << '.' << ((words[1] >> 8) & 255) << '\n';
-        auto describe = [&](const auto& list, const char* type) {
-            for (const auto& resource : list) {
-                metadata << type << " " << resource.name;
-                if (compiler.has_decoration(resource.id, spv::DecorationDescriptorSet))
-                    metadata << "  set=" << compiler.get_decoration(resource.id, spv::DecorationDescriptorSet);
-                if (compiler.has_decoration(resource.id, spv::DecorationBinding))
-                    metadata << "  binding=" << compiler.get_decoration(resource.id, spv::DecorationBinding);
-                if (compiler.has_decoration(resource.id, spv::DecorationLocation))
-                    metadata << "  location=" << compiler.get_decoration(resource.id, spv::DecorationLocation);
-                metadata << '\n';
-            }
-        };
-        describe(resources.uniform_buffers, "Uniform buffer");
-        describe(resources.storage_buffers, "Storage buffer");
-        describe(resources.sampled_images, "Sampled image");
-        describe(resources.separate_images, "Image");
-        describe(resources.separate_samplers, "Sampler");
-        describe(resources.push_constant_buffers, "Push constants");
-        describe(resources.stage_inputs, "Input");
-        describe(resources.stage_outputs, "Output");
-        r.reflection = metadata.str();
-        r.text = compiler.compile();
-    } catch (const std::exception& e) {
-        r.reflection += std::string("GLSL reconstruction unavailable: ") + e.what();
-    }
-    auto it = tools.find("disassembler");
-    if (it != tools.end() && !it->second.empty()) {
-        try { r.assembly = Run(it->second, {path.u8string()}, cancel); }
-        catch (const std::exception& e) { r.reflection += std::string("\nAssembly unavailable: ") + e.what(); }
-    }
+    r.capturedSource = decoded.capturedSource;
+    r.shaderMetadata = decoded.metadata.dump(2);
+    r.reflection = decoded.reflection;
+    r.text = decoded.glsl;
+    r.assembly = decoded.assembly;
     r.message = "Shader loaded. GLSL is reconstructed. " + std::string(r.capturedSource.empty() ?
         "No embedded source was recorded; debug metadata remains inspectable." : "Embedded source is available under Captured source.");
     return r;
@@ -125,65 +58,16 @@ WorkspaceResult DecodeShader(const std::filesystem::path& path, const ShaderStag
 } // namespace
 WorkspaceResult Workspace::ImportCapture(const std::filesystem::path& file, const std::filesystem::path& session,
                                const std::map<std::string, std::string>& tools, const std::atomic_bool* cancel) {
+    const auto imported = gfx::ImportCapture(file, session.parent_path() / "cache", tools, cancel);
     WorkspaceResult result;
-    std::string identity = "jsonl";
-    if (file.extension() == ".gfxr") {
-        if (tools.at("convert").empty()) throw std::runtime_error("Configure gfxrecon-convert in View > Tools and devices to open .gfxr files.");
-        identity = Sha256File(std::filesystem::u8path(FindExecutablePath(tools.at("convert"))), cancel).substr(0, 16);
-        identity += "-" + (std::filesystem::is_regular_file(std::filesystem::u8path(tools.at("extract"))) ?
-            Sha256File(std::filesystem::u8path(tools.at("extract")), cancel).substr(0, 16) : std::string("noextract"));
-    }
-    const auto cached = OpenCachedCapture(file, session.parent_path() / "cache", identity, [&](const std::filesystem::path& staging) {
-        const auto jsonl = staging / "capture.jsonl";
-        if (file.extension() == ".gfxr") {
-            Run(tools.at("convert"), {"--format", "jsonl", "--output", jsonl.u8string(), file.u8string()}, cancel);
-            if (!tools.at("extract").empty()) {
-                try { Run(tools.at("extract"), {"--dir", (staging / "shaders").u8string(), file.u8string()}, cancel); }
-                catch (const std::exception& e) { result.message = std::string("Shader extraction failed: ") + e.what() + "\n"; }
-            }
-        } else std::filesystem::copy_file(file, jsonl);
-        return ReadCapture(jsonl, cancel);
-    }, cancel);
-    result.session = cached.directory; result.capture = cached.capture;
-    result.capture->fingerprint = cached.fingerprint;
-    result.message += cached.hit ? "Loaded cached index: " : "Indexed ";
-    result.message += std::to_string(result.capture->events.size()) + " recorded calls across " + std::to_string(result.capture->frames) + " frames.";
+    result.session = imported.directory; result.capture = imported.capture; result.message = imported.message;
     return result;
 }
 void Workspace::Init(const std::filesystem::path& dir) {
     settingsDir_ = dir;
     sessionsDir_ = dir / "sessions";
-    const std::pair<const char*, const char*> defaults[] = {
-        {"convert", "gfxrecon-convert"}, {"info", "gfxrecon-info"}, {"extract", "gfxrecon-extract"}, {"optimize", "gfxrecon-optimize"},
-        {"replay", "gfxrecon-replay"}, {"adb", "adb"}, {"compiler", "glslangValidator"},
-        {"disassembler", "spirv-dis"}, {"assembler", "spirv-as"}, {"validator", "spirv-val"}};
-    const auto bundled = std::filesystem::u8path(tpl::ExeDirectory()) / "tools";
-    const bool hasBundle = std::filesystem::is_regular_file(bundled / "gfxrecon-convert.exe");
-    for (auto [key, executable] : defaults) {
-        const auto file = bundled / (std::string(executable) + ".exe");
-        tools_[key] = std::filesystem::is_regular_file(file) ? file.u8string() : FindExecutablePath(executable);
-    }
-    tools_["layer"] = hasBundle ? (bundled / "layer").u8string() : "";
-    tools_["validation_layer"]=hasBundle?(bundled/"validation").u8string():"";
-    tools_["replay_apk"] = hasBundle ? (bundled / "android/replay-debug.apk").u8string() : "";
-    tools_["test_apk"] = hasBundle ? (bundled / "android/test_launcher-debug.apk").u8string() : "";
-    auto localConfig = std::filesystem::current_path() / "local-tools.json";
-    if (!std::filesystem::is_regular_file(localConfig)) {
-        auto parent = dir;
-        for (int i = 0; i < 5; ++i) {
-            if (std::filesystem::is_regular_file(parent / "local-tools.json")) { localConfig = parent / "local-tools.json"; break; }
-            parent = parent.parent_path();
-        }
-    }
-    for (auto file : {localConfig, dir / "gfxrecon_tools.json"}) {
-        if (hasBundle && file == localConfig) continue;
-        if (!std::filesystem::is_regular_file(file)) continue;
-        try {
-            const auto config = Json::parse(ReadText(file));
-            for (auto it = config.begin(); it != config.end(); ++it)
-                if (tools_.count(it.key()) && it.value().is_string()) tools_[it.key()] = it.value().get<std::string>();
-        } catch (const std::exception& e) { LOGW("tools") << e.what(); }
-    }
+    tools_ = ResolveTools(dir, std::filesystem::u8path(tpl::ExeDirectory()));
+    ConfigureDeviceLocks(dir / "locks");
     RefreshToolAvailability();
     const auto preferences = dir / "gfxrecon_preferences.json";
     if (std::filesystem::is_regular_file(preferences)) {
@@ -395,7 +279,10 @@ void Workspace::Poll() {
             }
         }
         if (!result.candidate.empty()) { candidate_ = result.candidate; candidateText_ = result.candidateText; }
-        if (!result.resourceImage.empty()) { resourceImage_.LoadBmp(result.resourceImage); resourceMode_ = 1; focusImage_ = true; }
+        if (!result.resourceImage.empty()) {
+            try { if (result.resourceImage.extension() == ".png") resourceImage_.LoadPng(result.resourceImage); else resourceImage_.LoadBmp(result.resourceImage); resourceMode_ = 1; focusImage_ = true; }
+            catch (const std::exception& error) { resourceImage_.Release(); status_ = error.what(); LOGE("resources") << status_; }
+        }
         if (result.mesh) {
             try {
                 mesh_.SetData(std::move(result.mesh)); meshGeneration_ = selectionGeneration_;
@@ -419,6 +306,12 @@ void Workspace::Poll() {
         blockedReplay_=std::move(blocked);openReplayUnlock_=true;previewPaused_=true;jobFailed_=true;status_=e.what();
         if(validationReport_.is_object()&&validationReport_.value("status",std::string{})=="running")validationReport_={{"status","unavailable"},{"enabled",false},{"message",status_}};
         CompleteOperation(PanelState::Failed,status_);LOGE("replay")<<status_;loggedStatus_=status_;
+    } catch (const DeviceBusy& e) {
+        // Another GUI/CLI process holds this phone; nothing on the device was touched.
+        jobFailed_ = true; status_ = e.what(); captureError_ = status_;
+        CompleteOperation(PanelState::Failed, status_);
+        if (captureInProgress_) { captureInProgress_ = false; captureStep_ = 2; }
+        LOGW("jobs") << status_; loggedStatus_ = status_;
     } catch (const std::exception& e) {
         jobFailed_ = !cancel_;
         status_ = e.what(); captureError_ = status_;
@@ -451,7 +344,7 @@ void Workspace::Open(const std::string& path) {
             r = ImportCapture(file, r.session, tools, &cancel_);
         } else if (ext == ".spv") {
             ShaderStage stage{0, "VK_SHADER_STAGE_FRAGMENT_BIT", "main"};
-            r = DecodeShader(file, stage, tools, &cancel_);
+            r = LoadShaderDocument(file, stage, tools, &cancel_);
         } else if (ext == ".glsl" || ext == ".vert" || ext == ".frag" || ext == ".comp" || ext == ".spvasm") {
             r.shader = true;
             r.shaderInfo = {0, ext == ".vert" ? "VK_SHADER_STAGE_VERTEX_BIT" :
@@ -509,31 +402,13 @@ void Workspace::ProbeTools() {
     const auto tools = tools_;
     Start("Checking configured tools", [this, tools] {
         WorkspaceResult r;
-        for (const auto& [name, path] : tools) {
-            if (cancel_) break;
-            if (name == "layer" || name == "validation_layer" || name == "replay_apk" || name == "test_apk") {
-                r.toolReady[name] = std::filesystem::is_regular_file(std::filesystem::u8path(path) / (name == "layer" ? "VkLayer_gfxreconstruct.json" : ""));
-                if(name=="validation_layer")r.toolReady[name]=std::filesystem::is_regular_file(std::filesystem::u8path(path)/"VkLayer_khronos_validation.json");
-                else if (name != "layer") r.toolReady[name] = std::filesystem::is_regular_file(std::filesystem::u8path(path));
-                r.versions[name] = r.toolReady[name] ? "File present; compatibility is verified during setup" : "File missing"; continue;
-            }
-            r.toolReady[name] = false;
-            if (path.empty()) { r.versions[name] = "Not configured"; continue; }
-            try { r.versions[name] = Run(path, {name == "adb" ? "version" : "--version"}, &cancel_); r.toolReady[name] = true; }
-            catch (const std::exception& e) { r.versions[name] = e.what(); }
-        }
+        r.versions = ProbeToolVersions(tools, r.toolReady, &cancel_);
         r.message = "Tool checks complete. Offline navigation does not require replay.";
         return r;
     });
 }
 void Workspace::RefreshToolAvailability() {
-    toolReady_.clear();
-    for (const auto& [name, path] : tools_) {
-        const auto file = std::filesystem::u8path(path);
-        if(name=="validation_layer"){toolReady_[name]=std::filesystem::is_regular_file(file/"VkLayer_khronos_validation.json");continue;}
-        toolReady_[name] = !path.empty() && (name == "layer" ? std::filesystem::is_regular_file(file / "VkLayer_gfxreconstruct.json") :
-            name == "replay_apk" || name == "test_apk" ? std::filesystem::is_regular_file(file) : !FindExecutablePath(path).empty());
-    }
+    toolReady_ = ToolAvailability(tools_);
 }
 bool Workspace::ToolAvailable(const std::string& name) const {
     const auto found = toolReady_.find(name); return found != toolReady_.end() && found->second;
@@ -573,7 +448,7 @@ void Workspace::LoadShader(const ShaderStage& stage) {
     const auto generation = selectionGeneration_;
     const auto limitation = capture_ ? capture_->ModuleEditLimitation(stage.module) : "";
     Start("Reconstructing shader", [this, path, stage, tools, generation, limitation] {
-        auto r = DecodeShader(path, stage, tools, &cancel_); r.selectionGeneration = generation; r.shaderEditLimitation = limitation; return r;
+        auto r = LoadShaderDocument(path, stage, tools, &cancel_); r.selectionGeneration = generation; r.shaderEditLimitation = limitation; return r;
     }, JobKind::Shader);
 }
 void Workspace::CompileShader() {
@@ -596,12 +471,7 @@ void Workspace::CompileShader() {
         const auto source = revision / (assembly ? "shader.spvasm" : "shader.glsl");
         const auto binary = revision / ("sh" + std::to_string(shader.module));
         WriteText(source, text);
-        if (assembly) Run(tools.at("assembler"), {"--target-env", "vulkan1.1", source.u8string(), "-o", binary.u8string()}, &cancel_);
-        else {
-            const auto stage = shader.stage.empty() ? "frag" : StageFlag(shader.stage);
-            Run(tools.at("compiler"), {"-V", "--target-env", "vulkan1.1", "-S", stage, "--source-entrypoint", "main", "-e", shader.entry.empty()?"main":shader.entry, source.u8string(), "-o", binary.u8string()}, &cancel_);
-        }
-        Run(tools.at("validator"), {"--target-env", "vulkan1.1", binary.u8string()}, &cancel_);
+        gfx::CompileShader(source, shader, binary, tools, &cancel_);
         if (shader.module) CheckShaderInterface(original, binary, shader.entry);
         r.candidate = binary; r.candidateText = text;
         r.message = "Candidate compiled and validated: " + binary.u8string();
@@ -679,7 +549,7 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
                     const auto existing=documents.find(ShaderKey(stage));
                     if(existing!=documents.end())r.stageDocuments.push_back(existing->second);
                     else{
-                        auto document=std::make_shared<WorkspaceResult>(DecodeShader(shaderDirectory/("sh"+std::to_string(stage.module)),stage,tools,&cancel_));
+                        auto document=std::make_shared<WorkspaceResult>(LoadShaderDocument(shaderDirectory/("sh"+std::to_string(stage.module)),stage,tools,&cancel_));
                         document->shaderEditLimitation=capture->ModuleEditLimitation(stage.module);r.stageDocuments.push_back(std::move(document));
                     }
                 }catch(const std::exception& error){if(cancel_.load())throw;shaderErrors+=stage.stage+": "+error.what()+"\n";}
