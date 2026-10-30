@@ -51,6 +51,9 @@ or reuse public Vulkan fixtures for focused checks. Tests run the real GUI throu
 ImGui Test Engine; ImGui errors and ID conflicts fail acceptance. Generated
 captures/evidence stay under ignored `.sessions/` and build directories.
 
+`verify_android_readback.py --help` describes an opt-in check that full Android
+draw inspection retrieves all referenced vertex/index/uniform buffer files.
+
 ## Package
 
 ```powershell

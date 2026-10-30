@@ -409,7 +409,8 @@ ReplayResult RunAndroid(const ReplayRequest& r, const ReplayTarget& target, cons
                 throw std::runtime_error("Replay returned an unexpected artifact path");
             const auto basename = std::filesystem::path(file).filename();
             const auto extension = basename.extension().u8string();
-            if (extension == ".bmp" || extension == ".png" || (extension == ".bin"&&!r.descriptorImages) || (extension == ".json" && basename != "dump-request.json")){
+            // Full inspection requests descriptor images and the vertex/index/uniform bytes together.
+            if (extension == ".bmp" || extension == ".png" || (extension == ".bin"&&(!r.descriptorImages||r.drawInspection)) || (extension == ".json" && basename != "dump-request.json")){
                 adb.Get(kPackage, file, r.output / basename);
                 if(r.progress&&++received%8==0)r.progress("Received "+std::to_string(received)+" replay artifacts");
             }
@@ -550,6 +551,7 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
     identity["frame"] = r.frame; identity["dump"] = r.dump; identity["outputs_only"] = r.outputsOnly; identity["prefix"] = r.prefix;
     identity["descriptor_images"]=r.descriptorImages;identity["validation"]=r.validation;
     identity["draw_inspection"]=r.drawInspection;
+    if(r.drawInspection)identity["input_readback_protocol"]=2; // Exclude older image-only partial caches.
     identity["visualization"]=VisualizationConfig(r);
     identity["screen_off"]=r.screenOff;
     if(r.measurement.enabled)identity["measurement"]={{"frame_range",r.measurement.frameRange},{"quit_after",r.measurement.quitAfter}};
