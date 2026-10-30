@@ -22,5 +22,5 @@
 ## 5. Delivery
 
 - [x] 5.1 Update discoverable CLI help and compact public-sample documentation.
-- [ ] 5.2 Run core/GUI tests, strict OpenSpec validation and staged package checks.
-- [ ] 5.3 Commit locally and publish verified shipped files while preserving sessions/settings.
+- [x] 5.2 Run core/GUI tests, strict OpenSpec validation and staged package checks.
+- [x] 5.3 Commit locally and publish verified shipped files while preserving sessions/settings.
