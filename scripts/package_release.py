@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 NAME = "gfxrecon-gui"
 ARCHIVE = NAME + "-windows-x64.zip"
 CLI = "gfxrecon-cli.exe"
+PUBLIC_DOCS = ("docs/GUI.md", "docs/CLI.md", "docs/BUILD.md")
 # astcenc ships as two CPU variants; the core picks AVX2 when supported, else SSE2 (design D9).
 ASTCENC = ("astcenc-avx2.exe", "astcenc-sse2.exe")
 ASTCENC_LICENSE = "licenses/astc-encoder.txt"
@@ -75,7 +76,7 @@ def require_x64(path):
 def release_files(stage):
     required = {"gfxrecon-gui.exe", CLI, "README.md", "LICENSE", "build-info.json",
                 "msvcp140.dll", "vcruntime140.dll", "licenses/MSVC-RUNTIME-NOTICE.txt", ASTCENC_LICENSE,
-                *("tools/astcenc/" + name for name in ASTCENC)}
+                *("tools/astcenc/" + name for name in ASTCENC), *PUBLIC_DOCS}
     files = []
     for path in sorted(stage.rglob("*")):
         relative = path.relative_to(stage)
@@ -196,6 +197,10 @@ def verify_cli(package, settings_dir):
     package, settings_dir = Path(package).resolve(), Path(settings_dir).resolve()
     environment = dict(os.environ, PATH=str(Path(os.environ["SystemRoot"]) / "System32"))
     cwd = settings_dir  # not the package directory: nothing may depend on the working directory
+    help_result = subprocess.run([str(package / CLI), "--help"], cwd=cwd, env=environment,
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+    if help_result.returncode or "Usage:" not in help_result.stdout or "indexed-cube.gfxr" not in help_result.stdout:
+        raise ValueError(f"{CLI} --help failed: {help_result.stdout}\n{help_result.stderr}")
     code, document = run_cli(package, ["describe"], cwd, environment)
     if code or document.get("ok") is not True:
         raise ValueError(f"{CLI} describe failed ({code}): {document}")
@@ -302,61 +307,8 @@ def package_runtime(args):
             "Copyright Microsoft Corporation. Redistribution is subject to the Visual Studio license terms.\n"
             "Windows system DLLs and the Universal CRT are supplied by supported Windows 10/11 installations.\n",
             encoding="utf-8")
-        (stage / "README.md").write_text(
-            "# GFXReconstruct Inspector for Windows x64\n\n"
-            "Extract the complete folder to a writable location and run `gfxrecon-gui.exe`.\n"
-            "Windows 10/11 x64 and an OpenGL-capable graphics driver are required.\n"
-            "The MSVC runtime is bundled. No Python, Visual Studio or FFmpeg installation is needed.\n\n"
-            "Change themes with File > Settings > Theme. Open the command palette with Ctrl+P.\n"
-            "Programmer is the default theme; settings and docking layout are saved next to the executable.\n"
-            "File > Samples opens bundled three-frame triangle captures.\n"
-            "File > Samples > Indexed cube (mesh) is the mesh-preview sample: select a draw, then Mesh.\n"
-            "Mesh supports local input and post-VS screen space, solid/wireframe/points and vertex tables.\n"
-            "Orbit with left drag, pan with middle drag, zoom with the wheel, or Fit.\n"
-            "Post-VS is evaluated locally from supported captured shaders/readbacks; unsupported state is explained.\n"
-            "File > Capture application opens the procedural Windows/Android capture dialog.\n"
-            "Choose On demand: N frames or On demand: start-stop, then Launch armed and play.\n"
-            "Trigger repeated captures from the popup. Stop capture and End session keep the game running.\n"
-            "Completed captures: Save keeps the default location; Save As chooses a folder and filename, retaining the session copy.\n"
-            "Existing traces also support File > Save capture / Save capture as. Shader edits are exported separately.\n"
-            "Close launched game is separate. Automatic replay is deferred during live sessions.\n"
-            "For a long-running Windows sample, launch tools/gfxrecon-gui-live.exe with working directory samples/test-res.\n"
-            "For Android, select your authorized, unlocked phone, install the bundled replay APK and test sample,\n"
-            "then choose a debuggable Vulkan app and capture timing. Settings are journaled and restored.\n"
-            "Only the initially selected frame auto-renders. Other tiles remain idle until clicked.\n"
-            "Draw clicks request color outputs; newer selections supersede old automatic work.\n"
-            "Shader/resource inspection can interrupt previews. Verified outputs are cached.\n"
-            "gfxrecon-optimize prepares a cached replay copy by default; original inspection/capture bytes are preserved.\n"
-            "Right-click Frames and disable Optimize replay copy to replay the original.\n"
-            "Frames: select a preview to render it; right-click for render/dump/revert.\n"
-            "Automatic uses a phone for Android captures and local replay for Windows captures.\n"
-            "Select a pipeline stage, then View shader. Edit, Compile and Apply; Reset shader restores the captured module and replays automatically.\n"
-            "Undo/Redo are text-history toolbar actions (Ctrl/Cmd+Z/Y); disabled actions are grey and shortcut tooltips explain their scope.\n"
-            "Settings opens as a centered, non-dockable dialog.\n"
-            "Image supports wheel zoom, inline Fit/scale, RGB channels and sRGB/linearized display.\n"
-            "Image has open-image tabs and a right-side Inputs/Outputs thumbnail list; new draws default to color output.\n"
-             "Image visualization offers Original, Solid coverage, Wireframe and geometry Depth pass/fail.\n"
-             "Indirect triangles sample: choose All or an individual GPU argument record; earlier draws remain context.\n"
-             "Wireframe requires fillModeNonSolid. Depth colors are green pass/red fail against pre-draw/batch depth; discard/stencil are not emulated.\n"
-             "Draw clicks fetch shaders, mesh, textures, render targets and all diagnostic modes together; mode switching uses local results.\n"
-             "UV density shows a checkerboard from captured UVs; Orange outline highlights only draw boundaries over original color.\n"
-             "Image identity, format, mip and slice are in the bottom image status row.\n"
-             "Indirect Mesh defaults to All drawable meshes and supports local per-record selection.\n"
-            "The selected event's right-hand dot shows fetch status. Pipeline links open image/buffer inspectors and sampler properties.\n"
-            "Image left/right rotation and flips affect display only. Range has draggable black/white points, Auto and Reset.\n"
-            "Depth readback preserves full-precision D16/D24/D32 values; range adjustments retain original pixel values.\n"
-            "Frame context > Vulkan validation runs original calls fresh; Resources > Validation shows enabled state, VUIDs and messages.\n"
-             "Frames is the active footer tab at startup and layout reset; manual Console selection is respected.\n"
-             "Frames shares the Console dock. Right-click for Replay target; there is no target/count toolbar.\n"
-             "After unlocking Android, Retry replay follows the replay completion log; resource-transfer phases appear in Console.\n"
-            "Dots appear only on Frames, frame tiles and draw events: yellow running, green success, red failed, grey inactive/cancelled.\n"
-            "Refreshing inspectors have dimmed blocking overlays; Events and Console remain usable. Cancel from File, palette or frame menu.\n"
-            "Locked Android replay shows an unlock/retry notice; only confirmed unsecured locks get automatic wake/dismissal.\n"
-            "Frame context > Phone screen off while replaying uses supported physical display controls and restores owned state.\n"
-            "Tools and devices > Restore phone display recovers an interrupted display journal after reconnection.\n"
-            "Source-level shader stepping is not available in this version.\n\n"
-            "See LICENSE and licenses/ for component license texts. build-info.json records the build and file hashes.\n",
-            encoding="utf-8")
+        shutil.copy2(ROOT / "README.md", stage / "README.md")
+        shutil.copytree(ROOT / "docs", stage / "docs")
         commit = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=ROOT, capture_output=True, text=True)
         manifest = dict(schema_version=1, version=(build / "distribution-version.txt").read_text().strip(),
                         source_commit=commit.stdout.strip() if commit.returncode == 0 else "uncommitted",

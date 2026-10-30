@@ -81,6 +81,7 @@ class ReleasePackageTests(unittest.TestCase):
 
     def make_release(self, root):
         names = ["gfxrecon-gui.exe", "gfxrecon-cli.exe", "README.md", "LICENSE", "msvcp140.dll",
+                 "docs/GUI.md", "docs/CLI.md", "docs/BUILD.md",
                  "vcruntime140.dll", "licenses/MSVC-RUNTIME-NOTICE.txt", "licenses/astc-encoder.txt",
                  "tools/astcenc/astcenc-avx2.exe", "tools/astcenc/astcenc-sse2.exe"]
         for name in names:

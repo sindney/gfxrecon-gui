@@ -391,7 +391,7 @@ Json Dump(Context& context, const Args& args) {
 }
 } // namespace
 void RegisterDumpCommands() {
-    Register({"dump", "", "Write the structured dump tree (schema gfxrecon-dump/1): static capture data per frame/pass/draw plus shared pipelines, shaders and objects", {},
+    Register({"dump", "", "Decode a capture into frames, passes, draws, pipelines, shaders and objects", {},
         {{"capture", "FILE", "Capture (.gfxr or converted .jsonl)", false, true},
          {"out", "DIR", "Output directory (created; an existing complete dump with matching provenance is reused)", false, true},
          {"frames", "LIST", "Frames to dump: 1,3-4 or all", false, false, "all"},
@@ -399,8 +399,7 @@ void RegisterDumpCommands() {
          {"batch-draws", "N", "Draws per batched replay (default 64; bounded by device memory)"},
          {"max-bytes", "N", "Stop scheduling dynamic batches after roughly N bytes of dynamic data (remaining draws are skipped)"},
          {"dynamic", "none|frame|pass|draws|full",
-          "Replay-derived artifacts. Omitted = none (no replay). Bare --dynamic = pass: frame image + every pass's outputs + full post-process pass detail (~10 s per game frame). "
-          "draws = all draws, outputs only (may be slow and produce large outputs). full = per-draw inputs/vertex data, requires a --draws filter (use 'replay draw --full' for single draws)",
+          "Omitted: static only. Bare --dynamic: pass outputs. draws: per-draw outputs (potentially slow/large). full: inputs and geometry; requires --draws. Use replay draw --full for one draw.",
           false, false, "", "pass"},
          {"overwrite", "", "Replace an existing dump with different provenance instead of refusing (provenance_mismatch)"}},
         Dump});

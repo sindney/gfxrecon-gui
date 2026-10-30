@@ -8,6 +8,8 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <iomanip>
+#include <algorithm>
 
 namespace gfx::cli {
 uint64_t Args::Number(const std::string& name, uint64_t fallback) const {
@@ -60,7 +62,7 @@ std::vector<Command>& Commands() { static std::vector<Command> commands; return 
 void Register(Command command) { Commands().push_back(std::move(command)); }
 const std::vector<Option>& GlobalOptions() {
     static const std::vector<Option> options{
-        {"settings-dir", "DIR", "Settings, sessions and caches root (default: executable directory, shared with GfxReconGui)"},
+        {"settings-dir", "DIR", "Settings, sessions and caches root (default: executable directory, shared with gfxrecon-gui)"},
         {"tools", "FILE", "Extra tool configuration JSON merged after gfxrecon_tools.json"},
         {"serial", "SERIAL", "Android device serial"},
         {"target", "auto|local|android", "Replay target", false, false, "auto"},
@@ -161,14 +163,72 @@ Json Describe() {
     for (const auto& c : Commands())
         commands.push_back({{"name", c.Name()}, {"summary", c.summary}, {"arguments", c.positional}, {"options", options(c.options)}});
     return {{"schema", kCliSchema}, {"dump_schema", kDumpSchema}, {"usage", "gfxrecon-cli <command> [<verb>] [arguments] [--options]"},
-        {"output", "stdout: exactly one JSON document {ok, command, result | error{code,message,detail}}; stderr: progress and logs"},
+        {"output", "Commands: stdout is one JSON document {ok, command, result | error{code,message,detail}}; stderr: progress and logs. Help is plain text."},
+        {"help", "gfxrecon-cli help [command [verb]], --help or -h"},
         {"global_options", options(GlobalOptions())}, {"commands", commands},
         {"exit_codes", {{"0", "success"}, {"1", "operation failed"}, {"2", "usage error"}, {"3", "human action required (unlock/authorize device, restore conflict)"},
                         {"4", "missing tool or capability"}, {"5", "timeout or cancelled"}}}};
 }
+namespace {
+void HelpOptions(std::ostream& out,const std::vector<Option>& options){
+    for(const auto& option:options){
+        const auto label="--"+option.name+(option.value.empty()?"":" "+option.value);
+        out<<"  "<<std::left<<std::setw(30)<<label<<"  "<<option.help;
+        if(option.required)out<<" (required)";
+        if(!option.defaultValue.empty())out<<" [default: "<<option.defaultValue<<"]";
+        if(option.repeatable)out<<" [repeatable]";
+        out<<'\n';
+    }
+}
+void Help(const std::vector<std::string>& argv,std::ostream& out){
+    std::vector<std::string> topic;
+    for(size_t i=0;i<argv.size();++i){
+        const auto& word=argv[i];
+        if(word=="help"||word=="--help"||word=="-h")continue;
+        if(word.rfind("--",0)==0){
+            const auto key=word.substr(2,word.find('=')==std::string::npos?std::string::npos:word.find('=')-2);
+            const Option* option=FindOption(GlobalOptions(),key);
+            if(!option)for(const auto& command:Commands())if((option=FindOption(command.options,key)))break;
+            if(option&&!option->value.empty()&&word.find('=')==std::string::npos&&i+1<argv.size()&&argv[i+1].rfind("--",0)!=0)++i;
+            continue;
+        }
+        topic.push_back(word);
+    }
+    out<<"GFXReconstruct Inspector CLI\n\n";
+    if(topic.empty()){
+        out<<"Usage: gfxrecon-cli <command> [<verb>] [arguments] [options]\n\nCommands:\n";
+        for(const auto& command:Commands())out<<"  "<<std::left<<std::setw(24)<<command.Name()<<command.summary<<'\n';
+    }else{
+        const Command* selected=nullptr;bool group=false;
+        for(const auto& command:Commands())if(command.group==topic[0]){
+            group=true;
+            if(command.verb.empty()||(topic.size()>1&&command.verb==topic[1]))selected=&command;
+        }
+        if(!group)throw Usage("Unknown help topic '"+topic[0]+"'");
+        if(selected){
+            out<<"Usage: gfxrecon-cli "<<selected->Name();
+            for(const auto& argument:selected->positional)out<<' '<<argument;
+            out<<" [options]\n\n"<<selected->summary<<"\n\nOptions:\n";HelpOptions(out,selected->options);
+        }else{
+            if(topic.size()>1)throw Usage("Unknown help topic '"+topic[0]+" "+topic[1]+"'");
+            out<<"Usage: gfxrecon-cli "<<topic[0]<<" <verb> [options]\n\n";
+            for(const auto& command:Commands())if(command.group==topic[0])out<<"  "<<std::left<<std::setw(24)<<command.Name()<<command.summary<<'\n';
+        }
+    }
+    out<<"\nGlobal options:\n";HelpOptions(out,GlobalOptions());
+    out<<"\nTry the indexed cube:\n"
+       <<"  gfxrecon-cli dump --capture samples/indexed-cube.gfxr --out decoded\n"
+       <<"  gfxrecon-cli events --capture samples/indexed-cube.gfxr --draws-only\n"
+       <<"  gfxrecon-cli replay draw --capture samples/indexed-cube.gfxr --execution 0 --full\n"
+       <<"\nWorkflow: dump static data, narrow passes/draws with replay, then inspect shaders and readbacks.\n"
+       <<"Use 'gfxrecon-cli <command> --help' for command details.\n"
+       <<"Commands return JSON; 'describe' provides the machine-readable command schema.\n"
+       <<"Exit codes: 0 success, 1 failed, 2 usage, 3 device action, 4 missing tool, 5 cancelled/timeout.\n";
+}
+}
 std::pair<int, Json> ErrorJson(const std::exception_ptr& error) {
     try { std::rethrow_exception(error); }
-    catch (const CliError& e) { Json j{{"code", e.code}, {"message", e.what()}}; if (!e.detail.is_null()) j["detail"] = e.detail; return {e.exit, j}; }
+    catch (const CliError& e) { Json j{{"code", e.code}, {"message", e.what()}}; if (!e.detail.is_null()) j["detail"] = e.detail; if(e.exit==kUsage)j["hint"]="Run gfxrecon-cli --help or gfxrecon-cli <command> --help.";return {e.exit, j}; }
     catch (const AndroidUnlockRequired& e) {
         return {kHumanAction, {{"code", "unlock_device"}, {"message", e.what()},
             {"detail", {{"human_action", "unlock_device"}, {"serial", e.state.serial}, {"secure", e.state.secure}, {"locked", e.state.locked}}}}};
@@ -196,6 +256,9 @@ int Main(const std::vector<std::string>& argv, std::ostream& out, std::atomic_bo
         out << document.dump(2) << std::endl;
     };
     try {
+        if(argv.empty()||argv.front()=="help"||std::find(argv.begin(),argv.end(),"--help")!=argv.end()||std::find(argv.begin(),argv.end(),"-h")!=argv.end()){
+            name="help";std::ostringstream help;Help(argv,help);out<<help.str();return kOk;
+        }
         const auto parsed = Parse(argv);
         name = parsed.command->Name();
         Context context;

@@ -20,6 +20,12 @@ void RunCliTests(const std::filesystem::path& root) {
     using namespace gfx::cli;
     RegisterAll();
     const auto settings = (root / "cli-settings").u8string();
+    for(const auto& args:std::vector<std::vector<std::string>>{{},{"--help"},{"-h"},{"help"},{"replay","--help"},{"replay","draw","--help"},{"help","shader","show"},{"dump","--help"}}){
+        std::ostringstream help;std::atomic_bool stopped{false};
+        Require(Main(args,help,stopped)==kOk,"help exit");Require(help.str().find("Usage:")!=std::string::npos&&help.str().find("indexed-cube.gfxr")!=std::string::npos,"discoverable help and sample workflow");
+        if(args.size()>1&&args[0]=="replay"&&args[1]=="draw")Require(help.str().find("--full")!=std::string::npos,"draw-specific help");
+    }
+    const auto badHelp=Invoke({"help","unknown-command"});Require(badHelp.exit==kUsage&&badHelp.document["error"]["code"]=="usage","unknown help topic remains one JSON error");
     // Parser: globals anywhere, inline values, flags, unknown options and missing values.
     const auto parsed = Parse({"--quiet", "doctor", "--no-versions", "--settings-dir=" + settings});
     Require(parsed.command && parsed.command->Name() == "doctor" && parsed.args.Has("no-versions"), "doctor parse");

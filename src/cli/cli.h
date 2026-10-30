@@ -88,7 +88,7 @@ const std::vector<Option>& GlobalOptions();
 struct Parsed { const Command* command = nullptr; Args args; Args global; };
 Parsed Parse(const std::vector<std::string>& argv); // throws CliError(kUsage)
 Json Describe();
-// Runs a full invocation; writes exactly one JSON document to `out`. Returns the exit code.
+// Commands write one JSON document; help writes text. Returns the exit code.
 int Main(const std::vector<std::string>& argv, std::ostream& out, std::atomic_bool& cancel);
 // Maps any exception to {exit, error json}.
 std::pair<int, Json> ErrorJson(const std::exception_ptr& error);
