@@ -31,22 +31,25 @@ def main():
     if args.shader_bin:
         for name, executable in [('compiler', 'glslangValidator'), ('disassembler', 'spirv-dis'),
                                  ('assembler', 'spirv-as'), ('validator', 'spirv-val')]:
-            config[name] = str(args.shader_bin.resolve() / (executable + '.exe'))
+            config[name] = str(args.shader_bin.resolve() / (executable + ('.exe' if os.name == 'nt' else '')))
     if args.target == 'host':
         build = ROOT / 'build-tools'
-        have_sample = Path(config.get('compiler', '')).is_file()
+        have_sample = os.name == 'nt' and Path(config.get('compiler', '')).is_file()
         hook = 'validation_targets.cmake' if have_sample else 'backend_gui.cmake'
         local_path.write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')
-        run(['cmake', '-S', source, '-B', build, '-A', 'x64', '-DD3D12_SUPPORT=OFF',
+        platform_args = ['-A', 'x64', '-DCMAKE_CXX_FLAGS=/utf-8'] if os.name == 'nt' else ['-DCMAKE_BUILD_TYPE=' + args.config]
+        run(['cmake', '-S', source, '-B', build, *platform_args, '-DD3D12_SUPPORT=OFF',
              '-DGFXRECON_ENABLE_OPENXR=OFF', '-DGFXRECON_TOCPP_SUPPORT=OFF',
-             '-DGFXRECON_INCLUDE_TEST_APPS=ON', '-DBUILD_WERROR=OFF', '-DCMAKE_CXX_FLAGS=/utf-8',
+             '-DGFXRECON_INCLUDE_TEST_APPS=' + ('ON' if os.name == 'nt' else 'OFF'), '-DBUILD_WERROR=OFF',
              '-DCMAKE_PROJECT_GFXReconstruct_INCLUDE='+str(ROOT/'cmake'/hook)])
         run(['cmake', '--build', build, '--config', args.config, '--parallel', args.parallel,
              '--target', 'gfxrecon-info', 'gfxrecon-convert', 'gfxrecon-extract', 'gfxrecon-replay', 'gfxrecon-optimize',
-             'gfxrecon-test-launcher', 'VkLayer_gfxreconstruct_json'] + (['gfxrecon-gui-live'] if have_sample else []))
+             'VkLayer_gfxreconstruct_json'] + (['gfxrecon-test-launcher'] if os.name == 'nt' else []) + (['gfxrecon-gui-live'] if have_sample else []))
         for name in ['info', 'convert', 'extract', 'replay', 'optimize']:
-            config[name] = str(build / 'tools' / name / args.config / ('gfxrecon-' + name + '.exe'))
-        config['layer'] = str(build / 'layer' / args.config)
+            directory = build / 'tools' / name
+            if os.name == 'nt': directory /= args.config
+            config[name] = str(directory / ('gfxrecon-' + name + ('.exe' if os.name == 'nt' else '')))
+        config['layer'] = str(build / 'layer' / args.config if os.name == 'nt' else build / 'layer')
         from write_replay_capability import write_capability
         write_capability(config['replay'])
     else:
@@ -57,10 +60,10 @@ def main():
         env = dict(os.environ, JAVA_HOME=str(args.java_home.resolve()))
         # Native app-private transfer uses run-as and requires debuggable APKs.
         variant = 'assembleDebug'
-        run([android / 'gradlew.bat', ':test_launcher:' + variant, ':replay:' + variant,
+        run([android / ('gradlew.bat' if os.name == 'nt' else 'gradlew'), ':test_launcher:' + variant, ':replay:' + variant,
              '-Parm64-v8a', '-PDisableOpenXR', '--init-script', ROOT / 'scripts/android_native_activity.init.gradle',
              '--console=plain'], cwd=android, env=env)
-        config['adb'] = str(args.sdk_root.resolve() / 'platform-tools/adb.exe')
+        config['adb'] = str(args.sdk_root.resolve() / 'platform-tools' / ('adb.exe' if os.name == 'nt' else 'adb'))
         config['replay_apk'] = str(android / 'tools/replay/build/outputs/apk/debug/replay-debug.apk')
         config['test_apk'] = str(android / 'test/test_apps/launcher/build/outputs/apk/debug/test_launcher-debug.apk')
         from write_replay_capability import write_capability

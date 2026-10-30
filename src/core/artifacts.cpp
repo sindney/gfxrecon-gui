@@ -1,4 +1,5 @@
 #include "core/artifacts.h"
+#include <algorithm>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -9,6 +10,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <bcrypt.h>
+#elif defined(__APPLE__)
+#include <CommonCrypto/CommonDigest.h>
 #endif
 
 namespace gfx {
@@ -23,6 +26,19 @@ std::string Sha256Text(std::string_view value) {
         reinterpret_cast<PUCHAR>(const_cast<char*>(value.data())), static_cast<ULONG>(value.size()), digest, sizeof(digest));
     BCryptCloseAlgorithmProvider(algorithm, 0);
     if (status < 0) throw std::runtime_error("SHA-256 operation failed");
+    std::ostringstream text; text << std::hex << std::setfill('0');
+    for (auto byte : digest) text << std::setw(2) << unsigned(byte);
+    return text.str();
+#elif defined(__APPLE__)
+    CC_SHA256_CTX context;
+    CC_SHA256_Init(&context);
+    while (!value.empty()) {
+        const auto size = std::min<size_t>(value.size(), 65536);
+        CC_SHA256_Update(&context, value.data(), static_cast<CC_LONG>(size));
+        value.remove_prefix(size);
+    }
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_Final(digest, &context);
     std::ostringstream text; text << std::hex << std::setfill('0');
     for (auto byte : digest) text << std::setw(2) << unsigned(byte);
     return text.str();
@@ -50,6 +66,22 @@ std::string Sha256File(const std::filesystem::path& file, const std::atomic_bool
     }
     if (input.bad()) throw std::runtime_error("I/O error fingerprinting " + file.u8string());
     unsigned char digest[32]; check(BCryptFinishHash(hash.h, digest, sizeof(digest), 0));
+    std::ostringstream text; text << std::hex << std::setfill('0');
+    for (auto byte : digest) text << std::setw(2) << unsigned(byte);
+    return text.str();
+#elif defined(__APPLE__)
+    std::ifstream input(file, std::ios::binary);
+    if (!input) throw std::runtime_error("Cannot fingerprint " + file.u8string());
+    CC_SHA256_CTX context;
+    CC_SHA256_Init(&context);
+    char buffer[65536];
+    while (input.read(buffer, sizeof(buffer)) || input.gcount()) {
+        if (cancel && cancel->load()) throw std::runtime_error("Fingerprint cancelled");
+        CC_SHA256_Update(&context, buffer, static_cast<CC_LONG>(input.gcount()));
+    }
+    if (input.bad()) throw std::runtime_error("I/O error fingerprinting " + file.u8string());
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_Final(digest, &context);
     std::ostringstream text; text << std::hex << std::setfill('0');
     for (auto byte : digest) text << std::setw(2) << unsigned(byte);
     return text.str();

@@ -93,7 +93,7 @@ class ReleasePackageTests(unittest.TestCase):
 
     def test_manifest_detects_missing_modified_and_unexpected_files(self):
         with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
+            root = Path(folder).resolve()
             self.make_release(root)
             package.verify_manifest(root)
             app = root / "gfxrecon-gui.exe"
@@ -116,7 +116,7 @@ class ReleasePackageTests(unittest.TestCase):
         for name in ("gfxrecon-cli.exe", "tools/astcenc/astcenc-avx2.exe", "tools/astcenc/astcenc-sse2.exe",
                      "licenses/astc-encoder.txt"):
             with tempfile.TemporaryDirectory() as folder:
-                root = Path(folder)
+                root = Path(folder).resolve()
                 self.make_release(root)
                 manifest = json.loads((root / "build-info.json").read_text(encoding="utf-8"))
                 self.assertIn(name, manifest["files"])
@@ -127,7 +127,7 @@ class ReleasePackageTests(unittest.TestCase):
 
     def test_bundle_cli_stages_binaries_and_fails_clearly_when_missing(self):
         with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
+            root = Path(folder).resolve()
             build, stage = root / "build", root / "stage"
             stage.mkdir()
             with self.assertRaisesRegex(ValueError, "Missing .*gfxrecon-cli.exe.*gfxrecon_cli target"):
@@ -184,8 +184,8 @@ class ReleasePackageTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("release_build", ROOT / "scripts/build.py")
         build = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(build)
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
+        with tempfile.TemporaryDirectory() as folder, patch.object(build.sys, "platform", "win32"):
+            root = Path(folder).resolve()
             args = argparse.Namespace(build_dir=root, mode="release", os_layer="SFML", parallel=2)
             self.assertIn("x64", build.commands(args)[0])
             (root / "CMakeCache.txt").write_text("CMAKE_GENERATOR:INTERNAL=Visual Studio 17 2022\n")

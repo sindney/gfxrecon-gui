@@ -4,6 +4,9 @@
 
 #include <fstream>
 #include <sstream>
+#include <cstdlib>
+#include <filesystem>
+#include <stdexcept>
 
 #if PLATFORM_WINDOWS
 #ifndef WIN32_LEAN_AND_MEAN
@@ -76,6 +79,25 @@ std::string ExeDirectory() {
 #endif
     size_t pos = path.find_last_of("/\\");
     return pos == std::string::npos ? "." : path.substr(0, pos);
+}
+
+std::string SettingsDirectory() {
+#if PLATFORM_MACOS
+    const auto home = std::getenv("HOME");
+    if (!home || !*home) throw std::runtime_error("HOME is required to locate macOS application settings");
+    return (std::filesystem::u8path(home) / "Library/Application Support/GFXReconstruct Inspector").u8string();
+#else
+    return ExeDirectory();
+#endif
+}
+
+std::string ResourceDirectory() {
+    const auto executable = std::filesystem::u8path(ExeDirectory());
+#if PLATFORM_MACOS
+    if (executable.filename() == "MacOS" && executable.parent_path().filename() == "Contents")
+        return (executable.parent_path() / "Resources").u8string();
+#endif
+    return executable.u8string();
 }
 
 } // namespace tpl

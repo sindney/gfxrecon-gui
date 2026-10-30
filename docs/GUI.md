@@ -1,5 +1,21 @@
 # GUI guide
 
+## Prerequisites
+
+For local replay on macOS, install the
+[LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home#mac) and
+[configure the Vulkan loader, MoltenVK and host tools](BUILD.md#macos).
+The GUI and offline inspection do not need a local Vulkan runtime; opening
+`.gfxr` files still needs `gfxrecon-convert` and shader extraction uses
+`gfxrecon-extract`. Replaying on an Android phone does not require Vulkan on
+the host Mac.
+
+Android capture/replay needs SDK Platform-Tools (`adb`), USB or wireless debugging
+with this host authorized, and a compatible debug replay/layer APK installed on
+an unlocked Vulkan device. Capture targets must be debuggable Vulkan apps.
+NDK, JDK and the remaining SDK build tools are only needed when building the APKs; the test sample APK and
+validation layers are optional. See [Android setup](BUILD.md#android-device-capture-and-replay).
+
 ## Open and navigate
 
 Use **File > Open** for a `.gfxr` capture, or **File > Samples** for the bundled

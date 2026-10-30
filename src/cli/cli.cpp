@@ -62,7 +62,7 @@ std::vector<Command>& Commands() { static std::vector<Command> commands; return 
 void Register(Command command) { Commands().push_back(std::move(command)); }
 const std::vector<Option>& GlobalOptions() {
     static const std::vector<Option> options{
-        {"settings-dir", "DIR", "Settings, sessions and caches root (default: executable directory, shared with gfxrecon-gui)"},
+        {"settings-dir", "DIR", "Settings, sessions and caches root (default: Application Support on macOS, executable directory elsewhere; shared with GUI)"},
         {"tools", "FILE", "Extra tool configuration JSON merged after gfxrecon_tools.json"},
         {"serial", "SERIAL", "Android device serial"},
         {"target", "auto|local|android", "Replay target", false, false, "auto"},
@@ -263,7 +263,7 @@ int Main(const std::vector<std::string>& argv, std::ostream& out, std::atomic_bo
         name = parsed.command->Name();
         Context context;
         context.exeDir = std::filesystem::u8path(tpl::ExeDirectory());
-        context.settingsDir = parsed.global.Has("settings-dir") ? std::filesystem::absolute(std::filesystem::u8path(parsed.global.Get("settings-dir"))) : context.exeDir;
+        context.settingsDir = parsed.global.Has("settings-dir") ? std::filesystem::absolute(std::filesystem::u8path(parsed.global.Get("settings-dir"))) : std::filesystem::u8path(tpl::SettingsDirectory());
         context.quiet = parsed.global.Has("quiet");
         context.serial = parsed.global.Get("serial");
         context.target = parsed.global.Get("target", "auto");

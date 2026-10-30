@@ -314,7 +314,7 @@ void ResourceTests(const std::filesystem::path& dir) {
     for (const auto& name : {"buffer.bin", "image.bmp", "fixture_dr.json", "inputs_dr.json"}) std::filesystem::remove(folder / name);
     std::filesystem::remove(folder);
 }
-void ProcessTests(const std::string& self) {
+void ProcessTests(const std::string& self, const std::filesystem::path& dir) {
     const std::vector<std::string> args = {"--echo", "", "white space", "quote\"slash\\", "trailing\\", "$(not-a-command);&", u8"着色器"};
     gfx::ProcessRequest r{self, args};
     r.environment["GFX_GUI_TEST_VALUE"] = u8"shader path 着色器";
@@ -325,6 +325,16 @@ void ProcessTests(const std::string& self) {
     CHECK(result["args"] == gfx::Json(std::vector<std::string>(args.begin() + 1, args.end())));
     CHECK(result["env"] == r.environment.at("GFX_GUI_TEST_VALUE"));
     CHECK(std::getenv("GFX_GUI_TEST_VALUE") == nullptr);
+    const auto working = dir / u8"child working directory 着色器";
+    std::filesystem::create_directory(working);
+    r.workingDirectory = working.u8string();
+    CHECK(std::filesystem::equivalent(std::filesystem::u8path(gfx::Json::parse(gfx::RunProcess(r).output).at("cwd").get<std::string>()), working));
+    r.workingDirectory.clear();
+    std::filesystem::remove(working);
+    bool missing = false;
+    try { gfx::RunProcess({(dir / "no-such-executable").u8string(), {}}); }
+    catch (const std::runtime_error&) { missing = true; }
+    CHECK(missing);
     for (int i = 0; i < 10; ++i) {
         gfx::ProcessRequest fast{self, {"--echo", std::to_string(i)}};
         const auto completed = gfx::RunProcess(fast);
@@ -518,7 +528,7 @@ int main(int argc, char** argv) {
             value.pop_back();
         }
 #endif
-        std::cout << gfx::Json{{"args", std::vector<std::string>(argv + 2, argv + argc)}, {"env", value}}.dump() << std::flush;
+        std::cout << gfx::Json{{"args", std::vector<std::string>(argv + 2, argv + argc)}, {"env", value}, {"cwd", std::filesystem::current_path().u8string()}}.dump() << std::flush;
         return 0;
     }
     if (argc > 1 && std::string(argv[1]) == "--sleep") { std::this_thread::sleep_for(std::chrono::seconds(10)); return 0; }
@@ -557,7 +567,7 @@ int main(int argc, char** argv) {
         clockwise.Rotate(-1);CHECK(clockwise.turns==3);clockwise.Rotate();CHECK(clockwise.turns==0);
         CHECK(gfx::DescribeAndroidReplayExit("ApplicationExitInfo #0: reason=3 (LOW_MEMORY)").find("memory")!=std::string::npos);
         CHECK(gfx::DescribeAndroidReplayExit("ApplicationExitInfo #0: reason=2 (SIGNALED) ApplicationExitInfo #1: reason=3 (LOW_MEMORY)").find("memory")==std::string::npos);
-        SyntaxTests(); MetadataTests(dir); CaptureTests(dir); ReplayTargetTests(); CaptureControlTests(); ProcessTests(std::filesystem::absolute(argv[0]).u8string());
+        SyntaxTests(); MetadataTests(dir); CaptureTests(dir); ReplayTargetTests(); CaptureControlTests(); ProcessTests(std::filesystem::absolute(argv[0]).u8string(), dir);
         BinaryTransferTest(std::filesystem::absolute(argv[0]).u8string(), dir);
         ResourceTests(dir); ReplayIdentityTests(dir);
         gfx::tests::RunAnalysisTests(dir);

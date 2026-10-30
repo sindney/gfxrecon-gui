@@ -1,4 +1,4 @@
-"""Build, test and package a portable Windows x64 distribution (Python 3.10+)."""
+"""Build, test and package a Windows x64 or native macOS distribution (Python 3.10+)."""
 from __future__ import annotations
 
 import argparse
@@ -36,7 +36,10 @@ def commands(args):
         return []
     configure = ["cmake", "-S", str(ROOT), "-B", str(args.build_dir)]
     cache_path = args.build_dir / "CMakeCache.txt"
-    if cache_path.exists():
+    if sys.platform == "darwin":
+        if not cache_path.exists(): configure.extend(["-G", "Ninja"])
+        configure.append("-DCMAKE_BUILD_TYPE=Release")
+    elif cache_path.exists():
         cache = cache_path.read_text(encoding="utf-8")
         if "CMAKE_GENERATOR:INTERNAL=Visual Studio " not in cache:
             raise ValueError("Select a Visual Studio build directory for Windows release packaging")
@@ -56,16 +59,22 @@ def main(argv=None):
     args.build_dir = args.build_dir.resolve()
     args.output_dir = args.output_dir.absolute()
     try:
-        if sys.platform != "win32":
-            raise ValueError("Portable packaging currently supports Windows x64 only")
+        if sys.platform not in ("win32", "darwin"):
+            raise ValueError("Packaging supports Windows x64 and native macOS")
+        if sys.platform == "darwin" and args.verify_android:
+            raise ValueError("macOS packaging does not run device tests")
         for command in commands(args):
             print(subprocess.list2cmdline(command), flush=True)
             if not args.dry_run:
                 subprocess.run(command, cwd=ROOT, check=True)
         if args.dry_run:
-            print(f"Bundle Release app, licenses and MSVC runtime; verify extracted ZIP; publish {args.output_dir}")
+            contents = "native .app, CLI, host tools and licenses" if sys.platform == "darwin" else "Release app, licenses and MSVC runtime"
+            print(f"Bundle {contents}; verify extracted ZIP; publish {args.output_dir}")
             return 0
-        from package_release import package_runtime
+        if sys.platform == "darwin":
+            from package_macos import package_runtime
+        else:
+            from package_release import package_runtime
         package_runtime(args)
         return 0
     except (OSError, ValueError, subprocess.SubprocessError) as error:

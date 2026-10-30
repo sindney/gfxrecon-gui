@@ -101,7 +101,8 @@ Json SummarizeGeometry(const std::string& command, const Json& pipeline, const J
                     if (!index.value("compressedSize", Json{}).is_null()) throw std::runtime_error("Compressed index readback is unsupported");
                     const auto file = directory / std::filesystem::u8path(index.at("file").get<std::string>()).filename();
                     if (std::filesystem::is_symlink(file) || !std::filesystem::is_regular_file(file)) throw std::runtime_error("Index buffer file is unavailable");
-                    const auto first = Number(p, "firstIndex"), size = std::filesystem::file_size(file);
+                    const auto first = Number(p, "firstIndex");
+                    const auto size = std::filesystem::file_size(file);
                     if (first > size / width || count > size / width - first) throw std::runtime_error("Index readback does not cover the draw");
                     std::ifstream in(file, std::ios::binary); in.seekg(static_cast<std::streamoff>(first * width));
                     segments = {0};

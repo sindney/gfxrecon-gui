@@ -4,13 +4,57 @@
 
 #import <Cocoa/Cocoa.h>
 #include <OpenGL/gl.h>
+#include <OpenGL/OpenGL.h>
 #include <imgui_te_context.h>
 #include <imgui_te_engine.h>
+#include <imgui_te_coroutine.h>
 
 #include <algorithm>
 #include <array>
+#include <memory>
 
 namespace tpl {
+
+namespace {
+thread_local CGLContextObj coroutineContext = nullptr;
+struct CoroutineStart {
+    ImGuiTestCoroutineMainFunc* function;
+    void* data;
+    CGLContextObj context;
+};
+void RunCoroutine(void* opaque) {
+    std::unique_ptr<CoroutineStart> start(static_cast<CoroutineStart*>(opaque));
+    coroutineContext = start->context;
+    CGLSetCurrentContext(coroutineContext);
+    start->function(start->data);
+    CGLSetCurrentContext(nullptr);
+}
+}
+
+void ConfigureMacTestCoroutines(ImGuiTestEngine* engine) {
+    // TestFunc runs on a serialized helper thread. Transfer the GL context with
+    // each yield so direct workspace operations can safely release GPU resources.
+    static ImGuiTestCoroutineInterface interface = *Coroutine_ImplStdThread_GetInterface();
+    interface.CreateFunc = [](ImGuiTestCoroutineMainFunc* function, const char* name, void* data) {
+        auto start = std::make_unique<CoroutineStart>(CoroutineStart{function, data, CGLGetCurrentContext()});
+        const auto handle = Coroutine_ImplStdThread_GetInterface()->CreateFunc(RunCoroutine, name, start.get());
+        start.release();
+        return handle;
+    };
+    interface.RunFunc = [](ImGuiTestCoroutineHandle handle) {
+        const auto context = CGLGetCurrentContext();
+        CGLSetCurrentContext(nullptr);
+        const bool running = Coroutine_ImplStdThread_GetInterface()->RunFunc(handle);
+        CGLSetCurrentContext(context);
+        return running;
+    };
+    interface.YieldFunc = [] {
+        CGLSetCurrentContext(nullptr);
+        Coroutine_ImplStdThread_GetInterface()->YieldFunc();
+        CGLSetCurrentContext(coroutineContext);
+    };
+    ImGuiTestEngine_GetIO(engine).CoroutineFuncs = &interface;
+}
 
 struct NativeDialogVars {
     bool tested = false;

@@ -1,18 +1,27 @@
 ## Purpose
 A console front end over the shared core for agents and automation: a stable JSON/exit-code contract, self-describing schema, shared tool/device discovery, static capture queries and concurrent-use safety.
-
 ## Requirements
-
 ### Requirement: Shared core between GUI and CLI
-The capture import, tool resolution, capture analysis, replay, capture and shader services SHALL be built once as a UI-independent core library linked by both `GfxReconGui.exe` and `gfxrecon-cli.exe`. Both front ends SHALL resolve tools from the same sources in the same precedence and SHALL use the same capture index cache, replay result cache and session directory root.
+The shared services SHALL be built once as a UI-independent core library for
+capture import, tool resolution, capture analysis, replay, capture and shaders, linked by the
+desktop GUI and gfxrecon-cli on Windows and macOS. Both front ends SHALL resolve
+tools from the same sources in the same precedence and SHALL use the same capture
+index cache, replay result cache and session directory root. Windows SHALL retain
+its executable-directory default; macOS SHALL default to per-user Application
+Support. An explicit --settings-dir SHALL override that root.
 
 #### Scenario: Capture opened in the GUI is reused by the CLI
-- **WHEN** a capture has already been indexed by the GUI and the CLI runs `info` on the same file with the same tools
-- **THEN** the CLI loads the cached index without re-running conversion and reports `cache_hit: true`
+- **WHEN** a capture has already been indexed by the GUI and the CLI runs info
+  on the same file with the same tools and settings root
+- **THEN** the CLI loads the cached index without re-running conversion and reports cache_hit: true
 
-#### Scenario: GUI behavior unchanged after extraction
-- **WHEN** the core library replaces the per-target source lists
-- **THEN** the existing native and UI test suites pass without modification of their expectations
+#### Scenario: macOS package remains signed after use
+- **WHEN** the GUI and CLI run from a relocated macOS distribution
+- **THEN** both use the shared per-user state root and leave app resources unchanged
+
+#### Scenario: Windows portable configuration
+- **WHEN** the Windows GUI and CLI run beside their bundled tools
+- **THEN** they retain their shared portable settings, sessions and caches
 
 ### Requirement: Machine-readable output contract
 Every CLI command SHALL write exactly one JSON document to stdout containing `ok`, `command`, and either `result` or `error` (`code`, `message`, optional `detail`). Progress and logs SHALL go to stderr only. The CLI SHALL never prompt interactively.

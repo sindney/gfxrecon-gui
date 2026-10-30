@@ -36,14 +36,23 @@ std::string ResolveAstcenc(const std::filesystem::path& bundled) {
 } // namespace
 ToolMap ResolveTools(const std::filesystem::path& dir, const std::filesystem::path& exeDir) {
     ToolMap tools;
+#ifdef _WIN32
+    const std::string suffix = ".exe";
+#else
+    const std::string suffix;
+#endif
     const std::pair<const char*, const char*> defaults[] = {
         {"convert", "gfxrecon-convert"}, {"info", "gfxrecon-info"}, {"extract", "gfxrecon-extract"}, {"optimize", "gfxrecon-optimize"},
         {"replay", "gfxrecon-replay"}, {"adb", "adb"}, {"compiler", "glslangValidator"},
         {"disassembler", "spirv-dis"}, {"assembler", "spirv-as"}, {"validator", "spirv-val"}};
-    const auto bundled = exeDir / "tools";
-    const bool hasBundle = std::filesystem::is_regular_file(bundled / "gfxrecon-convert.exe");
+    auto bundled = exeDir / "tools";
+#ifdef __APPLE__
+    if (exeDir.filename() == "MacOS" && exeDir.parent_path().filename() == "Contents")
+        bundled = exeDir.parent_path() / "Resources/tools";
+#endif
+    const bool hasBundle = std::filesystem::is_regular_file(bundled / ("gfxrecon-convert" + suffix));
     for (auto [key, executable] : defaults) {
-        const auto file = bundled / (std::string(executable) + ".exe");
+        const auto file = bundled / (std::string(executable) + suffix);
         tools[key] = std::filesystem::is_regular_file(file) ? file.u8string() : FindExecutablePath(executable);
     }
     tools["astcenc"] = ResolveAstcenc(bundled);

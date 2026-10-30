@@ -70,6 +70,7 @@ void Workspace::DrawCapture() {
             if (ImGui::Button("Install test sample")) InstallReplayApk(true);
             ImGui::EndDisabled();
             ImGui::TextWrapped("Use an authorized, unlocked phone. Capture targets must be debuggable Vulkan apps.");
+            ImGui::TextWrapped("Install SDK Platform-Tools (adb) on the host and the compatible debug replay/layer APK on the phone. NDK, JDK and the remaining Android build tools are only needed to build the APKs.");
         } else ImGui::TextWrapped("The layer is enabled only for the launched process. The Vulkan loader may ignore custom layer paths in elevated processes.");
         if (ImGui::CollapsingHeader("Tool paths")) {
             for (auto key : {"adb", "convert", "layer", "replay_apk", "test_apk"}) ImGui::InputText(key, &tools_[key]);

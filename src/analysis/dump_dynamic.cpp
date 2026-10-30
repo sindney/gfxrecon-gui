@@ -225,7 +225,7 @@ DynamicDumpResult RunDynamicDump(const Capture& capture, const DumpIndex& index,
             const auto r = ReplayCapture(request, target, tools, cancel);
             record["status"] = "ok"; record["timings"] = r.timings; ++result.replays;
             if (!r.image.empty()) {
-                const auto dest = out / "frames" / ([&] { char b[8]; std::snprintf(b, sizeof(b), "%04u", frame); return std::string(b); }()) / "frame.png";
+                const auto dest = out / "frames" / ([&] { char b[32]; std::snprintf(b, sizeof(b), "%04llu", static_cast<unsigned long long>(frame)); return std::string(b); }()) / "frame.png";
                 fs::create_directories(dest.parent_path());
                 std::string err;
                 try { ConvertToPng(r.image, dest); result.bytesWritten += fs::file_size(dest); record["frame_png"] = fs::relative(dest, out).generic_u8string(); }

@@ -68,11 +68,11 @@ DecodedShader DecodeShader(const std::filesystem::path& path, const ShaderStage&
                 Json item{{"kind", kind}, {"name", resource.name}};
                 metadata << type << " " << resource.name;
                 if (compiler.has_decoration(resource.id, spv::DecorationDescriptorSet))
-                    metadata << "  set=" << (item["set"] = compiler.get_decoration(resource.id, spv::DecorationDescriptorSet)).get<uint32_t>();
+                    metadata << "  set=" << (item["set"] = compiler.get_decoration(resource.id, spv::DecorationDescriptorSet)).template get<uint32_t>();
                 if (compiler.has_decoration(resource.id, spv::DecorationBinding))
-                    metadata << "  binding=" << (item["binding"] = compiler.get_decoration(resource.id, spv::DecorationBinding)).get<uint32_t>();
+                    metadata << "  binding=" << (item["binding"] = compiler.get_decoration(resource.id, spv::DecorationBinding)).template get<uint32_t>();
                 if (compiler.has_decoration(resource.id, spv::DecorationLocation))
-                    metadata << "  location=" << (item["location"] = compiler.get_decoration(resource.id, spv::DecorationLocation)).get<uint32_t>();
+                    metadata << "  location=" << (item["location"] = compiler.get_decoration(resource.id, spv::DecorationLocation)).template get<uint32_t>();
                 metadata << '\n';
                 r.resources.push_back(std::move(item));
             }

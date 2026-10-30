@@ -49,7 +49,7 @@ void Workspace::ScheduleFrameReplay() {
 }
 void Workspace::DrawFrameActions(uint32_t frame) {
     if (ImGui::BeginMenu("Replay target", !Busy() || autoReplayRunning_)) {
-        const char* labels[] = {"Automatic", "Local Windows", "Android device"};
+        const char* labels[] = {"Automatic", LocalReplayLabel(), "Android device"};
         for (int i = 0; i < 3; ++i) if (ImGui::MenuItem(labels[i], nullptr, static_cast<int>(replayMode_) == i)) {
             SetReplayMode(static_cast<ReplayMode>(i));
             for (auto& [number, preview] : frameImages_) preview.image.Release();

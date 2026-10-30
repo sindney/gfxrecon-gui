@@ -42,4 +42,3 @@ Single and batch inspection SHALL distinguish total operation wall time, accumul
 #### Scenario: Outline preparation
 - **WHEN** an outline requires original, solid and outline replays
 - **THEN** operation timing counts all three calls and total wall time covers preparation and image conversion
-
