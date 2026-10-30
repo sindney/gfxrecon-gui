@@ -581,7 +581,7 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
     }
     if (!r.dump.is_null()) result.resources = CollectResources(r.output);
     if (r.outputsOnly) {
-        for (const auto& resource : result.resources) if ((resource.file.extension() == ".bmp" || resource.file.extension() == ".png") && resource.metadata.value("category","")!="input" && resource.metadata.value("category","")!="mesh") { result.image = resource.file; break; }
+        result.image=PrimaryOutputImage(result.resources);
     } else if (!r.measurement.enabled) {
         result.image = r.output / (r.prefix + "_frame_" + std::to_string(r.frame) + ".bmp");
         if (!std::filesystem::is_regular_file(result.image) || std::filesystem::file_size(result.image) < 54)

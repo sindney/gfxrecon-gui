@@ -266,6 +266,16 @@ void BinaryTransferTest(const std::string& self, const std::filesystem::path& di
     file.close(); std::filesystem::remove(input); std::filesystem::remove(output);
 }
 void ResourceTests(const std::filesystem::path& dir) {
+    std::vector<gfx::ResourceArtifact> orderedImages{
+        {"00-input.png",0,"",{{"category","input"},{"aspect","COLOR"},{"location",0}}},
+        {"01-stencil.bmp",0,"",{{"category","output"},{"aspect","STENCIL"}}},
+        {"02-depth.bmp",0,"",{{"category","output"},{"aspect","DEPTH"}}},
+        {"03-color1.bmp",0,"",{{"category","output"},{"aspect","COLOR"},{"location",1}}},
+        {"04-color0-mip1.bmp",0,"",{{"category","output"},{"aspect","COLOR"},{"location",0},{"mipLevel",1}}},
+        {"99-color0.bmp",0,"",{{"category","output"},{"aspect","COLOR"},{"location",0},{"mipLevel",0}}}};
+    CHECK(gfx::PrimaryOutputImage(orderedImages)==std::filesystem::path("99-color0.bmp"));
+    orderedImages.resize(3);CHECK(gfx::PrimaryOutputImage(orderedImages)==std::filesystem::path("02-depth.bmp"));
+    orderedImages.resize(1);CHECK(gfx::PrimaryOutputImage(orderedImages).empty());
     CHECK(gfx::DescriptorUsesSampler(0));CHECK(gfx::DescriptorUsesSampler(1));CHECK(!gfx::DescriptorUsesSampler(2));
     CHECK(!gfx::DescriptorUsesSampler("VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE"));CHECK(gfx::DescriptorUsesSampler("VK_DESCRIPTOR_TYPE_SAMPLER"));
     gfx::Capture capture;gfx::Execution execution;

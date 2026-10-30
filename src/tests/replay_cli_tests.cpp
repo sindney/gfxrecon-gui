@@ -170,6 +170,31 @@ void RunReplayCliTests(const fs::path& root) {
     const auto& r = draw.document["result"];
     Require(r["draw"]["block"] == 82 && r["outputs"].size() >= 1 && fs::is_regular_file(fs::u8path(r["outputs"][0]["png"].get<std::string>())) && r["outputs"][0]["metadata"]["category"] == "output", "draw outputs");
     Require(Code(Invoke(Join({"replay", "draw", "--capture", cap, "--block", "1"}, tools))) == "draw_not_found", "draw not found");
+    Require(Invoke(Join({"replay","draw","--capture",cap,"--execution","0","--subdraw","1"},tools)).exit==kUsage,"subdraw rejects ordinary direct draws before replay");
+    // Native public-sample diagnostics: outline preserves original interiors and is thinner than solid.
+    auto diagnostic=[&](const char* mode,const char* name,std::vector<std::string> extra=std::vector<std::string>{}){
+        auto args=Join({"replay","draw","--capture",cap,"--execution","0","--visualize",mode,"--out",(work/name).u8string()},extra);
+        return Invoke(Join(args,tools));
+    };
+    const auto solid=diagnostic("solid","solid"),outline=diagnostic("outline","outline");
+    Require(solid.exit==0&&outline.exit==0,"solid/outline diagnostics: "+outline.text);
+    Require(outline.document["result"]["visualization"]=="outline"&&outline.document["result"]["diagnostic_sources"]["baseline"].contains("original"),"outline source provenance");
+    auto imageOf=[](const Outcome& result){return LoadImage(fs::u8path(result.document["result"]["image_png"].get<std::string>()));};
+    auto orange=[](const Image& image){size_t count=0;for(size_t p=0;p<image.rgba.size();p+=4)if(image.rgba[p]>250&&image.rgba[p+1]>100&&image.rgba[p+1]<240&&image.rgba[p+2]<5)++count;return count;};
+    const auto filled=imageOf(solid),edged=imageOf(outline),original=imageOf(draw);
+    Require(orange(edged)>0&&orange(edged)<orange(filled)/5,"outline is a thin boundary");
+    const auto center=(size_t(edged.height/2)*edged.width+edged.width/2)*4;
+    Require(std::equal(edged.rgba.begin()+center,edged.rgba.begin()+center+4,original.rgba.begin()+center),"outline interior retains original pixels");
+    const auto noUv=diagnostic("uv","no-uv");Require(noUv.exit==kFailed&&Code(noUv)=="visualization_unsupported","unavailable UV reports a capability error");
+    // A compatible replacement exposes a UV semantic; generation must use that effective module.
+    {std::ifstream in(exportDir/"module.glsl");std::string text((std::istreambuf_iterator<char>(in)),{});size_t pos=0;
+     while((pos=text.find("fragColor",pos))!=std::string::npos){text.replace(pos,9,"uv");pos+=2;}std::ofstream(work/"uv.frag")<<text;}
+    const auto uv=diagnostic("uv","uv",{"--override","21="+(work/"uv.frag").u8string()});
+    Require(uv.exit==0,"UV generated from override: "+uv.text);
+    Require(uv.document["result"]["diagnostic_sources"]["modified"]["uv"]["detail"].get<std::string>().find("uv")!=std::string::npos,"UV input metadata");
+    const auto checker=imageOf(uv);size_t light=0,dark=0;
+    for(size_t p=0;p<checker.rgba.size();p+=4)if(checker.rgba[p]==checker.rgba[p+1]&&checker.rgba[p+1]==checker.rgba[p+2]){light+=checker.rgba[p]>200;dark+=checker.rgba[p]>0&&checker.rgba[p]<100;}
+    Require(light>100&&dark>100,"UV renders a checkerboard");
     // --draw <dump draw dir>: capture and selector come from the dump.
     const auto dumpDir = work / "dump"; const auto drawDir = dumpDir / "frames/0001/passes/001-renderpass-b0/draws/0000-b82-vkCmdDraw";
     fs::create_directories(drawDir);
@@ -187,6 +212,15 @@ void RunReplayCliTests(const fs::path& root) {
     const auto& b = base.document["result"];
     Require(b["overrides"][0]["module"] == 21 && b["overrides"][0]["confirmed"] == true && b["runs"].contains("baseline") && b["runs"].contains("modified"), "baseline result");
     Require(b["comparison"]["identical"] == false && b["comparison"]["max_abs_diff"]["g"] == 0 && b["comparison"]["max_abs_diff"]["r"].get<int>() > 100 && fs::is_regular_file(fs::u8path(b["comparison"]["diff_image"].get<std::string>())), "baseline comparison: " + b["comparison"].dump());
+    const auto outlinedPair=diagnostic("outline","outline-pair",{"--override","21="+(work/"swap.frag").u8string(),"--baseline"});
+    Require(outlinedPair.exit==0,"outline baseline/modified: "+outlinedPair.text);
+    Require(outlinedPair.document["result"]["comparison"]["identical"]==false&&outlinedPair.document["result"]["diagnostic_sources"].contains("baseline")&&outlinedPair.document["result"]["diagnostic_sources"].contains("modified"),"outline uses each variant's original pixels and override set");
+    const auto indirect=FindUpwards(fs::current_path(),"samples/indirect-triangles.gfxr");
+    if(!indirect.empty()){
+        const auto single=Invoke(Join({"replay","draw","--capture",indirect.u8string(),"--execution","0","--subdraw","1","--visualize","outline","--out",(work/"indirect-outline").u8string()},tools));
+        Require(single.exit==0,"indirect outline: "+single.text);
+        Require(single.document["result"]["subdraw"]==1&&single.document["result"]["runs"]["baseline"]["draw_parameters"]["indirectParams"].size()==1&&orange(imageOf(single))>0,"selected record outline and actual indirect arguments");
+    }
     // Draw-scoped override + validation: validation either reports or maps a missing layer to exit 4 with status unavailable.
     const auto validated = Invoke(Join({"replay", "frame", "--capture", cap, "--frame", "1", "--validate", "--out", (work / "validated").u8string()}, tools));
     if (validated.exit == 0) Require(validated.document["result"]["validation"]["status"].is_string() && fs::is_regular_file(fs::u8path(validated.document["result"]["validation"]["report"].get<std::string>())), "validation report");

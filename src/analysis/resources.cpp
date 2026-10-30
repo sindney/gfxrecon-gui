@@ -10,6 +10,21 @@
 #include <functional>
 
 namespace gfx {
+std::filesystem::path PrimaryOutputImage(const std::vector<ResourceArtifact>& resources){
+    const Json empty=Json::object();const ResourceArtifact* primary=nullptr;
+    std::tuple<int,uint64_t,uint64_t,uint64_t> best;
+    for(const auto& resource:resources){
+        if(resource.file.extension()!=".bmp"&&resource.file.extension()!=".png")continue;
+        const auto& m=resource.metadata.is_object()?resource.metadata:empty;
+        const auto category=m.value("category",std::string{});if(category=="input"||category=="mesh")continue;
+        auto number=[&](const char* key){const auto i=m.find(key);return i!=m.end()&&i->is_number()?i->get<uint64_t>():uint64_t(0);};
+        const auto aspect=m.value("aspect",std::string{});
+        const int rank=aspect=="COLOR"?0:aspect=="DEPTH"?1:aspect=="STENCIL"?2:3;
+        const auto score=std::make_tuple(rank,number("location"),number("mipLevel"),number("arrayLayer"));
+        if(!primary||score<best){primary=&resource;best=score;}
+    }
+    return primary?primary->file:std::filesystem::path{};
+}
 bool DescriptorUsesSampler(const Json& type){
     return type==0||type==1||type=="VK_DESCRIPTOR_TYPE_SAMPLER"||type=="VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER";
 }

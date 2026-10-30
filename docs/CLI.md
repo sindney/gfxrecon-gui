@@ -69,7 +69,22 @@ Within a relevant pass, replay the midpoint execution and inspect the same color
 attachment. Search the half containing the first appearance of the feature, then
 confirm adjacent draws. Keep target/subresource identity fixed: clears, attachment
 changes and later overwrites can break a simple monotonic search.
-`--visualize solid|wireframe|depth` confirms candidate geometry coverage.
+`--visualize original|solid|wireframe|depth|outline|uv` matches the GUI inspect modes.
+
+```powershell
+.\gfxrecon-cli.exe replay draw --capture samples/indexed-cube.gfxr --execution 0 --visualize wireframe --out inspect/wire
+.\gfxrecon-cli.exe replay draw --capture samples/indexed-cube.gfxr --execution 0 --visualize outline --out inspect/outline
+```
+
+`image_png` selects COLOR 0 when available. All attachments remain in `outputs`.
+Outline automatically prepares original/solid source passes; `diagnostic_sources`
+records their manifests and timings. UV uses a compatible interpolated UV varying
+from the effective fragment shader and reports unavailable when none exists.
+Combine any mode with `--full`, shader overrides or indirect `--subdraw K`.
+Wireframe requires device support. Diagnostic geometry ignores fragment discard
+and stencil, as in the GUI.
+`inspection_seconds` includes preparation and PNG generation; `timings` describes
+the final backend replay. `--execution` is global across the capture, not frame-local.
 
 ## 3. Probe
 

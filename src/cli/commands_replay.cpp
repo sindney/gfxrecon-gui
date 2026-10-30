@@ -5,6 +5,7 @@
 #include "shaders/decode.h"
 #include "shaders/interface.h"
 #include "shaders/metadata.h"
+#include "shaders/diagnostics.h"
 
 #include <algorithm>
 #include <cmath>
@@ -330,6 +331,7 @@ DrawSelector ReadDrawDirectory(const fs::path& directory) {
     return selector;
 }
 Json ReplayDraw(Context& context, const Args& args) {
+    const auto inspectionStarted=std::chrono::steady_clock::now();
     const int selectors = int(args.Has("block")) + int(args.Has("draw")) + int(args.Has("execution"));
     if (selectors != 1) throw Usage("Give exactly one of --block B, --draw <dump draw dir>, --execution I");
     if (args.Has("outputs") && args.Has("full")) throw Usage("--outputs and --full are mutually exclusive");
@@ -354,10 +356,13 @@ Json ReplayDraw(Context& context, const Args& args) {
     const auto& event = capture.events[execution.event];
     const bool full = args.Has("full");
     const auto visualization = args.Get("visualize", "original");
-    if (visualization != "original" && visualization != "solid" && visualization != "wireframe" && visualization != "depth") throw Usage("--visualize must be solid, wireframe or depth");
+    if (visualization != "original" && visualization != "solid" && visualization != "wireframe" && visualization != "depth" && visualization != "outline" && visualization != "uv")
+        throw Usage("--visualize must be original, solid, wireframe, depth, outline or uv");
     const bool subdraw = args.Has("subdraw");
     const bool isDraw = event.name.rfind("vkCmdDraw", 0) == 0;
     if ((visualization != "original" || subdraw) && !isDraw) throw CliError(kFailed, "visualization_unsupported", "Visualization and --subdraw apply to vkCmdDraw* calls, not " + event.name);
+    if(subdraw&&event.name.find("Indirect")==std::string::npos)throw Usage("--subdraw requires an indirect draw call.");
+    if(subdraw&&event.name.find("IndirectCount")!=std::string::npos)throw CliError(kFailed,"subdraw_unsupported","Individual GPU-counted indirect records are not supported; omit --subdraw to inspect All.");
     if (subdraw && args.Number("subdraw", 0) > 65535) throw Usage("--subdraw must be 0..65535");
     const auto target = ResolveTarget(context, capture);
     const auto root = ResolveRoot(context, args, "replay");
@@ -373,25 +378,62 @@ Json ReplayDraw(Context& context, const Args& args) {
     auto request = BaseRequest(context, capture, target, args, false);
     request.frame = execution.frame; request.dump = dump; request.outputsOnly = true;
     request.drawInspection = full; request.descriptorImages = full;
-    request.visualization = visualization; request.visualizationPipeline = pipeline;
+    request.visualization = visualization=="outline"?"silhouette":visualization; request.visualizationPipeline = pipeline;
     request.indirectSubdraw = subdraw ? static_cast<int>(args.Number("subdraw", 0)) : -1;
     Json scope{{"scope", "draw"}, {"frame", execution.frame}, {"draw", {{"block", event.block}, {"execution", index}, {"call", event.name}, {"pipeline", pipeline}, {"detail", full ? "full" : "outputs"}}},
         {"visualization", visualization}};
     if (subdraw) scope["subdraw"] = request.indirectSubdraw;
+    Json diagnosticSources=Json::object();
     auto result = ExecuteReplay(context, args, opened, target, overrides, root, request, scope, [&](ReplayRequest& r, bool withOverrides) {
-        if (r.indirectSubdraw < 0) return;
-        // gl_DrawID cannot be reproduced for an individual indirect draw; check the shaders this run will actually use.
-        for (const auto& stage : stages) {
-            const auto module = withOverrides && overrides.files.count(stage.module) ? overrides.files.at(stage.module) : opened.import.directory / "shaders" / ("sh" + std::to_string(stage.module));
-            if (fs::is_regular_file(module) && ShaderUsesDrawIndex(module))
-                throw CliError(kFailed, "subdraw_unsupported", "Individual indirect draws using gl_DrawID are not supported; omit --subdraw to replay all draws.", {{"module", stage.module}});
+        if(r.indirectSubdraw>=0){
+            // Check the effective shaders, including replacements, before issuing one-record commands.
+            for (const auto& stage : stages) {
+                const auto module = withOverrides && overrides.files.count(stage.module) ? overrides.files.at(stage.module) : opened.import.directory / "shaders" / ("sh" + std::to_string(stage.module));
+                if (fs::is_regular_file(module) && ShaderUsesDrawIndex(module))
+                    throw CliError(kFailed, "subdraw_unsupported", "Individual indirect draws using gl_DrawID are not supported; omit --subdraw to replay all draws.", {{"module", stage.module}});
+            }
+            r.indirectDrawIdSafe = true;
         }
-        r.indirectDrawIdSafe = true;
+        if(visualization=="uv"){
+            const auto stage=std::find_if(stages.begin(),stages.end(),[](const auto& s){return s.stage.find("FRAGMENT")!=std::string::npos;});
+            if(stage==stages.end())throw CliError(kFailed,"visualization_unsupported","UV density requires a fragment stage.");
+            if(!stage->specialization.is_null())throw CliError(kFailed,"visualization_unsupported","UV density is unavailable for specialized fragment interfaces.");
+            const auto module=r.overrides.count(stage->module)?r.overrides.at(stage->module):opened.import.directory/"shaders"/("sh"+std::to_string(stage->module));
+            const auto directory=root/"diagnostic-sources"/r.prefix;fs::create_directories(directory);
+            const auto source=directory/"uv.frag";std::string detail,text;
+            try{text=UvCheckerboardSource(module,stage->entry,detail);}
+            catch(const std::exception& error){throw CliError(kFailed,"visualization_unsupported",error.what(),{{"mode","uv"},{"module",stage->module}});}
+            WriteFile(source,text);r.uvShader=directory/"uv.spv";
+            CompileShader(source,{0,"VK_SHADER_STAGE_FRAGMENT_BIT","main"},r.uvShader,context.tools,context.cancel);
+            diagnosticSources[r.prefix]={{"uv",{{"detail",detail},{"module",stage->module},{"source",U8(source)},{"binary",U8(r.uvShader)}}}};
+        }
+        if(visualization=="outline"){
+            auto contextRequest=r;contextRequest.visualization="original";contextRequest.drawInspection=false;contextRequest.descriptorImages=false;
+            contextRequest.output=root/"diagnostic-sources"/r.prefix/"original";
+            context.Progress("Preparing original color for the outline");
+            const auto original=RunReplay(context,contextRequest,target);
+            auto color=[](const ReplayResult& run){
+                for(const auto& asset:run.resources)if(asset.metadata.value("category","")=="output"&&asset.metadata.value("aspect","")=="COLOR"&&asset.metadata.value("location",0u)==0&&asset.file.extension()==".bmp")return asset.file;
+                throw CliError(kFailed,"visualization_unsupported","Orange outline requires a readable COLOR 0 attachment.");
+            };
+            r.outlineBaseImage=color(original);
+            Json sources;sources["original"]={{"image",U8(r.outlineBaseImage)},{"output_dir",U8(contextRequest.output)},{"manifest",U8(contextRequest.output/"manifest.json")},{"timings",original.timings}};
+            if(contextRequest.validation)sources["original"]["validation"]=ValidationSummary(original,contextRequest.output);
+            contextRequest.visualization="solid";contextRequest.output=root/"diagnostic-sources"/r.prefix/"solid";
+            context.Progress("Preparing solid coverage for the outline");
+            const auto coverage=RunReplay(context,contextRequest,target);r.outlineCoverageImage=color(coverage);
+            sources["solid"]={{"image",U8(r.outlineCoverageImage)},{"output_dir",U8(contextRequest.output)},{"manifest",U8(contextRequest.output/"manifest.json")},{"timings",coverage.timings}};
+            if(contextRequest.validation)sources["solid"]["validation"]=ValidationSummary(coverage,contextRequest.output);
+            diagnosticSources[r.prefix]=sources;
+        }
     });
-    if (!subdraw) for (auto& [name, run] : result["runs"].items()) {
+    if(!diagnosticSources.empty())result["diagnostic_sources"]=diagnosticSources;
+    if(visualization=="outline")result["notes"].push_back("Outline automatically replays original color and solid coverage before compositing its boundary. Auxiliary manifests and timings are in diagnostic_sources.");
+    for (auto& [name, run] : result["runs"].items()) {
         try { const auto parameters = ReadDrawParameters(fs::u8path(run.value("output_dir", "")), event.block); if (!parameters.is_null()) run["draw_parameters"] = parameters; } catch (...) {}
     }
     result["notes"].push_back("Replay-to-draw replays the whole frame with resource readback at the selected draw; it does not truncate the command buffer.");
+    result["inspection_seconds"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-inspectionStarted).count();
     AtomicJson(root / "result.json", result);
     return result;
 }
@@ -587,9 +629,9 @@ void RegisterReplayCommands() {
         ReplayOptions({{"frame", "N", "Frame number (1-based)", false, true}}), ReplayFrame});
     Register({"replay", "draw", "Replay the frame of one draw/dispatch with resource readback at that draw", {},
         ReplayOptions({{"block", "B", "Block number of the draw/dispatch call"}, {"occurrence", "K", "K-th submitted execution of that block (default 0)"},
-                       {"draw", "DIR", "A dump draw directory (contains draw.json); the capture is taken from the dump manifest"}, {"execution", "I", "Execution index"},
+                       {"draw", "DIR", "A dump draw directory (contains draw.json); the capture is taken from the dump manifest"}, {"execution", "I", "Global submitted execution index (0-based); --block selects an API call ID"},
                        {"outputs", "", "Return output attachments only (default)"}, {"full", "", "Also return bound inputs, descriptor images and vertex/index data"},
-                       {"visualize", "solid|wireframe|depth", "Draw visualization (vkCmdDraw* only)"}, {"subdraw", "K", "Replay only record K of an indirect draw"}}), ReplayDraw});
+                       {"visualize", "original|solid|wireframe|depth|outline|uv", "Inspect mode (vkCmdDraw* only); outline prepares its source passes automatically"}, {"subdraw", "K", "Replay only record K of an indirect draw"}}), ReplayDraw});
     Register({"compare", "", "Compare two images: extent, per-channel max/mean difference, differing pixels, PSNR", {"A", "B"},
         {{"out", "FILE.png", "Write a difference image"}}, Compare});
     Register({"shader", "show", "Show a captured shader module as GLSL, SPIR-V assembly and/or reflection", {"MOD"},
