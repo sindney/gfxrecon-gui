@@ -34,6 +34,18 @@ void RunMeshTests(const std::filesystem::path& root) {
     require(mesh.primitiveIndices==std::vector<uint32_t>({0,1,2}),"Indexed primitive mapping was lost");
     require(mesh.vertexSource.empty()&&!mesh.postDiagnostic.empty(),"Missing shader must preserve input geometry and explain post-VS unavailability");
     bool badInstance=false;try{ReadMeshData(capture,0,dir,{},1);}catch(...){badInstance=true;}require(badInstance,"Out-of-range instance was accepted");
+    capture.events[0].name="vkCmdDrawIndexedIndirect";
+    auto record=draw["parameters"];record["firstInstance"]=4;
+    auto second=record;second["indexCount"]=2;second["firstIndex"]=2;second["firstInstance"]=9;
+    auto empty=record;empty["instanceCount"]=0;
+    draw["parameters"]={{"indirectParams",Json::array({record,empty,second})}};
+    {std::ofstream out(dir/"fixture_dr.json");out<<Json{{"drawCallCommands",Json::array({draw})}}.dump();}
+    const auto indirect=ReadMeshData(capture,0,dir,dir/"missing.spv");
+    require(indirect.records.size()==3&&indirect.records[0]&&!indirect.records[1]&&indirect.records[2],"Indirect record identities were not preserved");
+    require(indirect.vertexIds==std::vector<uint32_t>({0,1,2,1,2}),"Indirect argument offsets were not decoded");
+    require(indirect.primitiveIndices==std::vector<uint32_t>({0,1,2}),"Primitives crossed indirect record boundaries");
+    require(indirect.ranges.size()==2&&indirect.ranges[0].instanceId==4&&indirect.ranges[1].instanceId==9,"Indirect firstInstance identities were lost");
+    require(!indirect.recordDiagnostics[1].empty(),"Empty indirect record lacks a diagnostic");
     std::filesystem::remove_all(dir);
 }
 }

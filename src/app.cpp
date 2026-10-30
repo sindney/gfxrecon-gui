@@ -104,8 +104,7 @@ bool App::Draw() {
     const auto title = capture ? capture->source.filename().u8string() + " - GFXReconstruct Inspector" : "GFXReconstruct Inspector";
     if (title != windowTitle_) { windowTitle_ = title; os::SetWindowTitle(title); }
 
-    if (showSettings_)
-        DrawSettings();
+    DrawSettings();
 
     AboutInfo about{"GFXReconstruct Inspector", "0.1.0", lastOpenedFile_};
     ShowAboutModal(about);
@@ -195,11 +194,12 @@ void App::ExecuteCommand(Command command) {
 }
 
 void App::DrawSettings() {
-    ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Settings", &showSettings_)) {
-        ImGui::End();
-        return;
-    }
+    if(showSettings_){ImGui::OpenPopup("Settings");showSettings_=false;}
+    const auto* viewport=ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->GetCenter(),ImGuiCond_Appearing,ImVec2(.5f,.5f));
+    ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize()*24,0),ImGuiCond_Appearing);
+    bool open=true;
+    if(!ImGui::BeginPopupModal("Settings",&open,ImGuiWindowFlags_NoDocking|ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoSavedSettings))return;
 
     // Theme picker.
     if (ImGui::BeginCombo("Theme", kThemes[CurrentThemeIndex()].displayName)) {
@@ -237,9 +237,10 @@ void App::DrawSettings() {
 
     ImGui::Separator();
     if (ImGui::Button("Close", ImVec2(120, 0)))
-        showSettings_ = false;
+        ImGui::CloseCurrentPopup();
+    if(ImGui::IsKeyPressed(ImGuiKey_Escape))ImGui::CloseCurrentPopup();
 
-    ImGui::End();
+    ImGui::EndPopup();
 }
 
 void App::DrawDockspace() {

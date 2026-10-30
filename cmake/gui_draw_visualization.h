@@ -18,10 +18,11 @@ inline uint64_t capture_pipeline=0;
 inline int subdraw=-1;
 inline bool enabled=false,applied=false,wire_supported=false,draw_id_safe=false;
 inline std::string error;
+inline std::vector<uint32_t> uv_shader;
 inline void Report(){
     if(!enabled)return;
     std::ofstream out(directory+"/gui-visualization-result.json");
-    out<<nlohmann::json{{"protocol",1},{"mode",mode},{"pipeline",capture_pipeline},{"subdraw",subdraw},{"applied",applied},{"error",error},{"wireframe_supported",wire_supported}}.dump(2);
+    out<<nlohmann::json{{"protocol",mode=="silhouette"?3:mode=="uv"?2:1},{"mode",mode},{"pipeline",capture_pipeline},{"subdraw",subdraw},{"applied",applied},{"error",error},{"wireframe_supported",wire_supported}}.dump(2);
 }
 inline void Load(std::string path,const std::string& request){
     // The CLI resolves DumpResourcesOptions after constructing this consumer.
@@ -33,6 +34,13 @@ inline void Load(std::string path,const std::string& request){
     std::lock_guard<std::mutex> lock(mutex);directory=path;enabled=false;applied=false;error.clear();pipelines.clear();wire_supported=false;mode="original";subdraw=-1;
     std::ifstream in(path+"/gui-visualization.json");if(!in)return;
     const auto config=nlohmann::json::parse(in);mode=config.value("mode",std::string("original"));subdraw=config.value("subdraw",-1);capture_pipeline=config.value("pipeline",uint64_t(0));
+    uv_shader.clear();
+    if(mode=="uv"){
+        std::ifstream shader(path+"/gui-uv.spv",std::ios::binary|std::ios::ate);
+        const auto size=shader?static_cast<std::streamoff>(shader.tellg()):0;
+        if(size>=20&&size<=1024*1024&&size%4==0){uv_shader.resize(static_cast<size_t>(size)/4);shader.seekg(0);shader.read(reinterpret_cast<char*>(uv_shader.data()),size);}
+        if(uv_shader.empty()||uv_shader[0]!=0x07230203){uv_shader.clear();error="UV checkerboard shader is missing or invalid";}
+    }
     GFXRECON_LOG_INFO("GUI visualization mode: %s pipeline=%llu",mode.c_str(),static_cast<unsigned long long>(capture_pipeline));enabled=mode!="original"||subdraw>=0;draw_id_safe=config.value("draw_id_safe",false);Report();
 }
 inline VkCompareOp Invert(VkCompareOp op){switch(op){case VK_COMPARE_OP_NEVER:return VK_COMPARE_OP_ALWAYS;case VK_COMPARE_OP_LESS:return VK_COMPARE_OP_GREATER_OR_EQUAL;case VK_COMPARE_OP_EQUAL:return VK_COMPARE_OP_NOT_EQUAL;case VK_COMPARE_OP_LESS_OR_EQUAL:return VK_COMPARE_OP_GREATER;case VK_COMPARE_OP_GREATER:return VK_COMPARE_OP_LESS_OR_EQUAL;case VK_COMPARE_OP_NOT_EQUAL:return VK_COMPARE_OP_EQUAL;case VK_COMPARE_OP_GREATER_OR_EQUAL:return VK_COMPARE_OP_LESS;default:return VK_COMPARE_OP_NEVER;}}
@@ -58,11 +66,12 @@ template<typename Table> inline VkPipeline Create(Table table,PFN_vkCreateGraphi
 }
 template<typename Table> inline void Prepare(Table table,PFN_vkCreateGraphicsPipelines func,VkDevice device,uint64_t id,VkPipeline original,const VkGraphicsPipelineCreateInfo& ci){
     if(!enabled||mode=="original"||id!=capture_pipeline)return;std::lock_guard<std::mutex> lock(mutex);
+    if(mode=="uv"&&uv_shader.empty()){Report();return;}
     if(!ci.pRasterizationState||!ci.pColorBlendState||!ci.pColorBlendState->attachmentCount){error="This pipeline has no color target for an overlay";Report();return;}
     if(mode=="wireframe"&&!wire_supported){error="The replay device does not support fillModeNonSolid";Report();return;}
     if(ci.pDynamicState)for(uint32_t i=0;i<ci.pDynamicState->dynamicStateCount;++i){const auto state=uint32_t(ci.pDynamicState->pDynamicStates[i]);if(state>=1000267000u){error="Extended dynamic pipeline states are not supported by this overlay";Report();return;}}
     Pipelines pair;pair.device=device;
-    pair.pass=mode=="depth"?Create(table,func,device,ci,pass_shader,sizeof(pass_shader),false):Create(table,func,device,ci,solid_shader,sizeof(solid_shader),false);
+    pair.pass=(mode=="depth"||mode=="silhouette")?Create(table,func,device,ci,pass_shader,sizeof(pass_shader),false):mode=="uv"?Create(table,func,device,ci,uv_shader.data(),uv_shader.size()*4,false):Create(table,func,device,ci,solid_shader,sizeof(solid_shader),false);
     if(mode=="depth")pair.fail=Create(table,func,device,ci,fail_shader,sizeof(fail_shader),true);
     if(pair.pass&&(mode!="depth"||pair.fail))pipelines[original]=pair;
     else{if(pair.pass)table->DestroyPipeline(device,pair.pass,nullptr);if(pair.fail)table->DestroyPipeline(device,pair.fail,nullptr);}
@@ -73,6 +82,7 @@ template<typename Table,typename Draw> inline void Execute(Table& table,VkPipeli
     if(mode=="original"){draw();applied=true;Report();return;}
     const auto found=pipelines.find(original);
     if(found==pipelines.end()){if(error.empty())error="No compatible overlay pipeline was created for this draw";Report();draw();return;}
+    if(mode=="silhouette")draw();
     if(found->second.fail){table->CmdBindPipeline(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,found->second.fail);draw();}
     table->CmdBindPipeline(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,found->second.pass);draw();table->CmdBindPipeline(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,original);applied=true;Report();
 }

@@ -50,6 +50,7 @@ void Workspace::InvalidateDrawResources(){
     resources_.clear();dumpExecution_=-1;dumpBlock_=0;drawHasInputs_=false;
     executionStatuses_.clear();
     ResetImageDocuments();resourceMode_=0;imageShownGeneration_=0;
+    diagnosticResources_.clear();diagnosticErrors_.clear();diagnosticExecution_=-1;uvDetail_.clear();
 }
 void Workspace::DrawStageImages(const std::string& stage,bool outputs){
     std::vector<const ResourceArtifact*> images;
@@ -99,7 +100,7 @@ void Workspace::DrawImages(){
     RefreshOverlay refresh(Refreshing("Image"));
     if(capture_&&selectedExecution_>=0&&capture_->events[selectedEvent_].name.rfind("vkCmdDraw",0)==0){
         int mode=drawVisualization_;ImGui::SetNextItemWidth(210);
-        if(ImGui::Combo("##draw-visualization",&mode,"Original\0Solid coverage\0Wireframe\0Depth pass & fail\0"))SetDrawVisualization(mode,selectedSubdraw_);
+        if(ImGui::Combo("##draw-visualization",&mode,"Original\0Solid coverage\0Wireframe\0Depth pass & fail\0UV density\0Orange outline\0"))SetDrawVisualization(mode,selectedSubdraw_);
         ImGui::SetItemTooltip("Solid/wireframe: geometry without depth occlusion.\nDepth: green passes, red fails against depth before the selected draw/batch.\nFragment discard, stencil and shader depth writes are not emulated.");
         const auto args=capture_->ReadEvent(selectedEvent_).value("function",Json::object()).value("args",Json::object());
         const auto count=args.value("drawCount",0u);
@@ -118,6 +119,10 @@ void Workspace::DrawImages(){
         }
     }
     const bool matches=capture_&&selectedExecution_>=0&&dumpExecution_==selectedExecution_&&dumpBlock_==capture_->events[selectedEvent_].block;
+    if(matches&&imageShownGeneration_==selectionGeneration_&&diagnosticExecution_==selectedExecution_){
+        const auto error=diagnosticErrors_.find(drawVisualization_);
+        if(error!=diagnosticErrors_.end())ImGui::TextWrapped("%s. Showing original color.",error->second.c_str());
+    }
     if(resourceMode_==2){
         if(ImGui::Button("Back to images"))resourceMode_=0;
         DrawBuffer();
@@ -151,8 +156,8 @@ void Workspace::DrawImages(){
         }
         if(imageTab_>=0&&imageTab_<int(imageTabs_.size())){
             const auto& asset=imageTabs_[imageTab_];
-            ImGui::TextDisabled("%s | mip %llu | slice %llu",ImageName(asset).c_str(),Number(asset.metadata,"mipLevel"),Number(asset.metadata,"arrayLayer"));ImGui::SetItemTooltip("%s",ImageDetails(asset.metadata).c_str());
-            resourceImage_.Draw();
+            const auto details=ImageName(asset)+" | mip "+std::to_string(Number(asset.metadata,"mipLevel"))+" | slice "+std::to_string(Number(asset.metadata,"arrayLayer"));
+            resourceImage_.Draw(details,ImageDetails(asset.metadata));
         }else if(hasComparison_){
             ImGui::Combo("Compare",&comparisonMode_,"Side by side\0Absolute difference\0");
             if(comparisonMode_==1)differenceImage_.Draw();
@@ -160,13 +165,16 @@ void Workspace::DrawImages(){
         }else image_.Draw();
         ImGui::EndChild();ImGui::SameLine(0,8);
         ImGui::BeginChild("image-bindings",ImVec2(0,0));
+        const int sidebarSelection=imageSidebar_;
         if(ImGui::BeginTabBar("image-binding-tabs")){
-            if(ImGui::BeginTabItem("Inputs")){imageSidebar_=0;ImGui::EndTabItem();}
-            if(ImGui::BeginTabItem("Outputs",nullptr,imageTabs_.empty()?ImGuiTabItemFlags_SetSelected:0)){imageSidebar_=1;ImGui::EndTabItem();}
+            if(ImGui::BeginTabItem("Inputs",nullptr,ImGui::IsWindowAppearing()&&sidebarSelection==0?ImGuiTabItemFlags_SetSelected:0)){imageSidebar_=0;ImGui::EndTabItem();}
+            if(ImGui::BeginTabItem("Outputs",nullptr,ImGui::IsWindowAppearing()&&sidebarSelection==1?ImGuiTabItemFlags_SetSelected:0)){imageSidebar_=1;ImGui::EndTabItem();}
             ImGui::EndTabBar();
         }
         ImGui::BeginChild("asset-list");
-        if(!matches)ImGui::TextWrapped("Select a draw to inspect its inputs and outputs.");
+        if(!imageSidebar_&&capture_&&selectedExecution_>=0&&capture_->events[selectedEvent_].name.rfind("vkCmdDispatch",0)==0)
+            ImGui::TextWrapped("Image input inspection is not supported for compute dispatches yet.");
+        else if(!matches&&!Refreshing("Image"))ImGui::TextWrapped("No image readback for this selection. The last successful image is retained.");
         else{
             int row=0;bool decoded=false,any=false;
             std::vector<const ResourceArtifact*> assets;

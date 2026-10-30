@@ -41,6 +41,35 @@ void WritePng(const std::filesystem::path& file, const Image& image) {
     STBIW_FREE(data);
     if (!output) throw std::runtime_error("Cannot write PNG " + file.u8string());
 }
+void WriteBmp(const std::filesystem::path& file,const Image& image){
+    const uint64_t bytes=uint64_t(image.width)*image.height*4;
+    if(!image.width||!image.height||bytes!=image.rgba.size()||bytes>UINT32_MAX-54||image.width>INT32_MAX||image.height>INT32_MAX)throw std::runtime_error("Invalid image for BMP output");
+    std::vector<uint8_t> out(54+static_cast<size_t>(bytes));
+    auto u32=[&](size_t offset,uint32_t value){for(unsigned i=0;i<4;++i)out[offset+i]=static_cast<uint8_t>(value>>(i*8));};
+    out[0]='B';out[1]='M';u32(2,static_cast<uint32_t>(out.size()));u32(10,54);u32(14,40);u32(18,image.width);u32(22,image.height);out[26]=1;out[28]=32;u32(34,static_cast<uint32_t>(bytes));
+    for(uint32_t y=0;y<image.height;++y)for(uint32_t x=0;x<image.width;++x){const auto source=(size_t(y)*image.width+x)*4,destination=54+(size_t(image.height-1-y)*image.width+x)*4;
+        out[destination]=image.rgba[source+2];out[destination+1]=image.rgba[source+1];out[destination+2]=image.rgba[source];out[destination+3]=image.rgba[source+3];}
+    std::ofstream stream(file,std::ios::binary|std::ios::trunc);stream.write(reinterpret_cast<const char*>(out.data()),static_cast<std::streamsize>(out.size()));
+    if(!stream)throw std::runtime_error("Cannot write BMP "+file.u8string());
+}
+Image ComposeDrawOutline(const Image& original,const Image& coverageA,const Image& coverageB,uint32_t thickness){
+    const auto pixels=size_t(original.width)*original.height;
+    if(!pixels||original.rgba.size()!=pixels*4||thickness<1||thickness>8)throw std::runtime_error("Invalid outline image or thickness");
+    for(const auto* image:{&coverageA,&coverageB}){
+        if(image->width!=original.width||image->height!=original.height)throw ImageExtentMismatch(original.width,original.height,image->width,image->height);
+        if(image->rgba.size()!=pixels*4)throw std::runtime_error("Invalid outline coverage image");
+    }
+    std::vector<uint8_t> mask(pixels);
+    for(size_t p=0;p<pixels;++p)mask[p]=coverageA.rgba[p*4]!=coverageB.rgba[p*4]||coverageA.rgba[p*4+1]!=coverageB.rgba[p*4+1]||coverageA.rgba[p*4+2]!=coverageB.rgba[p*4+2];
+    auto result=original;
+    auto covered=[&](int64_t x,int64_t y){return x>=0&&y>=0&&x<original.width&&y<original.height&&mask[size_t(y)*original.width+size_t(x)];};
+    for(uint32_t y=0;y<original.height;++y)for(uint32_t x=0;x<original.width;++x)if(mask[size_t(y)*original.width+x]){
+        bool boundary=false;
+        for(int distance=1;distance<=static_cast<int>(thickness)&&!boundary;++distance)boundary=!covered(int64_t(x)-distance,y)||!covered(int64_t(x)+distance,y)||!covered(x,int64_t(y)-distance)||!covered(x,int64_t(y)+distance);
+        if(boundary){const auto p=(size_t(y)*original.width+x)*4;result.rgba[p]=255;result.rgba[p+1]=140;result.rgba[p+2]=0;result.rgba[p+3]=255;}
+    }
+    return result;
+}
 Image ConvertToPng(const std::filesystem::path& source, const std::filesystem::path& png) {
     auto image = LoadImage(source);
     WritePng(png, image);

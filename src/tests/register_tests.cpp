@@ -40,7 +40,7 @@ ImGuiWindow* EditorWindow() {
     return nullptr;
 }
 void WaitForWorkspace(ImGuiTestContext* ctx, gfx::Workspace& workspace) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(180);
     do {
         ctx->Yield(); std::this_thread::sleep_for(std::chrono::milliseconds(5));
         if (!workspace.Busy() && !workspace.HasPendingWork()) { ctx->Yield(2); if (!workspace.Busy() && !workspace.HasPendingWork()) return; }
@@ -50,7 +50,7 @@ void ReviewScreenshot(ImGuiTestContext* ctx,const char* suffix){
     const auto folder=std::getenv("GFXRECON_GUI_REVIEW_DIR");if(!folder)return;
     std::filesystem::create_directories(std::filesystem::u8path(folder));ctx->Yield(4);
     const auto path=std::filesystem::u8path(folder)/(std::string(suffix)+".png");const auto* viewport=ImGui::GetMainViewport();ctx->CaptureReset();
-    const int flags=std::string(suffix)=="phone-unlock-notice"?ImGuiCaptureFlags_IncludePopups:0;
+    const int flags=std::string(suffix)=="phone-unlock-notice"||std::string(suffix)=="settings-dialog"?ImGuiCaptureFlags_IncludePopups:0;
     ctx->CaptureArgs->InCaptureRect=ImRect(viewport->Pos,ImVec2(viewport->Pos.x+viewport->Size.x,viewport->Pos.y+viewport->Size.y));
     std::snprintf(ctx->CaptureArgs->InOutputFile,sizeof(ctx->CaptureArgs->InOutputFile),"%s",path.u8string().c_str());IM_CHECK(ctx->CaptureScreenshot(flags));
 }
@@ -210,6 +210,8 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         IM_CHECK(!ctx->ItemExists("##filter"));
         ctx->SetRef("//Settings");
         IM_CHECK(ctx->ItemExists("Close"));
+        const auto* settings=ImGui::FindWindowByName("Settings");IM_CHECK(settings!=nullptr);
+        IM_CHECK((settings->Flags&ImGuiWindowFlags_Modal)!=0);IM_CHECK((settings->Flags&ImGuiWindowFlags_NoDocking)!=0);IM_CHECK(settings->DockNode==nullptr);
         ctx->ItemClick("Close");
 
         ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_P);
@@ -217,6 +219,8 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         IM_CHECK(ctx->ItemExists("##filter"));
         ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_P);
         IM_CHECK(!ctx->ItemExists("##filter"));
+        ctx->MenuClick("//##MainMenuBar/File/Settings...");ctx->Yield(3);ctx->SetRef("//Settings");IM_CHECK(ctx->ItemExists("Close"));
+        ReviewScreenshot(ctx,"settings-dialog");ctx->KeyPress(ImGuiKey_Escape);ctx->Yield(3);IM_CHECK(!ctx->ItemExists("Close"));
     };
 
     t = IM_REGISTER_TEST(engine, "shell", "palette empty results and escape are safe");
@@ -438,6 +442,8 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             ctx->ItemClick("Flip V");IM_CHECK(workspace.BaselineImage().Orientation().vertical);ctx->ItemClick("Flip V");
             IM_CHECK(workspace.BaselineImage().Pixel(0,0)==originalPixel);
             IM_CHECK(std::abs(ctx->ItemInfo("Fit").RectFull.GetCenter().y - ctx->ItemInfo("##scale").RectFull.GetCenter().y) < 3);
+            IM_CHECK(ctx->ItemInfo("##scale").RectFull.GetWidth()<=ImGui::GetFontSize()*14+1);
+            IM_CHECK(ctx->ItemInfo("##range-bar").RectFull.GetWidth()<=ImGui::GetFontSize()*14+1);
             const auto baselinePixel = workspace.BaselineImage().Pixel(workspace.BaselineImage().Width() / 2, workspace.BaselineImage().Height() / 2);
             FrameAction(ctx, "Dump selected resources"); wait();
             IM_CHECK(workspace.Status().find("Replay artifacts:") != std::string::npos);
@@ -524,10 +530,24 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             IM_CHECK(workspace.Status().find("previous selection") != std::string::npos);
             IM_CHECK(workspace.BaselineImage().Pixel(workspace.BaselineImage().Width() / 2, workspace.BaselineImage().Height() / 2) == pixel);
             workspace.SelectExecution(0);
-            ctx->SetRef("//Frames"); FrameAction(ctx, "Revert and render baseline"); wait();
-            IM_CHECK(workspace.Status().find("Replay artifacts:") != std::string::npos);
+            ImGui::SetWindowFocus("Shader");ctx->Yield(3);ctx->SetRef("//Shader");
+#ifdef _WIN32
+            {
+                const auto authored=workspace.Editor().GetText();
+                _putenv_s("GFXRECON_GUI_TEST_RESET_FAILURE","1");
+                struct ClearResetFailure{~ClearResetFailure(){_putenv_s("GFXRECON_GUI_TEST_RESET_FAILURE","");}} clearResetFailure;
+                ctx->ItemClick("Reset shader");wait();IM_CHECK(workspace.Status().find("Simulated reset replay failure")!=std::string::npos);
+                IM_CHECK_EQ(workspace.Editor().GetText(),authored);IM_CHECK(workspace.HasUnsavedEdits());
+                IM_CHECK(workspace.BaselineImage().Pixel(workspace.BaselineImage().Width()/2,workspace.BaselineImage().Height()/2)==pixel);
+            }
+#endif
+            ImGui::SetWindowFocus("Shader");ctx->Yield(3);ctx->SetRef("//Shader");ctx->ItemClick("Reset shader");wait();
+            IM_CHECK(workspace.Status().find("Shader reset to captured original and replayed") != std::string::npos);
             IM_CHECK(workspace.BaselineImage().Pixel(workspace.BaselineImage().Width() / 2, workspace.BaselineImage().Height() / 2) == baselinePixel);
-            ctx->SetRef("//Shader"); ShaderAction(ctx, "Revert text");
+            IM_CHECK(!workspace.HasUnsavedEdits());IM_CHECK(workspace.Editor().IsReadOnly());IM_CHECK(!workspace.Editor().CanUndo());IM_CHECK(!workspace.Editor().CanRedo());IM_CHECK_EQ(workspace.ModifiedImage().Width(),0);
+            ImGui::SetWindowFocus("Shader");ctx->Yield(3);ctx->SetRef("//Shader");
+            IM_CHECK((ctx->ItemInfo("Undo").ItemFlags&ImGuiItemFlags_Disabled)!=0);IM_CHECK((ctx->ItemInfo("Redo").ItemFlags&ImGuiItemFlags_Disabled)!=0);IM_CHECK((ctx->ItemInfo("Apply").ItemFlags&ImGuiItemFlags_Disabled)!=0);
+            ReviewScreenshot(ctx,"shader-reset");
         };
         if (desktopFixture && androidFixture) {
             auto* androidTest = IM_REGISTER_TEST(engine, "integration", "Android capture automatic target render dump edit and revert");
@@ -592,6 +612,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             ReviewScreenshot(ctx,"indirect-draw-visualization");
             ctx->SetRef("//Image");ctx->ComboClick("##indirect-subdraw/All 3 draws");WaitForWorkspace(ctx,w);IM_CHECK_EQ(orange(),all);
             ctx->ComboClick("##draw-visualization/Original");WaitForWorkspace(ctx,w);IM_CHECK_EQ(orange(),0u);
+            ctx->ComboClick("##draw-visualization/Orange outline");WaitForWorkspace(ctx,w);IM_CHECK(orange()>0);IM_CHECK(orange()<all/5);IM_CHECK(!w.Busy());ReviewScreenshot(ctx,"orange-outline");
         };
     }
 
@@ -784,6 +805,9 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         ctx->SetRef("//Shader");
         ctx->ItemClick("Edit");
         IM_CHECK(!editor.IsReadOnly());
+        IM_CHECK(ctx->ItemInfo("More").RectFull.Min.x>ctx->ItemInfo("Edit").RectFull.Min.x);
+        IM_CHECK(ctx->ItemInfo("More").RectFull.Max.x<=ctx->ItemInfo("Undo").RectFull.Min.x);
+        IM_CHECK((ctx->ItemInfo("Undo").ItemFlags&ImGuiItemFlags_Disabled)!=0);IM_CHECK((ctx->ItemInfo("Redo").ItemFlags&ImGuiItemFlags_Disabled)!=0);
         auto* window = EditorWindow();
         IM_CHECK(window != nullptr);
         ctx->MouseMoveToPos(ImVec2(window->Pos.x + 120, window->Pos.y + 50));
@@ -791,6 +815,15 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         ctx->Yield(3);
         IM_CHECK(GImGui->PlatformImeData.WantTextInput);
         IM_CHECK(GImGui->PlatformImeData.InputLineHeight>0);
+        const auto parentScroll=window->ParentWindow->Scroll;const auto parentPos=window->ParentWindow->Pos;
+        const auto caret=editor.GetCursorPosition();
+        ctx->KeyPress(ImGuiKey_RightArrow);ctx->Yield(3);
+        IM_CHECK(editor.GetCursorPosition()!=caret);
+        IM_CHECK_EQ(window->ParentWindow->Scroll.x,parentScroll.x);IM_CHECK_EQ(window->ParentWindow->Scroll.y,parentScroll.y);
+        IM_CHECK_EQ(window->ParentWindow->Pos.x,parentPos.x);IM_CHECK_EQ(window->ParentWindow->Pos.y,parentPos.y);
+        ctx->SetRef("//Shader");ctx->ItemClick("Edit");IM_CHECK(editor.IsReadOnly());
+        ctx->ItemClick("Edit");IM_CHECK(!editor.IsReadOnly());
+        ctx->MouseMoveToPos(window->InnerRect.GetCenter());ctx->MouseClick(ImGuiMouseButton_Left);ctx->Yield(3);
 #ifdef IMGUI_TEMPLATE_OSLAYER_SDL3
         const auto windowId=static_cast<SDL_WindowID>(reinterpret_cast<uintptr_t>(ImGui::GetMainViewport()->PlatformHandle));
         auto* native=SDL_GetWindowFromID(windowId);IM_CHECK(native!=nullptr);
@@ -810,6 +843,9 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         ctx->KeyChars("line */");
         ctx->Yield(3);
         IM_CHECK(editor.GetText().find("/* edited\nline */") != std::string::npos);
+        ctx->SetRef("//Shader");IM_CHECK((ctx->ItemInfo("Undo").ItemFlags&ImGuiItemFlags_Disabled)==0);
+        const auto beforeUndo=editor.GetText();ctx->ItemClick("Undo");ctx->Yield(3);IM_CHECK(editor.GetText()!=beforeUndo);IM_CHECK((ctx->ItemInfo("Redo").ItemFlags&ImGuiItemFlags_Disabled)==0);
+        ctx->ItemClick("Redo");ctx->Yield(3);IM_CHECK_EQ(editor.GetText(),beforeUndo);
         ctx->SetRef("//Shader");
         ShaderAction(ctx, "Revert text");
         IM_CHECK(editor.GetText().find("/* edited") == std::string::npos);

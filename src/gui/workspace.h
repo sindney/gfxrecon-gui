@@ -49,9 +49,14 @@ struct WorkspaceResult {
     std::vector<std::shared_ptr<WorkspaceResult>> stageDocuments;
     Json validationReport;
     Json indirectParameters;
+    std::map<int,std::vector<ResourceArtifact>> diagnosticResources;
+    std::map<int,std::string> diagnosticErrors;
+    std::string uvDetail;
     bool failed = false;
     std::optional<AndroidLockState> unlockRequired;
     bool retryReplay=false,retryDump=false,retryRevert=false;
+    bool retryShaderReset=false,shaderReset=false;
+    uint64_t resetShaderModule=0;
     uint32_t replayFrame = 0;
     std::string replayTarget;
     std::vector<AndroidDevice> devices;
@@ -77,7 +82,7 @@ public:
     void Shutdown();
     void Draw();
     void Open(const std::string& path);
-    void SelectEvent(size_t index);
+    void SelectEvent(size_t index, bool preserveImages = false);
     void SelectExecution(size_t index, bool preview = false);
     void LoadShader(const ShaderStage& stage);
     bool Busy() const;
@@ -106,6 +111,9 @@ public:
     void SetReplayMode(ReplayMode mode);
     void SetDrawVisualization(int mode,int subdraw=-1);
     int DrawVisualization()const{return drawVisualization_;}
+    size_t CachedDrawModeCount()const{return diagnosticResources_.size();}
+    const std::string& DrawUvDetail()const{return uvDetail_;}
+    int ImageSidebar()const{return imageSidebar_;}
     int SelectedSubdraw()const{return selectedSubdraw_;}
     bool PhoneScreenOff()const{return phoneScreenOff_;}
     void RequestCapture();
@@ -145,11 +153,14 @@ private:
     void DrawFrames();
     void DrawFrameActions(uint32_t frame);
     void CompileShader();
+    void ResetShader();
+    void ResetShaderText();
     void ReplayFrame(bool dump = false, bool revert = false, uint32_t requestedFrame = 0, bool thumbnailOnly = false, bool meshPreview = false, bool drawPreview = false, bool descriptorImages = false, bool fresh = false);
     void DrawImages();
     void DrawReplayUnlock();
     void ResetImageDocuments();
     void InvalidateDrawResources();
+    void ShowDrawVisualization();
     void DrawBoundImages(const char* id,bool compact = false);
     void DrawStageImages(const std::string& stage,bool outputs);
     void DrawStageSamplers(const ShaderStage& stage,const Execution* execution);
@@ -292,6 +303,10 @@ private:
     int displayedDraw_ = -1;
     int drawVisualization_=0,selectedSubdraw_=-1;
     Json indirectParameters_;
+    std::map<int,std::vector<ResourceArtifact>> diagnosticResources_;
+    std::map<int,std::string> diagnosticErrors_;
+    std::string uvDetail_;
+    int diagnosticExecution_=-1,diagnosticSubdraw_=-1;
     std::vector<uint32_t> thumbnailQueue_;
     std::map<uint32_t, std::string> failedFrames_;
     struct FramePreview { ImageViewer image; std::string target; bool modified = false; };

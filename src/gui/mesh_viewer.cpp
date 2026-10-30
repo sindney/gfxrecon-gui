@@ -75,7 +75,8 @@ Matrix Identity(){return {1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};}
 Matrix Mul(const Matrix&a,const Matrix&b){Matrix c{};for(int x=0;x<4;++x)for(int y=0;y<4;++y)for(int k=0;k<4;++k)c[x*4+y]+=a[k*4+y]*b[x*4+k];return c;}
 }
 struct MeshViewer::Impl {
-    Gl gl; std::shared_ptr<MeshData> data; std::vector<MeshPosition> screen;
+    Gl gl; std::shared_ptr<MeshData> data,all; std::vector<MeshPosition> screen;
+    int record=-1;
     GLuint program=0,vao=0,vbo=0,fbo=0,color=0,depth=0; int width=0,height=0,space=0,mode=0,attribute=0;
     int uploadedSpace=-1,uploadedAttribute=-1; GLsizei count=0; bool dirty=true; float yaw=.5f,pitch=.25f,distance=3,panX=0,panY=0,screenZoom=1,screenPanX=0,screenPanY=0;
     std::string diagnostic;
@@ -114,7 +115,10 @@ void main(){vec3 n=cross(dFdx(viewPosition),dFdy(viewPosition));float l=length(n
             gl.GenBuffers(1,&feedbackBuffer);gl.BindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER,feedbackBuffer);screen.resize(data->vertexIds.size());
             gl.BufferData(GL_TRANSFORM_FEEDBACK_BUFFER,static_cast<GLsizeiptr>(screen.size()*sizeof(MeshPosition)),nullptr,GL_STREAM_READ);gl.BindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER,0,feedbackBuffer);
             gl.GenQueries(1,&query);gl.BeginQuery(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN,query);
-            glEnable(GL_RASTERIZER_DISCARD);gl.BeginTransformFeedback(GL_POINTS);glDrawArrays(GL_POINTS,0,static_cast<GLsizei>(screen.size()));gl.EndTransformFeedback();
+            glEnable(GL_RASTERIZER_DISCARD);gl.BeginTransformFeedback(GL_POINTS);
+            if(data->ranges.empty())glDrawArrays(GL_POINTS,0,static_cast<GLsizei>(screen.size()));
+            else for(const auto& range:data->ranges){gl.Uniform1i(gl.GetUniformLocation(vertexProgram,"gfx_original_instance_id"),static_cast<GLint>(range.instanceId));glDrawArrays(GL_POINTS,range.first,range.count);}
+            gl.EndTransformFeedback();
             gl.EndQuery(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN);GLuint written=0;gl.GetQueryObjectuiv(query,GL_QUERY_RESULT,&written);
             if(written!=screen.size())throw std::runtime_error("Post-VS output count did not match the captured draw");
             gl.GetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER,0,static_cast<GLsizeiptr>(screen.size()*sizeof(MeshPosition)),screen.data());
@@ -161,14 +165,30 @@ void main(){vec3 n=cross(dFdx(viewPosition),dFdy(viewPosition));float l=length(n
 };
 MeshViewer::MeshViewer()=default;MeshViewer::~MeshViewer()=default;
 void MeshViewer::Release(){impl_.reset();}
-void MeshViewer::SetData(std::shared_ptr<MeshData> data){Release();impl_=std::make_unique<Impl>();impl_->data=std::move(data);impl_->space=impl_->data->attributes.empty()?1:0;for(size_t i=0;i<impl_->data->attributes.size();++i)if(impl_->data->attributes[i].location==0){impl_->attribute=static_cast<int>(i);break;}impl_->Evaluate();}
+void MeshViewer::SetData(std::shared_ptr<MeshData> data){Release();impl_=std::make_unique<Impl>();impl_->data=impl_->all=std::move(data);impl_->space=impl_->data->attributes.empty()?1:0;for(size_t i=0;i<impl_->data->attributes.size();++i)if(impl_->data->attributes[i].location==0){impl_->attribute=static_cast<int>(i);break;}impl_->Evaluate();}
 size_t MeshViewer::ScreenVertexCount()const{return impl_?impl_->screen.size():0;}
 MeshPosition MeshViewer::ScreenVertex(size_t index)const{return impl_->screen.at(index);}
-size_t MeshViewer::InputVertexCount()const{return impl_&&!impl_->data->attributes.empty()?impl_->data->attributes.front().values.size():0;}
+size_t MeshViewer::InputVertexCount()const{return impl_&&impl_->data&&!impl_->data->attributes.empty()?impl_->data->attributes.front().values.size():0;}
 const std::string& MeshViewer::Diagnostic()const{static const std::string empty;return impl_?impl_->diagnostic:empty;}
 std::array<uint8_t,4> MeshViewer::PreviewCenter()const{return impl_?impl_->centerPixel:std::array<uint8_t,4>{};}
 void MeshViewer::Draw(){
     if(!impl_){ImGui::TextDisabled("Select a draw and load its mesh readback.");return;}auto& m=*impl_;
+    if(!m.all->records.empty()){
+        ImGui::SetNextItemWidth(240);const auto label=m.record<0?"All drawable meshes":"Draw "+std::to_string(m.record);
+        int selected=m.record;
+        if(ImGui::BeginCombo("##mesh-record",label.c_str())){
+            if(ImGui::Selectable("All drawable meshes",m.record<0))selected=-1;
+            ImGuiListClipper clip;clip.Begin(static_cast<int>(m.all->records.size()));
+            while(clip.Step())for(int i=clip.DisplayStart;i<clip.DisplayEnd;++i)if(ImGui::Selectable(("Draw "+std::to_string(i)).c_str(),m.record==i))selected=i;
+            ImGui::EndCombo();
+        }
+        if(selected!=m.record){
+            const auto location=m.data&&!m.data->attributes.empty()?m.data->attributes[m.attribute].location:0u;
+            m.record=selected;m.data=selected<0?m.all:m.all->records[selected];m.screen.clear();m.attribute=0;m.uploadedSpace=m.uploadedAttribute=-1;m.dirty=true;
+            if(m.data){for(size_t i=0;i<m.data->attributes.size();++i)if(m.data->attributes[i].location==location){m.attribute=static_cast<int>(i);break;}m.Evaluate();}
+        }
+        if(!m.data){ImGui::TextWrapped("%s",m.all->recordDiagnostics[m.record].c_str());return;}
+    }
     const float available=ImGui::GetContentRegionAvail().x;
     ImGui::SetNextItemWidth(std::max(100.0f,std::min(180.0f,available*.55f)));m.dirty|=ImGui::Combo("##mesh-space",&m.space,"Local (input)\0Screen (post-VS)\0");ImGui::SameLine();ImGui::SetNextItemWidth(std::max(75.0f,std::min(100.0f,ImGui::GetContentRegionAvail().x)));m.dirty|=ImGui::Combo("##mesh-mode",&m.mode,"Solid\0Wireframe\0Points\0");
     if(available>350)ImGui::SameLine();

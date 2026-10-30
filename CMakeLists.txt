@@ -215,6 +215,7 @@ set(CORE_SOURCES
     src/shaders/interface.cpp
     src/shaders/metadata.cpp
     src/shaders/decode.cpp
+    src/shaders/diagnostics.cpp
     src/core/log.cpp
     src/core/artifacts.cpp
     src/core/settings.cpp
@@ -264,7 +265,7 @@ string(REPLACE "if (!IsReadOnly() && ctrl && !shift && !alt && ImGui::IsKeyPress
 string(REPLACE "if (!IsReadOnly() && !io.InputQueueCharacters.empty())"
     "}\nif (!IsReadOnly() && !io.InputQueueCharacters.empty())" _editor "${_editor}")
 string(REPLACE "ImVec2 cursorScreenPos = ImGui::GetCursorScreenPos();"
-    "ImVec2 cursorScreenPos = ImGui::GetCursorScreenPos();\nif (ImGui::IsWindowFocused() && !IsReadOnly()) gfx::RequestEditorInput(ImVec2(cursorScreenPos.x + mTextStart + TextDistanceToLineStart(GetActualCursorCoordinates()), cursorScreenPos.y + GetActualCursorCoordinates().mLine * mCharAdvance.y), mCharAdvance.y);" _editor "${_editor}")
+    "ImVec2 cursorScreenPos = ImGui::GetCursorScreenPos();\nif (ImGui::IsWindowFocused()) gfx::RequestEditorInput(ImVec2(cursorScreenPos.x + mTextStart + TextDistanceToLineStart(GetActualCursorCoordinates()), cursorScreenPos.y + GetActualCursorCoordinates().mLine * mCharAdvance.y), mCharAdvance.y);" _editor "${_editor}")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/TextEditor.cpp"
     "#include <cassert>\n#include <cfloat>\n#include <cstring>\n#include \"gui/editor_input.h\"\n${_editor}")
 

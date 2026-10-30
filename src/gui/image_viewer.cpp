@@ -1,6 +1,7 @@
 #include "gui/image_viewer.h"
 #include "analysis/depth_sample.h"
 #include "core/image_io.h"
+#include <cstdio>
 
 #include <imgui.h>
 #ifdef _WIN32
@@ -163,10 +164,10 @@ void ImageViewer::Upload() {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     glBindTexture(GL_TEXTURE_2D, 0);
 }
-void ImageViewer::Draw() {
+void ImageViewer::Draw(const std::string& details,const std::string& tooltip) {
     if (!texture_) { ImGui::TextWrapped("Render a frame to inspect its replay screenshot."); return; }
     if (ImGui::Button("Fit")) fitToView_ = true;
-    ImGui::SameLine(); ImGui::SetNextItemWidth(-1);
+    ImGui::SameLine(); const float sliderWidth=ImGui::GetFontSize()*14; ImGui::SetNextItemWidth(std::min(sliderWidth,std::max(40.0f,ImGui::GetContentRegionAvail().x)));
     if (ImGui::SliderFloat("##scale", &zoom_, 0.01f, 32.0f, "%.2fx", ImGuiSliderFlags_Logarithmic)) fitToView_ = false;
     ImGui::SetItemTooltip("Image scale. Use the mouse wheel over the image to zoom around the pointer.");
     bool changed = false;
@@ -187,7 +188,7 @@ void ImageViewer::Draw() {
     ImGui::SetNextItemWidth(100);rangeChanged|=ImGui::DragFloat("##range-min",&range_.minimum,.0001f,0,1,"%.6g",ImGuiSliderFlags_AlwaysClamp);
     ImGui::SetItemTooltip("Black point. Ctrl+click to enter an exact value.");ImGui::SameLine();
     const float buttons=ImGui::CalcTextSize("AutoReset").x+ImGui::GetStyle().FramePadding.x*4+ImGui::GetStyle().ItemSpacing.x*4;
-    const auto start=ImGui::GetCursorScreenPos();const ImVec2 barSize(std::max(40.0f,ImGui::GetContentRegionAvail().x-100-buttons),ImGui::GetFrameHeight());
+    const auto start=ImGui::GetCursorScreenPos();const ImVec2 barSize(std::min(sliderWidth,std::max(40.0f,ImGui::GetContentRegionAvail().x-100-buttons)),ImGui::GetFrameHeight());
     ImGui::InvisibleButton("##range-bar",barSize);
     if(ImGui::IsItemActivated()){
         const float u=std::clamp((ImGui::GetMousePos().x-start.x)/barSize.x,0.0f,1.0f)*rangeDomainMaximum_;rangeHandle_=std::abs(u-range_.minimum)<std::abs(u-range_.maximum)?0:1;
@@ -252,8 +253,12 @@ void ImageViewer::Draw() {
         }
     }
     ImGui::EndChild();
-    ImGui::TextDisabled("%d x %d  |  %.2fx  |  %s", width_, height_, zoom_, scalar_?"Scalar":srgbDisplay_ ? "sRGB" : "Linearized RGB");
-    if(!depthValues_.empty())ImGui::SetItemTooltip("Full-precision depth readback. Display range does not change the source values.");
-    else ImGui::SetItemTooltip("%s\nDecoded screenshot; pixel readout reports original screenshot bytes.", name_.c_str());
+    char display[128];std::snprintf(display,sizeof(display),"%d x %d  |  %.2fx  |  %s",width_,height_,zoom_,scalar_?"Scalar":srgbDisplay_?"sRGB":"Linearized RGB");
+    const auto footer=std::string(display)+(details.empty()?"":"  |  "+details);
+    const auto position=ImGui::GetCursorScreenPos();const auto available=ImGui::GetContentRegionAvail().x;
+    const ImVec4 clip(position.x,position.y,position.x+available,position.y+ImGui::GetTextLineHeight());
+    ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(),ImGui::GetFontSize(),position,ImGui::GetColorU32(ImGuiCol_TextDisabled),footer.c_str(),nullptr,0,&clip);
+    ImGui::Dummy(ImVec2(available,ImGui::GetTextLineHeight()));
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("%s\n%s",footer.c_str(),tooltip.empty()?(!depthValues_.empty()?"Full-precision depth readback. Display range does not change source values.":name_.c_str()):tooltip.c_str());
 }
 } // namespace gfx

@@ -1,9 +1,11 @@
 #include "core/image_decode.h"
+#include "core/image_io.h"
 #include "core/settings.h"
 #include "core/tools.h"
 #include "platform/process.h"
 
 #include <cstdint>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -31,6 +33,21 @@ uint32_t Be32(const std::vector<uint8_t>& v, size_t at) { return uint32_t(v[at])
 } // namespace
 
 void RunImageDecodeTests(const std::filesystem::path& root) {
+    Image original{12,12,std::vector<uint8_t>(12*12*4)};
+    for(size_t p=0;p<original.rgba.size();p+=4){original.rgba[p]=23;original.rgba[p+1]=46;original.rgba[p+2]=92;original.rgba[p+3]=255;}
+    original.rgba[0]=255;original.rgba[1]=140;original.rgba[2]=0; // Existing orange must not create coverage.
+    auto solid=original,green=original;
+    for(int y=2;y<=9;++y)for(int x=2;x<=9;++x){const auto p=(y*12+x)*4;solid.rgba[p]=255;solid.rgba[p+1]=140;solid.rgba[p+2]=0;green.rgba[p]=0;green.rgba[p+1]=255;green.rgba[p+2]=38;}
+    const auto outline=ComposeDrawOutline(original,solid,green,1);
+    CHECK(outline.rgba[(2*12+5)*4]==255&&outline.rgba[(2*12+5)*4+1]==140);
+    CHECK(std::equal(outline.rgba.begin()+(6*12+6)*4,outline.rgba.begin()+(6*12+6)*4+4,original.rgba.begin()+(6*12+6)*4));
+    CHECK(std::equal(outline.rgba.begin(),outline.rgba.begin()+12*4,original.rgba.begin()));
+    CHECK(ComposeDrawOutline(original,solid,solid).rgba==original.rgba);
+    const auto hole=(6*12+6)*4;for(int c=0;c<4;++c)solid.rgba[hole+c]=green.rgba[hole+c]=original.rgba[hole+c];
+    const auto holed=ComposeDrawOutline(original,solid,green,1);
+    CHECK(holed.rgba[hole]==original.rgba[hole]&&holed.rgba[(6*12+5)*4]==255);
+    bool mismatch=false;try{auto wrong=green;wrong.width=11;ComposeDrawOutline(original,solid,wrong);}catch(const ImageExtentMismatch&){mismatch=true;}CHECK(mismatch);
+    const auto bitmap=root/"outline-roundtrip.bmp";WriteBmp(bitmap,outline);const auto loaded=LoadImage(bitmap);CHECK(loaded.width==12&&loaded.height==12&&loaded.rgba==outline.rgba);std::filesystem::remove(bitmap);
     CHECK(IsAstcFormat("VK_FORMAT_ASTC_4x4_UNORM_BLOCK"));
     CHECK(IsAstcFormat("VK_FORMAT_ASTC_12x12_SRGB_BLOCK"));
     CHECK(!IsAstcFormat("VK_FORMAT_R8G8B8A8_UNORM"));

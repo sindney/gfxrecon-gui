@@ -9,10 +9,13 @@
 #include "shaders/syntax.h"
 #include "shaders/interface.h"
 #include "shaders/metadata.h"
+#include "shaders/diagnostics.h"
+#include "shaders/decode.h"
 #include "replay/replay.h"
 #include "platform/android_display.h"
 #include "capture/capture.h"
 #include "core/artifacts.h"
+#include "core/image_io.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -26,6 +29,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#undef LoadImage
 #include <shellapi.h>
 #include <io.h>
 #include <fcntl.h>
@@ -351,6 +355,10 @@ int main(int argc, char** argv) {
         if(mode=="copy")std::filesystem::copy_file(std::filesystem::u8path(argv[1]),std::filesystem::u8path(argv[2]));
         return mode=="fail"?1:0;
     }
+    if(argc==6&&std::string(argv[1])=="--compose-outline"){
+        try{gfx::WriteBmp(std::filesystem::u8path(argv[5]),gfx::ComposeDrawOutline(gfx::LoadImage(std::filesystem::u8path(argv[2])),gfx::LoadImage(std::filesystem::u8path(argv[3])),gfx::LoadImage(std::filesystem::u8path(argv[4]))));return 0;}
+        catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
+    }
     if (argc > 1 && (std::string(argv[1]) == "--screenshots" || std::string(argv[1]) == "--quit-after-frame") && std::getenv("GFXRECON_GUI_TEST_SLOW_REPLAY")) {
         std::this_thread::sleep_for(std::chrono::seconds(8)); return 1;
     }
@@ -362,10 +370,26 @@ int main(int argc, char** argv) {
             gfx::ReplayRequest request;request.capture=std::filesystem::u8path(argv[2]);request.output=std::filesystem::u8path(argv[5]);request.cacheDirectory=request.output.parent_path()/"probe-cache";
             request.frame=capture->executions[selected].frame;request.dump=capture->DumpRequest(selected);request.outputsOnly=true;request.reuseArtifacts=false;request.timeout=std::chrono::seconds(30);
             std::string variant=argv[8];if(variant.rfind("validate:",0)==0){request.validation=true;variant.erase(0,9);}request.drawInspection=variant=="full";request.descriptorImages=variant=="textures";
-            if(variant=="solid"||variant=="wireframe"||variant=="depth")request.visualization=variant;
+            if(variant=="solid"||variant=="wireframe"||variant=="depth"||variant=="silhouette"||variant=="uv")request.visualization=variant;
             if(variant.rfind("subdraw",0)==0){const auto colon=variant.find(':');request.indirectSubdraw=std::stoi(variant.substr(7,colon==std::string::npos?colon:colon-7));if(colon!=std::string::npos)request.visualization=variant.substr(colon+1);}
             request.visualizationPipeline=capture->events[capture->executions[selected].event].pipeline;
+            if(variant=="uv"){
+                const auto shaders=capture->jsonl.parent_path()/"shaders";
+                const auto work=request.output.parent_path()/(request.output.filename().u8string()+"-shader");std::filesystem::create_directories(work);
+                const auto& stages=capture->pipelines.at(request.visualizationPipeline);const auto stage=std::find_if(stages.begin(),stages.end(),[](const auto& s){return s.stage.find("FRAGMENT")!=std::string::npos;});
+                if(stage==stages.end())throw std::runtime_error("Missing fragment stage");std::string detail;
+                const auto source=work/"checker.frag";{std::ofstream out(source);out<<gfx::UvCheckerboardSource(shaders/("sh"+std::to_string(stage->module)),stage->entry,detail);}
+                request.uvShader=work/"checker.spv";gfx::CompileShader(source,{0,"VK_SHADER_STAGE_FRAGMENT_BIT","main"},request.uvShader,tools);std::cout<<detail<<'\n';
+            }
             if(request.indirectSubdraw>=0){for(const auto& stage:capture->pipelines.at(request.visualizationPipeline))if(gfx::ShaderUsesDrawIndex(capture->jsonl.parent_path()/"shaders"/("sh"+std::to_string(stage.module))))throw std::runtime_error("gl_DrawID not supported");request.indirectDrawIdSafe=true;}
+            if(request.visualization=="silhouette"){
+                auto context=request;context.visualization="original";context.output=request.output.parent_path()/(request.output.filename().u8string()+"-original");
+                const gfx::ReplayTarget target{std::string(argv[4])!="local",std::string(argv[4])=="local"?"":argv[4]};
+                auto color=[](const auto& assets){for(const auto& asset:assets)if(asset.metadata.value("category","")=="output"&&asset.metadata.value("aspect","")=="COLOR"&&asset.metadata.value("location",0u)==0)return asset.file;throw std::runtime_error("No COLOR 0 for outline probe");};
+                request.outlineBaseImage=color(gfx::ReplayCapture(context,target,tools).resources);
+                context.visualization="solid";context.output=request.output.parent_path()/(request.output.filename().u8string()+"-solid");
+                request.outlineCoverageImage=color(gfx::ReplayCapture(context,target,tools).resources);
+            }
             const auto result=gfx::ReplayCapture(request,{std::string(argv[4])!="local",std::string(argv[4])=="local"?"":argv[4]},tools);std::cout<<result.timings.dump(2)<<"\nResources: "<<result.resources.size()<<'\n';return 0;
         }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
     }

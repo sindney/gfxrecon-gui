@@ -36,6 +36,8 @@ struct ReplayRequest {
     bool descriptorImages = false;
     bool drawInspection = false;
     std::string visualization="original";
+    std::filesystem::path uvShader;
+    std::filesystem::path outlineBaseImage,outlineCoverageImage;
     uint64_t visualizationPipeline=0;
     int indirectSubdraw=-1;
     bool indirectDrawIdSafe=false;

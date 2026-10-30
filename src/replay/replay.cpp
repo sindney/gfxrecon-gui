@@ -2,6 +2,7 @@
 #include "platform/android_display.h"
 #include "platform/process.h"
 #include "core/artifacts.h"
+#include "core/image_io.h"
 #include "platform/device_lock.h"
 
 #include <algorithm>
@@ -15,6 +16,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#undef LoadImage
 #endif
 
 namespace gfx {
@@ -118,7 +120,8 @@ Json PrepareOptimized(ReplayRequest& replay, const std::string& sourceHash,
     return metadata;
 }
 bool HasVisualization(const ReplayRequest& r){return r.visualization!="original"||r.indirectSubdraw>=0;}
-Json VisualizationConfig(const ReplayRequest& r){return {{"protocol",1},{"mode",r.visualization},{"pipeline",r.visualizationPipeline},{"subdraw",r.indirectSubdraw},{"draw_id_safe",r.indirectDrawIdSafe}};}
+Json VisualizationConfig(const ReplayRequest& r){return {{"protocol",r.visualization=="silhouette"?3:r.visualization=="uv"?2:1},{"mode",r.visualization},{"pipeline",r.visualizationPipeline},{"subdraw",r.indirectSubdraw},{"draw_id_safe",r.indirectDrawIdSafe},{"uv_shader_sha256",r.uvShader.empty()?std::string{}:Sha256File(r.uvShader)},
+    {"outline_base_sha256",r.outlineBaseImage.empty()?std::string{}:Sha256File(r.outlineBaseImage)},{"outline_coverage_sha256",r.outlineCoverageImage.empty()?std::string{}:Sha256File(r.outlineCoverageImage)}};}
 Json DumpOptions(const ReplayRequest& r, const std::string& output) {
     return {{"OutputDir", output}, {"ImageFormat", r.imageFormat},
         {"DumpAllDescriptors", !r.outputsOnly || r.descriptorImages || r.drawInspection}, {"DumpVertexIndexBuffer", !r.outputsOnly || r.drawInspection},
@@ -213,6 +216,7 @@ ReplayResult RunLocal(const ReplayRequest& r, const std::map<std::string, std::s
         dump["DumpResourcesOptions"] = DumpOptions(r, r.output.u8string());
         Write(r.output / "dump-request.json", dump.dump(2));
         if(HasVisualization(r))Write(r.output/"gui-visualization.json",VisualizationConfig(r).dump(2));
+        if(!r.uvShader.empty())std::filesystem::copy_file(r.uvShader,r.output/"gui-uv.spv");
         args.insert(args.end(), {"--dump-resources", (r.output / "dump-request.json").u8string()});
     }
     if (!r.overrides.empty()) {
@@ -308,6 +312,7 @@ ReplayResult RunAndroid(const ReplayRequest& r, const ReplayTarget& target, cons
         Write(r.output / "dump-request.json", dump.dump(2));
         adb.Put(kPackage, r.output / "dump-request.json", relative + "/dump-request.json");
         if(HasVisualization(r)){Write(r.output/"gui-visualization.json",VisualizationConfig(r).dump(2));adb.Put(kPackage,r.output/"gui-visualization.json",relative+"/gui-visualization.json");}
+        if(!r.uvShader.empty()){std::filesystem::copy_file(r.uvShader,r.output/"gui-uv.spv");adb.Put(kPackage,r.uvShader,relative+"/gui-uv.spv");}
         args += " --dump-resources " + remote + "/dump-request.json";
     }
     if (!r.overrides.empty()) {
@@ -484,7 +489,9 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
     const auto started = std::chrono::steady_clock::now();
     std::optional<DeviceLock> deviceLock;
     if (target.android) deviceLock.emplace(target.serial);
-    if(r.visualization!="original"&&r.visualization!="solid"&&r.visualization!="wireframe"&&r.visualization!="depth")throw std::runtime_error("Unknown draw visualization");
+    if(r.visualization!="original"&&r.visualization!="solid"&&r.visualization!="wireframe"&&r.visualization!="depth"&&r.visualization!="uv"&&r.visualization!="silhouette")throw std::runtime_error("Unknown draw visualization");
+    if(r.visualization=="uv"&&r.uvShader.empty())throw std::runtime_error("UV visualization requires a reflected UV shader");
+    if(r.visualization=="silhouette"&&(r.outlineBaseImage.empty()||r.outlineCoverageImage.empty()))throw std::runtime_error("Orange outline requires original color and solid coverage from this selection");
     if(r.indirectSubdraw < -1||r.indirectSubdraw>65535)throw std::runtime_error("Invalid indirect subdraw index");
     if(HasVisualization(r)&&r.dump.is_null())throw std::runtime_error("Draw visualization requires a selected draw");
     if (r.prefix != "baseline" && r.prefix != "modified") throw std::runtime_error("Invalid replay output prefix");
@@ -592,9 +599,16 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
         const auto reportFile=r.output/"gui-visualization-result.json";
         if(!std::filesystem::is_regular_file(reportFile))throw std::runtime_error("Replay backend lacks draw visualization support. Install the bundled replay APK/tool.");
         const auto report=ReadJson(reportFile);
-        if(report.value("protocol",0)!=1||report.value("mode",std::string{})!=r.visualization||report.value("subdraw",-2)!=r.indirectSubdraw||report.value("pipeline",uint64_t(0))!=r.visualizationPipeline)
+        if(report.value("protocol",0)!=VisualizationConfig(r).at("protocol").get<int>()||report.value("mode",std::string{})!=r.visualization||report.value("subdraw",-2)!=r.indirectSubdraw||report.value("pipeline",uint64_t(0))!=r.visualizationPipeline)
             throw std::runtime_error("Replay visualization provenance does not match the selected draw");
         if(!report.value("applied",false)||!report.value("error",std::string{}).empty())throw std::runtime_error("Draw visualization unavailable: "+report.value("error",std::string("selected draw was not reached")));
+    }
+    if(r.visualization=="silhouette"&&!hit){
+        bool composed=false;
+        for(const auto& asset:result.resources)if(asset.metadata.value("category","")=="output"&&asset.metadata.value("aspect","")=="COLOR"&&asset.metadata.value("location",0u)==0&&asset.file.extension()==".bmp"){
+            WriteBmp(asset.file,ComposeDrawOutline(LoadImage(r.outlineBaseImage),LoadImage(r.outlineCoverageImage),LoadImage(asset.file)));composed=true;
+        }
+        if(!composed)throw std::runtime_error("Orange outline requires a readable COLOR 0 attachment");
     }
     if (Sha256File(r.capture, cancel) != captureHash) throw std::runtime_error("Capture changed during replay; artifacts were not published");
     if(r.capture!=request.capture && Sha256File(request.capture,cancel)!=sourceHash)

@@ -16,7 +16,7 @@ void Workspace::DrawMesh() {
         ImGui::End(); return;
     }
     const auto& event = capture_->events[selectedEvent_];
-    if (event.name != "vkCmdDraw" && event.name != "vkCmdDrawIndexed") { ImGui::TextWrapped("This draw path is not supported by the mesh preview yet."); ImGui::End(); return; }
+    if (!SupportsMeshDraw(event.name)) { ImGui::TextWrapped("This draw path is not supported by the mesh preview yet."); ImGui::End(); return; }
     { RefreshOverlay refresh(Refreshing("Mesh"));
     ImGui::BeginDisabled(Busy());
     if (ImGui::Button("Reload mesh")) { meshRequestGeneration_ = meshGeneration_ = 0; previewPaused_ = false; }

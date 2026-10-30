@@ -22,6 +22,10 @@ struct ImageExtentMismatch : std::runtime_error {
 // Loads a BMP (24/32-bit, as written by gfxrecon-replay) or PNG by content. Throws on unsupported/corrupt data.
 Image LoadImage(const std::filesystem::path& file);
 void WritePng(const std::filesystem::path& file, const Image& image);
+void WriteBmp(const std::filesystem::path& file, const Image& image);
+// Coverage is the RGB difference of two differently colored diagnostic renders.
+// Return the original image with only the inner coverage boundary highlighted.
+Image ComposeDrawOutline(const Image& original,const Image& coverageA,const Image& coverageB,uint32_t thickness=2);
 // BMP (or PNG) -> PNG. Returns the decoded extent.
 Image ConvertToPng(const std::filesystem::path& source, const std::filesystem::path& png);
 // Per-channel max/mean absolute difference, differing pixel count and PSNR (RGB, null when identical).

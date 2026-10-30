@@ -1,4 +1,5 @@
 #include "gui/workspace.h"
+#include "shaders/diagnostics.h"
 
 #include "core/log.h"
 #include "core/settings.h"
@@ -257,6 +258,10 @@ void Workspace::Poll() {
             hasComparison_ = !result.modifiedImage.empty();
             if(result.dumpExecution>=0){
                 resources_=std::move(result.resources);dumpBlock_=result.dumpBlock;dumpExecution_=result.dumpExecution;imageView_=1;
+                diagnosticResources_=std::move(result.diagnosticResources);diagnosticErrors_=std::move(result.diagnosticErrors);uvDetail_=std::move(result.uvDetail);
+                diagnosticExecution_=result.dumpExecution;diagnosticSubdraw_=selectedSubdraw_;
+                imageShownGeneration_=selectionGeneration_;
+                if(!diagnosticResources_.empty())resources_=diagnosticResources_.at(diagnosticResources_.count(drawVisualization_)?drawVisualization_:0);
                 drawHasInputs_=!result.drawPreview||result.descriptorImages;
                 ResetImageDocuments();resourceMode_=0;
             }
@@ -279,6 +284,12 @@ void Workspace::Poll() {
             }
         }
         if (!result.candidate.empty()) { candidate_ = result.candidate; candidateText_ = result.candidateText; }
+        if(result.shaderReset){
+            InvalidateDrawResources();mesh_.Release();meshGeneration_=meshRequestGeneration_=0;
+            modifiedImage_.Release();differenceImage_.Release();hasComparison_=false;
+            imageView_=0;imageTab_=-1;imageTabRequest_=true;resourceMode_=0;
+            if(shader_.module==result.resetShaderModule)ResetShaderText();
+        }
         if (!result.resourceImage.empty()) {
             try { if (result.resourceImage.extension() == ".png") resourceImage_.LoadPng(result.resourceImage); else resourceImage_.LoadBmp(result.resourceImage); resourceMode_ = 1; focusImage_ = true; }
             catch (const std::exception& error) { resourceImage_.Release(); status_ = error.what(); LOGE("resources") << status_; }
@@ -357,11 +368,11 @@ void Workspace::Open(const std::string& path) {
         return r;
     }, file.extension() == ".gfxr" || file.extension() == ".jsonl" ? JobKind::Import : JobKind::Shader);
 }
-void Workspace::SelectEvent(size_t index) {
+void Workspace::SelectEvent(size_t index, bool preserveImages) {
     if (!capture_ || index >= capture_->events.size()) return;
     selectedEvent_ = index;selectedSubdraw_=-1;indirectParameters_=Json();
     objectDetails_=Json();objectLabel_.clear();
-    resourceMode_=0;ResetImageDocuments();
+    if(!preserveImages){resourceMode_=0;ResetImageDocuments();}
     pendingDraw_ = false;
     if (Busy() && autoReplayRunning_) cancel_ = true;
     selectedExecution_ = -1;
@@ -380,7 +391,7 @@ void Workspace::SelectExecution(size_t index, bool preview) {
     if (!capture_ || index >= capture_->executions.size()) return;
     if(preview&&selectedExecution_>=0&&ExecutionState(selectedExecution_)==PanelState::Running)executionStatuses_[selectedExecution_]={PanelState::Inactive,"Superseded by a new selection"};
     if(!shader_.stage.empty())autoShaderStage_=shader_.stage;
-    SelectEvent(capture_->executions[index].event);
+    SelectEvent(capture_->executions[index].event,preview);
     selectedExecution_ = static_cast<int>(index);
     revealExecution_ = true;
     revealPipeline_=true;
@@ -392,11 +403,22 @@ void Workspace::SelectExecution(size_t index, bool preview) {
     }
 }
 void Workspace::SetDrawVisualization(int mode,int subdraw){
-    if(!capture_||selectedExecution_<0||mode<0||mode>3||subdraw< -1)return;
+    if(!capture_||selectedExecution_<0||mode<0||mode>5||subdraw< -1)return;
     if(drawVisualization_==mode&&selectedSubdraw_==subdraw)return;
-    drawVisualization_=mode;selectedSubdraw_=subdraw;++selectionGeneration_;InvalidateDrawResources();imageView_=1;
+    drawVisualization_=mode;
+    if(selectedSubdraw_==subdraw){
+        if(imageShownGeneration_==selectionGeneration_&&diagnosticExecution_==selectedExecution_&&diagnosticSubdraw_==subdraw&&!diagnosticResources_.empty()){ShowDrawVisualization();return;}
+        // A pending bundle contains every mode; mode changes do not supersede it.
+        if(pendingDraw_||(Busy()&&autoReplayRunning_))return;
+    }
+    selectedSubdraw_=subdraw;++selectionGeneration_;imageView_=1;
     if(Busy()&&autoReplayRunning_)cancel_=true;
     if(capture_->source.extension()==".gfxr"){pendingDraw_=true;previewPaused_=false;drawRequestedAt_=std::chrono::steady_clock::now();executionStatuses_[selectedExecution_]={PanelState::Running,"Queued draw visualization"};}
+}
+void Workspace::ShowDrawVisualization(){
+    const auto found=diagnosticResources_.find(drawVisualization_);
+    resources_=found!=diagnosticResources_.end()?found->second:diagnosticResources_.at(0);
+    ResetImageDocuments();resourceMode_=0;imageView_=1;
 }
 void Workspace::ProbeTools() {
     const auto tools = tools_;
@@ -478,6 +500,39 @@ void Workspace::CompileShader() {
         return r;
     }, JobKind::Compile);
 }
+void Workspace::ResetShaderText(){
+    glsl_=originalGlsl_;assembly_=originalAssembly_;exportedGlsl_=glsl_;exportedAssembly_=assembly_;
+    editor_.SetText(representation_==0?glsl_:representation_==1?assembly_:representation_==2?capturedSource_:shaderMetadata_);
+    editor_.SetReadOnly(true);readOnly_=true;dirty_=false;candidate_.clear();candidateText_.clear();resetShaderScroll_=true;
+}
+void Workspace::ResetShader(){
+    if(Busy()||CaptureSessionActive())return;
+    if(!capture_||capture_->source.extension()!=".gfxr"||!shader_.module){ResetShaderText();status_="Shader reset to original text.";return;}
+    const auto capture=capture_;const auto tools=tools_;const auto mode=replayMode_;const auto serial=androidSerial_;
+    const auto module=shader_.module;auto overrides=activeOverrides_;overrides.erase(module);
+    const auto frame=frame_>0?static_cast<uint32_t>(frame_):selectedExecution_>=0?capture->executions[selectedExecution_].frame:1u;
+    const auto generation=++selectionGeneration_;const auto optimize=optimizeReplay_;const auto validation=validationReplay_;const auto screenOff=phoneScreenOff_;
+    pendingDraw_=false;pendingFrame_=0;
+    Start("Resetting shader and replaying original module",[this,capture,tools,mode,serial,module,overrides,frame,generation,optimize,validation,screenOff]{
+        WorkspaceResult r;r.selectionGeneration=generation;r.replayFrame=frame;r.retryReplay=true;r.retryShaderReset=true;r.resetShaderModule=module;
+        try{
+#ifdef IMGUI_TEMPLATE_TESTS
+            if(std::getenv("GFXRECON_GUI_TEST_RESET_FAILURE"))throw std::runtime_error("Simulated reset replay failure");
+            if(std::getenv("GFXRECON_GUI_TEST_LOCKED_REPLAY"))throw AndroidUnlockRequired(ParseAndroidLockState("KeyguardServiceDelegate\n showing=true\n secure=true","test-phone"));
+#endif
+            const auto target=ResolveReplayTarget(mode,capture->android,serial,tools.at("adb"),&cancel_);
+            ReplayRequest request;request.capture=capture->source;request.output=NewSession(sessionsDir_);request.frame=frame;
+            request.cacheDirectory=sessionsDir_.parent_path()/"replay-cache";request.expectedCaptureHash=capture->fingerprint;request.selectionGeneration=generation;
+            request.overrides=overrides;request.optimize=optimize;request.validation=validation;request.screenOff=screenOff&&target.android;request.reuseArtifacts=false;
+            if(validation)request.timeout=std::chrono::seconds(600);
+            const auto result=ReplayCapture(request,target,tools,&cancel_);
+            if(result.validationReport.is_object()&&result.validationReport.value("errors",0)>0){r.failed=true;r.message="Shader reset replay reported Vulkan validation errors; current edits were retained.";r.validationReport=result.validationReport;return r;}
+            r.replayResult=true;r.shaderReset=true;r.replayImage=result.image;r.replayTarget=result.target;r.overrides=overrides;r.validationReport=result.validationReport;
+            r.message="Shader reset to captured original and replayed. Artifacts: "+request.output.u8string();
+        }catch(const AndroidUnlockRequired& error){r.failed=true;r.message=error.what();r.unlockRequired=error.state;}
+        return r;
+    },JobKind::Dump,frame);
+}
 void Workspace::Draw() {
     Poll(); PollLiveCapture(); DrawEvents(); DrawPipeline(); DrawShader(); DrawResources(); DrawMesh(); DrawFrames(); DrawTools();
     DrawCapture();
@@ -501,8 +556,9 @@ void Workspace::DrawReplayUnlock(){
         ImGui::BeginDisabled(Busy());
         if(ImGui::Button("Retry replay")){
             const auto request=*blockedReplay_;blockedReplay_.reset();ImGui::CloseCurrentPopup();previewPaused_=false;
-            ReplayFrame(request.retryDump,request.retryRevert,request.replayFrame,false,request.meshPreview,request.drawPreview,request.descriptorImages,true);
-            autoReplayRunning_=Busy();currentReplayFrame_=request.replayFrame;
+            if(request.retryShaderReset)ResetShader();
+            else{ReplayFrame(request.retryDump,request.retryRevert,request.replayFrame,false,request.meshPreview,request.drawPreview,request.descriptorImages,true);
+                autoReplayRunning_=Busy();currentReplayFrame_=request.replayFrame;}
         }
         ImGui::EndDisabled();ImGui::SameLine();
     }
@@ -526,11 +582,12 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
     const auto meshInstance = meshInstance_;
     const auto shaderDirectory = session_ / "shaders";
     const auto documents=shaderDocuments_;
-    const auto visualization=drawVisualization_;const auto subdraw=selectedSubdraw_;
+    const auto subdraw=selectedSubdraw_;
     const auto frame = requestedFrame ? requestedFrame : dump && execution >= 0 ? capture->executions[execution].frame :
         frame_ > 0 ? static_cast<uint32_t>(frame_) : execution >= 0 ? capture->executions[execution].frame : 1u;
     if (dump && execution < 0) { status_ = "Select a submitted draw/dispatch occurrence before requesting its resources."; return; }
-    Start(drawPreview ? "Fetching selected draw data" : dump ? "Replaying selected event resources" : "Rendering frame " + std::to_string(frame), [this, capture, tools, generation, execution, frame, dump, revert, mode, serial, optimize, validation, overrides, thumbnailOnly, meshInstance, shaderDirectory, meshPreview, drawPreview, descriptorImages,documents,screenOff,visualization,subdraw,fresh] {
+    Start(drawPreview ? "Fetching selected draw data" : dump ? "Replaying selected event resources" : "Rendering frame " + std::to_string(frame), [this, capture, tools, generation, execution, frame, dump, revert, mode, serial, optimize, validation, overrides, thumbnailOnly, meshInstance, shaderDirectory, meshPreview, drawPreview, descriptorImages,documents,screenOff,subdraw,fresh] {
+        const auto queryStarted=std::chrono::steady_clock::now();
         WorkspaceResult r; r.selectionGeneration = generation;
         r.replayResult = true;
         r.retryReplay=true;r.retryDump=dump;r.retryRevert=revert;
@@ -569,11 +626,7 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
         request.overrides = overrides; request.prefix = overrides.empty() ? "baseline" : "modified";
         if (dump) request.dump = capture->DumpRequest(static_cast<size_t>(execution));
         if(drawPreview&&capture->events[capture->executions[execution].event].name.rfind("vkCmdDraw",0)==0){
-            const char* modes[]={"original","solid","wireframe","depth"};request.visualization=modes[visualization];request.indirectSubdraw=subdraw;request.visualizationPipeline=capture->events[capture->executions[execution].event].pipeline;
-            if(visualization!=0)for(const auto& stage:capture->pipelines.at(request.visualizationPipeline)){
-                const auto limitation=capture->ModuleEditLimitation(stage.module);
-                if(!limitation.empty())throw std::runtime_error("Draw visualization unavailable for this pipeline: "+limitation);
-            }
+            request.visualization="original";request.indirectSubdraw=subdraw;request.visualizationPipeline=capture->events[capture->executions[execution].event].pipeline;
             if(subdraw>=0){
                 for(const auto& stage:capture->pipelines.at(request.visualizationPipeline)){
                     const auto file=overrides.count(stage.module)?overrides.at(stage.module):shaderDirectory/("sh"+std::to_string(stage.module));
@@ -608,10 +661,51 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
                 const auto binary = stage != stages.end() ? (overrides.count(stage->module) ? overrides.at(stage->module) : shaderDirectory / ("sh" + std::to_string(stage->module))) : std::filesystem::path{};
                 r.mesh = std::make_shared<MeshData>(ReadMeshData(*capture, static_cast<size_t>(execution), run, binary, meshInstance, &cancel_));
                 r.mesh->target = result.target;
+                for(auto& record:r.mesh->records)if(record)record->target=result.target;
             } catch (const std::exception& error) { r.meshError = error.what(); LOGW("mesh") << error.what(); }
         }
+        if(drawPreview&&request.visualizationPipeline){
+            r.diagnosticResources[0]=result.resources;
+            std::filesystem::path uv;
+            try{
+                const auto& stages=capture->pipelines.at(request.visualizationPipeline);
+                const auto stage=std::find_if(stages.begin(),stages.end(),[](const auto& s){return s.stage.find("FRAGMENT")!=std::string::npos;});
+                if(stage==stages.end())throw std::runtime_error("UV density unavailable: no fragment stage");
+                if(!stage->specialization.is_null())throw std::runtime_error("UV density unavailable for specialized fragment interfaces");
+                const auto binary=overrides.count(stage->module)?overrides.at(stage->module):shaderDirectory/("sh"+std::to_string(stage->module));
+                const auto source=run/"uv-checker.frag";uv=run/"uv-checker.spv";
+                {std::ofstream out(source);out<<UvCheckerboardSource(binary,stage->entry,r.uvDetail);}
+                gfx::CompileShader(source,{0,"VK_SHADER_STAGE_FRAGMENT_BIT","main"},uv,tools,&cancel_);
+            }catch(const std::exception& error){if(cancel_.load())throw;r.diagnosticErrors[4]=error.what();uv.clear();}
+            const char* modes[]={"original","solid","wireframe","depth","uv","silhouette"};
+            for(int diagnostic=1;diagnostic<=5;++diagnostic){
+                if(cancel_.load())throw std::runtime_error("Draw diagnostic query cancelled");
+                if(r.diagnosticErrors.count(diagnostic))continue;
+                try{
+                    for(const auto& stage:capture->pipelines.at(request.visualizationPipeline)){
+                        const auto limitation=capture->ModuleEditLimitation(stage.module);
+                        if(!limitation.empty())throw std::runtime_error("Draw visualization unavailable: "+limitation);
+                    }
+                    auto pass=request;pass.output=NewSession(sessionsDir_);pass.visualization=modes[diagnostic];
+                    pass.outputsOnly=true;pass.drawInspection=false;pass.descriptorImages=false;
+                    pass.uvShader=diagnostic==4?uv:std::filesystem::path{};
+                    if(diagnostic==5){
+                        auto color=[](const auto& assets){for(const auto& asset:assets)if(asset.metadata.value("category","")=="output"&&asset.metadata.value("aspect","")=="COLOR"&&asset.metadata.value("location",0u)==0&&asset.file.extension()==".bmp")return asset.file;return std::filesystem::path{};};
+                        pass.outlineBaseImage=color(result.resources);
+                        if(r.diagnosticResources.count(1))pass.outlineCoverageImage=color(r.diagnosticResources.at(1));
+                    }
+                    LOGI("replay")<<"Fetching draw diagnostic "<<modes[diagnostic];
+                    const auto output=ReplayCapture(pass,target,tools,&cancel_);
+                    auto& assets=r.diagnosticResources[diagnostic];
+                    for(const auto& asset:result.resources)if(asset.metadata.value("category","")!="output")assets.push_back(asset);
+                    for(const auto& asset:output.resources)if(asset.metadata.value("category","")=="output")assets.push_back(asset);
+                }catch(const std::exception& error){if(cancel_.load())throw;r.diagnosticErrors[diagnostic]=error.what();LOGW("replay")<<modes[diagnostic]<<": "<<error.what();}
+            }
+        }
         r.message = "Replay artifacts: " + run.u8string() + " (" + result.target + ")";
-        r.message += " | " + std::to_string(result.timings.value("elapsed_seconds", 0.0)) + " s";
+        const auto elapsed=r.diagnosticResources.empty()?result.timings.value("elapsed_seconds",0.0):std::chrono::duration<double>(std::chrono::steady_clock::now()-queryStarted).count();
+        r.message += " | " + std::to_string(elapsed) + " s";
+        if(!r.diagnosticResources.empty())r.message+=" | "+std::to_string(r.diagnosticResources.size())+" cached display modes";
         if (result.timings.value("artifact_cache_hit", false)) r.message += " | verified cached output";
         if (result.timings.value("optimized_replay", false)) r.message += " | optimized replay copy";
         if (result.timings.value("optimizer_status", "").find("failed") == 0) r.message += " | optimizer failed; using original capture";
@@ -706,10 +800,6 @@ void Workspace::DrawShader() {
     ImGui::SameLine();
     if (ImGui::Button("More")) ImGui::OpenPopup("shader-actions");
     if (ImGui::BeginPopup("shader-actions")) {
-    if (ImGui::Button("Undo") && editor_.CanUndo()) editor_.Undo();
-    ImGui::SameLine();
-    if (ImGui::Button("Redo") && editor_.CanRedo()) editor_.Redo();
-    ImGui::SameLine();
     if (ImGui::Button("Copy")) ImGui::SetClipboardText(editor_.GetText().c_str());
     ImGui::SameLine();
     if (ImGui::Button("Export")) {
@@ -751,6 +841,21 @@ void Workspace::DrawShader() {
     if (ImGui::Button("Top")) resetShaderScroll_ = true;
     ImGui::EndPopup();
     }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(Busy()||!editor_.CanUndo());
+    if(ImGui::Button("Undo"))editor_.Undo();
+    ImGui::EndDisabled();
+    if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("Undo text edit (%s+Z).\nReplay changes only after Compile and Apply.",ImGui::GetIO().ConfigMacOSXBehaviors?"Cmd":"Ctrl");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(Busy()||!editor_.CanRedo());
+    if(ImGui::Button("Redo"))editor_.Redo();
+    ImGui::EndDisabled();
+    if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("Redo text edit (%s+Y).\nReplay changes only after Compile and Apply.",ImGui::GetIO().ConfigMacOSXBehaviors?"Cmd":"Ctrl");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(Busy()||CaptureSessionActive()||(readOnly_&&!dirty_&&candidate_.empty()&&!activeOverrides_.count(shader_.module)));
+    if(ImGui::Button("Reset shader"))ResetShader();
+    ImGui::EndDisabled();
+    if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip("Restore the captured shader, clear text history and the candidate, and replay automatically.\nOther shader overrides are retained.");
     ImGui::SameLine();
     ImGui::BeginDisabled((Busy() && !autoReplayRunning_) || readOnly_ || representation_ >= 2 || !shaderEditLimitation_.empty() || !ToolAvailable(representation_ == 1 ? "assembler" : "compiler") || !ToolAvailable("validator"));
     if (ImGui::Button("Compile")) CompileShader();

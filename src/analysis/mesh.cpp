@@ -148,17 +148,10 @@ std::vector<uint32_t> BuildMeshPrimitives(uint32_t topology, const std::vector<u
     }
     return result;
 }
-MeshData ReadMeshData(const Capture& capture, size_t occurrence, const std::filesystem::path& directory, const std::filesystem::path& binary, uint32_t instance, const std::atomic_bool* cancel) {
+static MeshData DecodeMeshData(const Capture& capture, size_t occurrence, const std::filesystem::path& directory, const std::filesystem::path& binary, uint32_t instance, const std::atomic_bool* cancel, const Json& draw) {
     const auto& execution = capture.executions.at(occurrence); const auto& event = capture.events.at(execution.event);
-    if (event.name != "vkCmdDraw" && event.name != "vkCmdDrawIndexed") throw std::runtime_error("Mesh preview currently supports direct draw and indexed draw occurrences");
     MeshData mesh; mesh.block = event.block; mesh.submit = execution.submit; mesh.pipeline = event.pipeline; mesh.instance = instance;
     auto cancelled = [&] { if (cancel && cancel->load()) throw std::runtime_error("Mesh readback cancelled"); }; cancelled();
-    Json draw;
-    for (const auto& entry : std::filesystem::directory_iterator(directory)) if (entry.path().filename().u8string().find("_dr.json") != std::string::npos) {
-        if (entry.file_size() > 16 * 1024 * 1024) throw std::runtime_error("Mesh metadata exceeds 16 MiB limit");
-        std::ifstream input(entry.path()); draw = FindDraw(Json::parse(input), mesh.block, mesh.submit); if (!draw.is_null()) break;
-    }
-    if (draw.is_null()) throw std::runtime_error("No matching draw readback metadata was produced");
     mesh.parameters = draw.at("parameters"); mesh.firstInstance = static_cast<uint32_t>(Number(mesh.parameters, "firstInstance"));
     if (instance >= Number(mesh.parameters, "instanceCount")) throw std::runtime_error("Selected instance is outside the draw");
     const auto info = capture.pipelineInfo.at(event.pipeline), input = draw.value("vertexInputState", Json::object());
@@ -175,7 +168,7 @@ MeshData ReadMeshData(const Capture& capture, size_t occurrence, const std::file
     const auto assembly = info.value("pInputAssemblyState", Json::object());
     const auto topologyValue = assembly.value("topology", Json{}); const auto topology = Topology(topologyValue); mesh.topology = topologyValue.is_string() ? topologyValue.get<std::string>() : topologyValue.dump();
     const auto restartValue = assembly.value("primitiveRestartEnable", Json{}); const bool restart = restartValue == true || restartValue == 1 || restartValue == "VK_TRUE";
-    const bool indexed = event.name == "vkCmdDrawIndexed";
+    const bool indexed = event.name.find("DrawIndexed") != std::string::npos;
     const auto count = Number(mesh.parameters, indexed ? "indexCount" : "vertexCount");
     if (!count || count > kMaxVertices) throw std::runtime_error("Mesh draw is empty or exceeds the 200,000-vertex preview limit");
     std::vector<uint32_t> segments{0};
@@ -247,5 +240,56 @@ MeshData ReadMeshData(const Capture& capture, size_t occurrence, const std::file
     } catch (const std::exception& error) { mesh.postDiagnostic = error.what(); }
     mesh.provenance = "Input bytes read back by replay; post-VS positions evaluated locally in OpenGL. Device-specific floating-point behavior may differ.";
     return mesh;
+}
+bool SupportsMeshDraw(const std::string& command){
+    return command=="vkCmdDraw"||command=="vkCmdDrawIndexed"||command=="vkCmdDrawIndirect"||command=="vkCmdDrawIndexedIndirect"||
+        command=="vkCmdDrawIndirectCount"||command=="vkCmdDrawIndexedIndirectCount"||command=="vkCmdDrawIndirectCountKHR"||command=="vkCmdDrawIndexedIndirectCountKHR"||command=="vkCmdDrawIndirectCountAMD"||command=="vkCmdDrawIndexedIndirectCountAMD";
+}
+MeshData ReadMeshData(const Capture& capture,size_t occurrence,const std::filesystem::path& directory,const std::filesystem::path& binary,uint32_t instance,const std::atomic_bool* cancel){
+    const auto& execution=capture.executions.at(occurrence);const auto& event=capture.events.at(execution.event);
+    if(!SupportsMeshDraw(event.name))throw std::runtime_error("This command is not supported by mesh preview");
+    Json draw;
+    for(const auto& file:std::filesystem::directory_iterator(directory))if(file.path().filename().u8string().find("_dr.json")!=std::string::npos){
+        if(file.file_size()>16*1024*1024)throw std::runtime_error("Mesh metadata exceeds 16 MiB limit");
+        std::ifstream in(file.path());draw=FindDraw(Json::parse(in),event.block,execution.submit);if(!draw.is_null())break;
+    }
+    if(draw.is_null())throw std::runtime_error("No matching draw readback metadata was produced");
+    if(event.name.find("Indirect")==std::string::npos)return DecodeMeshData(capture,occurrence,directory,binary,instance,cancel,draw);
+    const auto parameters=draw.value("parameters",Json::object());const auto args=parameters.value("indirectParams",Json::array());
+    if(!args.is_array()||args.empty()||args.size()>65536)throw std::runtime_error("No valid indirect argument records were read back");
+    MeshData all;all.block=event.block;all.submit=execution.submit;all.pipeline=event.pipeline;all.parameters=parameters;
+    all.records.resize(args.size());all.recordDiagnostics.resize(args.size());
+    bool initialized=false;uint64_t total=0;
+    for(size_t record=0;record<args.size();++record){
+        if(cancel&&cancel->load())throw std::runtime_error("Mesh readback cancelled");
+        const auto count=Number(args[record],"indexCount",Number(args[record],"vertexCount"));
+        if(!count||!Number(args[record],"instanceCount")){all.recordDiagnostics[record]="This indirect record has no drawable geometry";continue;}
+        if(count>kMaxVertices||total+count>kMaxVertices){all.recordDiagnostics[record]="Indirect batch exceeds the total 200,000-vertex preview limit";continue;}
+        try{
+            auto direct=draw;direct["parameters"]=args[record];
+            auto mesh=std::make_shared<MeshData>(DecodeMeshData(capture,occurrence,directory,binary,instance,cancel,direct));
+            all.records[record]=mesh;total+=mesh->vertexIds.size();
+            if(!initialized){
+                auto records=std::move(all.records);auto errors=std::move(all.recordDiagnostics);all=*mesh;
+                all.records=std::move(records);all.recordDiagnostics=std::move(errors);all.parameters=parameters;
+                all.vertexIds.clear();all.primitiveIndices.clear();
+                for(auto& attr:all.attributes){attr.values.clear();attr.integers.clear();}
+                initialized=true;
+            }
+            // Only merge compatible decoded attributes. Keep each record available
+            // independently if one record has a truncated or unavailable attribute.
+            if(mesh->attributes.size()!=all.attributes.size())throw std::runtime_error("Record vertex attributes could not be merged");
+            for(size_t i=0;i<all.attributes.size();++i)if(all.attributes[i].location!=mesh->attributes[i].location)throw std::runtime_error("Record attribute locations differ");
+            const auto base=static_cast<uint32_t>(all.vertexIds.size());
+            all.ranges.push_back({base,static_cast<uint32_t>(mesh->vertexIds.size()),mesh->firstInstance+mesh->instance});
+            all.vertexIds.insert(all.vertexIds.end(),mesh->vertexIds.begin(),mesh->vertexIds.end());
+            for(auto index:mesh->primitiveIndices)all.primitiveIndices.push_back(base+index);
+            for(size_t i=0;i<all.attributes.size();++i){auto& a=all.attributes[i];const auto& b=mesh->attributes[i];a.values.insert(a.values.end(),b.values.begin(),b.values.end());a.integers.insert(a.integers.end(),b.integers.begin(),b.integers.end());}
+            if(mesh->vertexSource.empty()){all.vertexSource.clear();all.postDiagnostic=mesh->postDiagnostic;}
+        }catch(const std::exception& error){if(cancel&&cancel->load())throw;all.recordDiagnostics[record]=error.what();}
+    }
+    for(size_t i=0;i<all.recordDiagnostics.size();++i)if(!all.recordDiagnostics[i].empty())all.diagnostic+="Record "+std::to_string(i)+": "+all.recordDiagnostics[i]+"\n";
+    if(!initialized){all.diagnostic+="No drawable indirect records for the selected instance";all.postDiagnostic=all.diagnostic;}
+    return all;
 }
 } // namespace gfx

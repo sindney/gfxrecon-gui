@@ -39,7 +39,7 @@ def main():
     report = dict(capture=str(source), sha256=original_hash, block=block, results={})
     run_root=out/('verification-'+str(time.time_ns())) if args.existing else out
     run_root.mkdir(exist_ok=True)
-    for variant in ['outputs', 'solid', 'wireframe', 'depth', 'subdraw0:solid', 'subdraw1:solid', 'subdraw2:solid', 'validate:solid', 'validate:wireframe', 'validate:depth']:
+    for variant in ['outputs', 'solid', 'wireframe', 'depth', 'silhouette', 'subdraw0:solid', 'subdraw1:solid', 'subdraw2:solid', 'validate:solid', 'validate:wireframe', 'validate:depth', 'validate:silhouette']:
         destination = run_root / variant.replace(':', '-')
         with registered_layer(variant.startswith('validate:'), Path(tools['validation_layer'])/'VkLayer_khronos_validation.json'):
           run = subprocess.run([str(ROOT / 'build/Release/gfxrecon_core_tests.exe'), '--inspect-draw',
@@ -59,6 +59,7 @@ def main():
     assert 100 < results['wireframe']['orange'] < results['solid']['orange'] / 10, results
     assert results['depth']['green'] == results['solid']['orange'], results
     assert results['outputs']['orange'] == 0, results
+    assert 0 < results['silhouette']['orange'] < results['solid']['orange'] / 5, results
     individual = [results[f'subdraw{i}:solid']['orange'] for i in range(3)]
     assert all(count > 10000 for count in individual), results
     assert sum(individual) == results['solid']['orange'], results
