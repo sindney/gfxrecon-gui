@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 NAME = "gfxrecon-gui"
 ARCHIVE = NAME + "-windows-x64.zip"
 CLI = "gfxrecon-cli.exe"
-PUBLIC_DOCS = ("docs/GUI.md", "docs/CLI.md", "docs/BUILD.md")
+PUBLIC_DOCS = ("docs/GUI.md", "docs/CLI.md", "docs/BUILD.md", "docs/images/inspector-wireframe.png")
 # astcenc ships as two CPU variants; the core picks AVX2 when supported, else SSE2 (design D9).
 ASTCENC = ("astcenc-avx2.exe", "astcenc-sse2.exe")
 ASTCENC_LICENSE = "licenses/astc-encoder.txt"
