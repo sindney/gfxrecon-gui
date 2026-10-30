@@ -29,6 +29,7 @@
 
 namespace tpl {
 namespace {
+constexpr ImGuiKeyChord kShortcutModifier = PLATFORM_MACOS ? ImGuiMod_Super : ImGuiMod_Ctrl;
 std::optional<std::string> captureSaveChoice;
 std::string captureSaveDefaultName,captureSaveDefaultFolder;
 std::optional<std::string> CaptureSaveDialog(const char*,const char*,const char* name,const char* folder) {
@@ -58,6 +59,7 @@ void FrameAction(ImGuiTestContext* ctx, const char* action, int frame = 1) {
     ImGui::SetWindowFocus("Frames"); ctx->Yield(2);
     ctx->SetRef("//Frames");
     auto* strip = ctx->WindowInfo("//Frames/frame-strip").Window;
+    IM_CHECK(strip != nullptr);
     const auto seed = ImHashData(&frame, sizeof(frame), strip->ID);
     ctx->ItemClick(ImHashStr("##Frame thumbnail", 0, seed), ImGuiMouseButton_Right);
     ctx->SetRef("//$FOCUSED");
@@ -67,6 +69,7 @@ void FrameAction(ImGuiTestContext* ctx, const char* action, int frame = 1) {
 void ClickFrame(ImGuiTestContext* ctx, int frame) {
     ImGui::SetWindowFocus("Frames"); ctx->Yield(2);
     auto* strip = ctx->WindowInfo("//Frames/frame-strip").Window;
+    IM_CHECK(strip != nullptr);
     const auto seed = ImHashData(&frame, sizeof(frame), strip->ID);
     ctx->ItemClick(ImHashStr("##Frame thumbnail", 0, seed));
 }
@@ -200,7 +203,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
 
     t = IM_REGISTER_TEST(engine, "shell", "palette shortcut filters and dispatches settings");
     t->TestFunc = [](ImGuiTestContext* ctx) {
-        ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_P);
+        ctx->KeyPress(kShortcutModifier | ImGuiKey_P);
         ctx->SetRef("//Command Palette");
         IM_CHECK(ctx->ItemExists("##filter"));
         // The filter receives focus on opening and matches without case sensitivity.
@@ -214,10 +217,10 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         IM_CHECK((settings->Flags&ImGuiWindowFlags_Modal)!=0);IM_CHECK((settings->Flags&ImGuiWindowFlags_NoDocking)!=0);IM_CHECK(settings->DockNode==nullptr);
         ctx->ItemClick("Close");
 
-        ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_P);
+        ctx->KeyPress(kShortcutModifier | ImGuiKey_P);
         ctx->SetRef("//Command Palette");
         IM_CHECK(ctx->ItemExists("##filter"));
-        ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_P);
+        ctx->KeyPress(kShortcutModifier | ImGuiKey_P);
         IM_CHECK(!ctx->ItemExists("##filter"));
         ctx->MenuClick("//##MainMenuBar/File/Settings...");ctx->Yield(3);ctx->SetRef("//Settings");IM_CHECK(ctx->ItemExists("Close"));
         ReviewScreenshot(ctx,"settings-dialog");ctx->KeyPress(ImGuiKey_Escape);ctx->Yield(3);IM_CHECK(!ctx->ItemExists("Close"));
@@ -225,7 +228,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
 
     t = IM_REGISTER_TEST(engine, "shell", "palette empty results and escape are safe");
     t->TestFunc = [](ImGuiTestContext* ctx) {
-        ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_P);
+        ctx->KeyPress(kShortcutModifier | ImGuiKey_P);
         ctx->SetRef("//Command Palette");
         ctx->KeyChars("no-command-matches-this");
         ctx->KeyPress(ImGuiKey_DownArrow);
@@ -237,7 +240,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         IM_CHECK(!ctx->ItemExists("##filter"));
 
         // Reopening clears the old filter. Up wraps to Exit; Up again selects About.
-        ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_P);
+        ctx->KeyPress(kShortcutModifier | ImGuiKey_P);
         ctx->KeyPress(ImGuiKey_UpArrow, 2);
         ctx->KeyPress(ImGuiKey_Enter);
         ctx->SetRef("//About");
@@ -342,7 +345,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
                 std::ifstream input(journal); const auto state = gfx::Json::parse(input);
                 IM_CHECK(state.at("restored").get<bool>());
                 IM_CHECK_EQ(state.at("serial").get<std::string>(), std::string(std::getenv("GFXRECON_GUI_CAPTURE_DEVICE")));
-                ctx->SetRef("//Capture application"); ctx->ItemClick("Open capture"); wait();
+                ctx->SetRef("//Capture application"); IM_CHECK(ctx->ItemExists("Open capture")); ctx->ItemClick("Open capture"); wait();
             } else if (ctx->Test->ArgVariant == 3) {
                 ctx->MenuClick("//##MainMenuBar/File/Capture application...");
                 ctx->SetRef("//Capture application");
@@ -375,7 +378,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             IM_CHECK_EQ(workspace.CurrentCapture()->events[workspace.SelectedEvent()].frame, 2u);
             ClickFrame(ctx, 1); wait();
             if (!android) {
-                FrameAction(ctx, "Replay target/Local Windows"); wait();
+                FrameAction(ctx, (std::string("Replay target/") + gfx::LocalReplayLabel()).c_str()); wait();
                 FrameAction(ctx, "Replay target/Automatic"); wait();
             }
             ctx->SetRef("//Frames"); IM_CHECK(!ctx->ItemExists("##replay-target"));
@@ -411,7 +414,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             IM_CHECK(ctx->ItemExists("**/View shader"));
             if (android) {
                 const auto originalWidth = workspace.BaselineImage().Width();
-                FrameAction(ctx, "Replay target/Local Windows"); wait();
+                FrameAction(ctx, (std::string("Replay target/") + gfx::LocalReplayLabel()).c_str()); wait();
                 FrameAction(ctx, "Render frame"); wait();
                 IM_CHECK(workspace.Status().find("local GPU lacks a Vulkan extension") != std::string::npos);
                 IM_CHECK_EQ(workspace.BaselineImage().Width(), originalWidth);
@@ -421,7 +424,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             }
             ctx->SetRef("//Frames"); FrameAction(ctx, "Render frame"); wait();
             IM_CHECK(workspace.Status().find("Replay artifacts:") != std::string::npos);
-            IM_CHECK(workspace.LastReplayTarget().find(android ? "Android " : "Local Windows") == 0);
+            IM_CHECK(workspace.LastReplayTarget().find(android ? "Android " : gfx::LocalReplayLabel()) == 0);
             IM_CHECK(workspace.StateFor("Frames") == gfx::PanelState::Success);
             IM_CHECK(workspace.FrameStateFor(1) == gfx::PanelState::Success);
             IM_CHECK(workspace.StateFor("Image") == gfx::PanelState::Success);
@@ -490,7 +493,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             IM_CHECK(window != nullptr);
             ctx->MouseMoveToPos(ImVec2(window->Pos.x + 120, window->Pos.y + 50));
             ctx->MouseClick(ImGuiMouseButton_Left);
-            ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_A);
+            ctx->KeyPress(kShortcutModifier | ImGuiKey_A);
             const char* lines[] = {"#version 450", "layout(location=0) in vec3 fragColor;", "layout(location=0) out vec4 outColor;",
                 "void main(){outColor=vec4(1.0,0.0,1.0,1.0)+vec4(fragColor*0.0,0.0);}"};
             for (auto line : lines) { ctx->KeyChars(line); ctx->KeyPress(ImGuiKey_Enter); }
@@ -519,7 +522,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             ImGui::SetWindowFocus("Shader"); ctx->Yield(2);
             window = EditorWindow();
             ctx->MouseMoveToPos(ImVec2(window->Pos.x + 120, window->Pos.y + 50)); ctx->MouseClick(ImGuiMouseButton_Left);
-            ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_A); ctx->KeyChars("#version 450\nvoid main( syntax error");
+            ctx->KeyPress(kShortcutModifier | ImGuiKey_A); ctx->KeyChars("#version 450\nvoid main( syntax error");
             ctx->SetRef("//Shader"); ctx->ItemClick("Compile"); wait();
             IM_CHECK(workspace.Status().find("ERROR") != std::string::npos);
             IM_CHECK(workspace.StateFor("Shader") == gfx::PanelState::Failed);
@@ -828,7 +831,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         const auto windowId=static_cast<SDL_WindowID>(reinterpret_cast<uintptr_t>(ImGui::GetMainViewport()->PlatformHandle));
         auto* native=SDL_GetWindowFromID(windowId);IM_CHECK(native!=nullptr);
         if(SDL_GetKeyboardFocus()==native)IM_CHECK(SDL_TextInputActive(native));
-        ctx->KeyPress(ImGuiMod_Ctrl|ImGuiKey_End);ctx->KeyPress(ImGuiKey_Enter);
+        ctx->KeyPress(kShortcutModifier|ImGuiKey_End);ctx->KeyPress(ImGuiKey_Enter);
         SDL_Event editing{};editing.type=SDL_EVENT_TEXT_EDITING;editing.edit.windowID=windowId;editing.edit.text="zhong";
         SDL_PushEvent(&editing);ctx->Yield(2);const auto beforeIme=editor.GetText();
         ctx->KeyPress(ImGuiKey_Backspace);ctx->KeyPress(ImGuiKey_Enter);IM_CHECK_EQ(editor.GetText(),beforeIme);
@@ -836,7 +839,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         committed.common.reserved=os::kSyntheticTextTag;
         SDL_PushEvent(&committed);ctx->Yield(3);IM_CHECK(editor.GetText().find(u8"native 中文 input")!=std::string::npos);
 #endif
-        ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_End);
+        ctx->KeyPress(kShortcutModifier | ImGuiKey_End);
         ctx->KeyPress(ImGuiKey_Enter);
         ctx->KeyChars("/* edited");
         ctx->KeyPress(ImGuiKey_Enter);
@@ -898,7 +901,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             const auto previous = workspace.CurrentCapture();
             workspace.Open(file.u8string());
             const auto started = std::chrono::steady_clock::now();
-            ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_P);
+            ctx->KeyPress(kShortcutModifier | ImGuiKey_P);
             ctx->SetRef("//Command Palette"); IM_CHECK(ctx->ItemExists("##filter"));
             const auto response = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
             ctx->LogInfo("Import input response %.2f ms", response); IM_CHECK(response < 1000);

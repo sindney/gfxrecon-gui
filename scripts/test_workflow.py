@@ -1,4 +1,4 @@
-"""Opt-in real GUI capture/replay tests on Windows and an authorized Android phone.
+"""Opt-in real GUI tests with local samples, Windows capture or an authorized Android phone.
 
 The Windows Vulkan loader ignores environment-only layer discovery in elevated
 processes. Only for this development test, temporarily register the pinned layer
@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -57,16 +58,21 @@ def main():
     parser.add_argument('--stress', action='store_true')
     parser.add_argument('--navigation-jsonl', type=Path, help='Profile CPU navigation on an existing large converted capture, without device replay')
     parser.add_argument('--capture', type=Path, help='Replay/inspect an existing Windows trace without capturing or using a phone')
+    parser.add_argument('--mesh-capture', type=Path, help='Indexed cube fixture for geometry and post-VS preview checks')
+    parser.add_argument('--indirect-capture', type=Path, help='Indirect triangle fixture for draw visualization checks')
     args = parser.parse_args()
     env = dict(os.environ)
     tools = ROOT / 'local-tools.json'
-    if tools.exists() and args.build.resolve() == (ROOT / 'build').resolve():
-        state = args.build / 'Release/test-state'
+    binaries = args.build / 'Release' if os.name == 'nt' else args.build
+    test_binaries = args.build / 'gfxrecon_gui_tests.app/Contents/MacOS' if sys.platform == 'darwin' else binaries
+    if tools.exists():
+        state = test_binaries / 'test-state'
         state.mkdir(parents=True, exist_ok=True)
         (state / 'gfxrecon_tools.json').write_bytes(tools.read_bytes())
     for name in ['GFXRECON_GUI_TEST_CAPTURE', 'GFXRECON_GUI_ANDROID_CAPTURE', 'GFXRECON_GUI_CAPTURE_DEVICE',
                  'GFXRECON_GUI_CAPTURE_WINDOWS', 'GFXRECON_GUI_CAPTURE_WORKDIR',
-                 'GFXRECON_GUI_LIVE_GAME', 'GFXRECON_GUI_LIVE_WORKDIR', 'GFXRECON_GUI_NAVIGATION_JSONL']:
+                 'GFXRECON_GUI_LIVE_GAME', 'GFXRECON_GUI_LIVE_WORKDIR', 'GFXRECON_GUI_NAVIGATION_JSONL',
+                 'GFXRECON_GUI_MESH_CAPTURE', 'GFXRECON_GUI_INDIRECT_CAPTURE']:
         env.pop(name, None)
     if args.android:
         config = json.loads(tools.read_text(encoding='utf-8')) if tools.exists() else {}
@@ -77,11 +83,15 @@ def main():
         env['GFXRECON_GUI_CAPTURE_DEVICE'] = args.android
     if args.capture:
         env['GFXRECON_GUI_TEST_CAPTURE'] = str(args.capture.resolve())
+    if args.mesh_capture:
+        env['GFXRECON_GUI_MESH_CAPTURE'] = str(args.mesh_capture.resolve())
+    if args.indirect_capture:
+        env['GFXRECON_GUI_INDIRECT_CAPTURE'] = str(args.indirect_capture.resolve())
     if args.navigation_jsonl:
         env['GFXRECON_GUI_NAVIGATION_JSONL'] = str(args.navigation_jsonl.resolve())
     if args.stress:
         benchmark = ROOT / '.sessions/index-benchmark'
-        subprocess.run([str(args.build / 'Release/gfxrecon_core_tests.exe'), '--benchmark-index', str(benchmark)], check=True)
+        subprocess.run([str(binaries / ('gfxrecon_core_tests.exe' if os.name == 'nt' else 'gfxrecon_core_tests')), '--benchmark-index', str(benchmark)], check=True)
         env['GFXRECON_GUI_STRESS_CAPTURE'] = str(benchmark / '100k.jsonl')
     if args.windows:
         env['GFXRECON_GUI_CAPTURE_WINDOWS'] = str(ROOT / 'build-tools/test/test_apps/launcher/Release/gfxrecon-test-launcher.exe')

@@ -41,7 +41,7 @@ void App::Shutdown() {
 }
 
 std::string App::logFilePath() const {
-    // exeDir + "/logs/gfxrecon_gui.log"; settings path is already exeDir-based.
+    // Keep logs in the settings directory, outside the signed bundle on macOS.
     size_t pos = settingsPath_.find_last_of("/\\");
     std::string dir = pos == std::string::npos ? "." : settingsPath_.substr(0, pos);
     return dir + "/logs/gfxrecon_gui.log";
@@ -124,7 +124,7 @@ void App::DrawMenuBar() {
         if (ImGui::MenuItem("Save capture as...",nullptr,false,workspace_.CanSaveCapture())) pendingCommand_=Command::SaveCaptureAs;
         if (ImGui::MenuItem("Cancel current operation", nullptr, false, workspace_.Busy() || workspace_.CaptureSessionActive())) pendingCommand_ = Command::CancelJob;
         if (ImGui::BeginMenu("Samples")) {
-            const auto samples = std::filesystem::u8path(ExeDirectory()) / "samples";
+            const auto samples = std::filesystem::u8path(ResourceDirectory()) / "samples";
             if (ImGui::MenuItem("Windows triangle (3 frames)", nullptr, false, std::filesystem::is_regular_file(samples / "windows-triangle.gfxr")))
                 pendingCommand_ = Command::OpenWindowsSample;
             if (ImGui::MenuItem("Android triangle (3 frames)", nullptr, false, std::filesystem::is_regular_file(samples / "android-triangle.gfxr")))
@@ -183,7 +183,7 @@ void App::ExecuteCommand(Command command) {
     case Command::OpenAndroidSample:
     case Command::OpenMeshSample:
     case Command::OpenIndirectSample:
-        lastOpenedFile_ = (std::filesystem::u8path(ExeDirectory()) / "samples" /
+        lastOpenedFile_ = (std::filesystem::u8path(ResourceDirectory()) / "samples" /
             (command == Command::OpenWindowsSample ? "windows-triangle.gfxr" : command == Command::OpenMeshSample ? "indexed-cube.gfxr" : command == Command::OpenIndirectSample ? "indirect-triangles.gfxr" : "android-triangle.gfxr")).u8string();
         workspace_.Open(lastOpenedFile_); break;
     case Command::ToggleConsole: showConsole_ = !showConsole_; break;

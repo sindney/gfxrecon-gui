@@ -196,6 +196,11 @@ ReplayResult RunLocal(const ReplayRequest& r, const std::map<std::string, std::s
         args.insert(args.end(), {"--measurement-frame-range", r.measurement.frameRange, "--measurement-file", (r.output / "measurement.json").u8string()});
         if (r.measurement.quitAfter) args.push_back("--quit-after-measurement-range");
     }
+#ifdef __APPLE__
+    // Captured Windows/Android memory types do not match Metal's allocation modes.
+    // Rebind resources using the replay GPU's requirements instead of captured indices.
+    args.insert(args.end(), {"--memory-translation", "rebind"});
+#endif
     std::filesystem::path pendingCache, readyCache;
     bool cacheLoaded = false;
     const auto backend = tools.find("replay");
@@ -246,7 +251,7 @@ ReplayResult RunLocal(const ReplayRequest& r, const std::map<std::string, std::s
     }
     if (!result.Success() && result.output.find("VK_ERROR_EXTENSION_NOT_PRESENT") != std::string::npos)
         throw std::runtime_error("The local GPU lacks a Vulkan extension required by this capture. For an Android capture, choose Automatic or Android device under Frames > Replay.\n" + result.output);
-    ReplayResult local{{}, Checked(result, "Local replay"), "Local Windows"};
+    ReplayResult local{{}, Checked(result, "Local replay"), LocalReplayLabel()};
     local.timings = {{"pipeline_cache_loaded", cacheLoaded}, {"screen_off", false}};
     return local;
 }

@@ -198,7 +198,8 @@ void Workspace::Poll() {
         if (result.capture) {
             mesh_.Release(); meshGeneration_ = meshRequestGeneration_ = 0; meshInstance_ = 0;
             focusFrames_ = !captureInProgress_;
-            focusImage_=result.capture->source.extension()==".gfxr";
+            // Keep the capture completion modal in front until Open capture is clicked.
+            focusImage_=!captureInProgress_&&result.capture->source.extension()==".gfxr";
             capture_ = std::move(result.capture);
             session_ = result.session;
             selectedEvent_ = 0; frame_ = 1; inspectedPipeline_ = 0;drawVisualization_=0;
@@ -935,6 +936,11 @@ void Workspace::DrawTools() {
     ImGui::SetNextWindowSize(ImVec2(760, 0), ImGuiCond_Appearing);
     ImGui::SetNextWindowSizeConstraints(ImVec2(760,0),ImVec2(760,ImGui::GetMainViewport()->WorkSize.y*.9f));
     if (!ImGui::BeginPopupModal("Tools and devices", nullptr, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize)) return;
+#ifdef __APPLE__
+    ImGui::TextWrapped("Local replay on this Mac needs a Vulkan runtime. Install the LunarG Vulkan SDK (loader and MoltenVK), configure the host tools, and launch with the SDK environment. Offline inspection does not require the local Vulkan runtime.");
+    ImGui::TextLinkOpenURL("Download Vulkan SDK for macOS", "https://vulkan.lunarg.com/sdk/home#mac");
+    ImGui::Separator();
+#endif
     if (ImGui::CollapsingHeader("Available operations", ImGuiTreeNodeFlags_DefaultOpen)) {
         auto operation = [&](const char* label, bool ready, const char* dependency) {
             ImGui::Text("%s: %s", label, ready ? "Available" : "Unavailable");
@@ -949,6 +955,7 @@ void Workspace::DrawTools() {
         operation("SPIR-V assembly editing", ToolAvailable("assembler") && ToolAvailable("validator"), "spirv-as and spirv-val");
         operation("Local replay", ToolAvailable("replay"), "gfxrecon-replay");
         operation("Android setup / replay", ToolAvailable("adb"), "ADB and a compatible installed replay APK");
+        ImGui::TextWrapped("Android capture/replay requires SDK Platform-Tools (adb), an authorized Vulkan device, and our compatible debug replay/layer APK. NDK and JDK are only needed when building the APKs.");
         ImGui::TextDisabled("SPIRV-Cross: built in (300681bb). Transport: CLI / ADB files.");
         ImGui::TextDisabled("Experimental remote transport: probed separately; disabled in this release.");
     }

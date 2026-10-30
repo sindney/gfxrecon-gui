@@ -8,6 +8,15 @@
 #include <functional>
 
 namespace gfx {
+inline const char* LocalReplayLabel() {
+#if defined(__APPLE__)
+    return "Local macOS";
+#elif defined(_WIN32)
+    return "Local Windows";
+#else
+    return "Local Linux";
+#endif
+}
 enum class ReplayMode { Automatic, Local, Android };
 struct AndroidDevice {
     std::string serial, state, details;
@@ -15,7 +24,7 @@ struct AndroidDevice {
 struct ReplayTarget {
     bool android = false;
     std::string serial;
-    std::string Label() const { return android ? "Android " + serial : "Local Windows"; }
+    std::string Label() const { return android ? "Android " + serial : LocalReplayLabel(); }
 };
 // Upstream FPS measurement (--measurement-frame-range/--measurement-file). Measurement runs bypass result caches.
 struct ReplayMeasurement {

@@ -356,11 +356,28 @@ foreach(_t gfxrecon_gui gfxrecon_gui_tests)
 endforeach()
 
 if(APPLE)
+    set(_mac_icon "${CMAKE_CURRENT_BINARY_DIR}/app.icns")
+    add_custom_command(OUTPUT "${_mac_icon}"
+        COMMAND ${CMAKE_COMMAND} "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/assets/app-icon.png" "-DOUTPUT=${_mac_icon}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/macos_icon.cmake"
+        DEPENDS assets/app-icon.png cmake/macos_icon.cmake VERBATIM)
+    add_custom_target(gfxrecon_icon DEPENDS "${_mac_icon}")
+    set_source_files_properties("${_mac_icon}" PROPERTIES GENERATED TRUE MACOSX_PACKAGE_LOCATION Resources)
     foreach(_t gfxrecon_gui gfxrecon_gui_tests)
+        add_dependencies(${_t} gfxrecon_icon)
+        target_sources(${_t} PRIVATE "${_mac_icon}")
+        add_custom_command(TARGET ${_t} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/samples" "$<TARGET_BUNDLE_CONTENT_DIR:${_t}>/Resources/samples")
+        if(_t STREQUAL gfxrecon_gui)
+            set(_bundle_identifier "app.gfxreconstruct.inspector")
+        else()
+            set(_bundle_identifier "app.gfxreconstruct.inspector.tests")
+        endif()
         set_target_properties(${_t} PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/cmake/MacOSXBundleInfo.plist.in"
             MACOSX_BUNDLE_BUNDLE_NAME "GFXReconstruct Inspector"
-            MACOSX_BUNDLE_GUI_IDENTIFIER "app.imgui-template.${_t}"
+            MACOSX_BUNDLE_ICON_FILE "app.icns"
+            MACOSX_BUNDLE_GUI_IDENTIFIER "${_bundle_identifier}"
             MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
             MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
     endforeach()

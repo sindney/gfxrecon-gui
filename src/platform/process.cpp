@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <thread>
 #include <future>
+#include <fstream>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -235,6 +236,21 @@ ProcessResult RunProcess(const ProcessRequest& r, const std::atomic_bool* cancel
 }
 } // namespace gfx
 #else
+#include <cerrno>
+#include <cstring>
+#include <cstdlib>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#ifdef __APPLE__
+#include <crt_externs.h>
+#else
+extern char** environ;
+#endif
+
 namespace gfx {
 struct GameProcess::Impl {};
 GameProcess::GameProcess(const ProcessRequest&) { throw std::runtime_error("Game launching is currently supported on Windows"); }
@@ -242,11 +258,169 @@ GameProcess::~GameProcess()=default;
 bool GameProcess::Running() const { return false; }
 void GameProcess::Stop() {}
 void GameProcess::SetCaptureEnabled(bool) { throw std::runtime_error("Windows capture control is unavailable"); }
-std::string FindExecutablePath(const std::string&) { return {}; }
-std::vector<std::string> NativeArguments() { return {}; }
-std::vector<std::string> SplitProcessArguments(const std::string&) { throw std::runtime_error("Windows argument parsing is unavailable"); }
-ProcessResult RunProcess(const ProcessRequest&, const std::atomic_bool*) {
-    throw std::runtime_error("Process backend is currently supported on Windows");
+std::string FindExecutablePath(const std::string& name) {
+    if (name.empty() || name.find('\0') != std::string::npos) return {};
+    const auto executable = [](const std::filesystem::path& file) {
+        return std::filesystem::is_regular_file(file) && access(file.c_str(), X_OK) == 0;
+    };
+    if (name.find('/') != std::string::npos)
+        return executable(std::filesystem::u8path(name)) ? std::filesystem::absolute(std::filesystem::u8path(name)).u8string() : "";
+    const char* path = std::getenv("PATH");
+    if (!path) return {};
+    const std::string search(path);
+    for (size_t begin = 0;;) {
+        const auto end = search.find(':', begin);
+        const auto directory = search.substr(begin, end == std::string::npos ? end : end - begin);
+        const auto file = std::filesystem::u8path(directory.empty() ? "." : directory) / name;
+        if (executable(file)) return std::filesystem::absolute(file).u8string();
+        if (end == std::string::npos) break;
+        begin = end + 1;
+    }
+    return {};
+}
+std::vector<std::string> NativeArguments() {
+#ifdef __APPLE__
+    return std::vector<std::string>(*_NSGetArgv(), *_NSGetArgv() + *_NSGetArgc());
+#else
+    std::ifstream input("/proc/self/cmdline", std::ios::binary);
+    std::vector<std::string> result;
+    for (std::string word; std::getline(input, word, '\0');) result.push_back(std::move(word));
+    return result;
+#endif
+}
+std::vector<std::string> SplitProcessArguments(const std::string& arguments) {
+    if (arguments.find('\0') != std::string::npos) throw std::runtime_error("NUL in process arguments");
+    std::vector<std::string> result;
+    std::string word;
+    char quote = 0;
+    bool started = false, escaped = false;
+    for (char c : arguments) {
+        if (escaped) { word += c; escaped = false; started = true; }
+        else if (c == '\\' && quote != '\'') { escaped = true; started = true; }
+        else if (quote) { if (c == quote) quote = 0; else word += c; }
+        else if (c == '\'' || c == '"') { quote = c; started = true; }
+        else if (c == ' ' || c == '\t' || c == '\n') {
+            if (started) { result.push_back(std::move(word)); word.clear(); started = false; }
+        } else { word += c; started = true; }
+    }
+    if (quote || escaped) throw std::runtime_error("Unterminated process argument");
+    if (started) result.push_back(std::move(word));
+    return result;
+}
+ProcessResult RunProcess(const ProcessRequest& r, const std::atomic_bool* cancel) {
+    if (r.executable.empty()) throw std::runtime_error("No executable configured");
+    const auto validate = [](const std::string& value) {
+        if (value.find('\0') != std::string::npos) throw std::runtime_error("NUL in process request");
+    };
+    validate(r.executable); validate(r.workingDirectory);
+    for (const auto& argument : r.arguments) validate(argument);
+    ProcessResult result;
+    if (cancel && cancel->load()) { result.cancelled = true; return result; }
+    const auto executable = FindExecutablePath(r.executable);
+    if (executable.empty()) throw std::runtime_error("Cannot find executable " + r.executable);
+
+    std::map<std::string, std::string> environment;
+#ifdef __APPLE__
+    auto inherited = *_NSGetEnviron();
+#else
+    auto inherited = environ;
+#endif
+    for (auto p = inherited; *p; ++p) {
+        const std::string entry(*p);
+        const auto equals = entry.find('=');
+        if (equals != std::string::npos) environment[entry.substr(0, equals)] = entry.substr(equals + 1);
+    }
+    for (const auto& [key, value] : r.environment) {
+        validate(key); validate(value);
+        if (key.empty() || key.find('=') != std::string::npos) throw std::runtime_error("Invalid process environment override");
+        environment[key] = value;
+    }
+    std::vector<std::string> words{r.executable}, entries;
+    words.insert(words.end(), r.arguments.begin(), r.arguments.end());
+    for (const auto& [key, value] : environment) entries.push_back(key + "=" + value);
+    const auto pointers = [](std::vector<std::string>& strings) {
+        std::vector<char*> out;
+        for (auto& value : strings) out.push_back(value.data());
+        out.push_back(nullptr); return out;
+    };
+    auto argv = pointers(words), env = pointers(entries);
+    const auto check = [](int error) {
+        if (error) throw std::runtime_error(std::string("Process setup failed: ") + std::strerror(error));
+    };
+    struct Pipe {
+        int read = -1, write = -1;
+        ~Pipe() { if (read >= 0) close(read); if (write >= 0) close(write); }
+    } pipe;
+    int descriptors[2];
+    if (::pipe(descriptors) != 0) check(errno);
+    pipe.read = descriptors[0]; pipe.write = descriptors[1];
+    if (fcntl(pipe.read, F_SETFD, FD_CLOEXEC) == -1 || fcntl(pipe.write, F_SETFD, FD_CLOEXEC) == -1) check(errno);
+    const auto flags = fcntl(pipe.read, F_GETFL);
+    if (flags == -1 || fcntl(pipe.read, F_SETFL, flags | O_NONBLOCK) == -1) check(errno);
+    struct Actions {
+        posix_spawn_file_actions_t value;
+        Actions() { if (posix_spawn_file_actions_init(&value)) throw std::runtime_error("Cannot initialize process actions"); }
+        ~Actions() { posix_spawn_file_actions_destroy(&value); }
+    } actions;
+    struct Attributes {
+        posix_spawnattr_t value;
+        Attributes() { if (posix_spawnattr_init(&value)) throw std::runtime_error("Cannot initialize process attributes"); }
+        ~Attributes() { posix_spawnattr_destroy(&value); }
+    } attributes;
+    check(posix_spawn_file_actions_addopen(&actions.value, STDIN_FILENO,
+        r.stdinFile.empty() ? "/dev/null" : r.stdinFile.c_str(), O_RDONLY, 0));
+    if (r.stdoutFile.empty()) check(posix_spawn_file_actions_adddup2(&actions.value, pipe.write, STDOUT_FILENO));
+    else check(posix_spawn_file_actions_addopen(&actions.value, STDOUT_FILENO, r.stdoutFile.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666));
+    check(posix_spawn_file_actions_adddup2(&actions.value, pipe.write, STDERR_FILENO));
+    check(posix_spawn_file_actions_addclose(&actions.value, pipe.read));
+    check(posix_spawn_file_actions_addclose(&actions.value, pipe.write));
+    if (!r.workingDirectory.empty()) check(posix_spawn_file_actions_addchdir_np(&actions.value, r.workingDirectory.c_str()));
+    check(posix_spawnattr_setflags(&attributes.value, POSIX_SPAWN_SETPGROUP));
+    check(posix_spawnattr_setpgroup(&attributes.value, 0));
+    pid_t pid;
+    check(posix_spawn(&pid, executable.c_str(), &actions.value, &attributes.value, argv.data(), env.data()));
+    close(pipe.write); pipe.write = -1;
+    struct Child {
+        pid_t pid;
+        ~Child() { if (pid > 0) { kill(-pid, SIGKILL); while (waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {} } }
+    } child{pid};
+    const auto started = std::chrono::steady_clock::now();
+    auto exitedAt = started;
+    bool exited = false, eof = false, terminated = false;
+    int status = 0;
+    while (!exited || !eof) {
+        char buffer[8192];
+        for (int batch = 0; batch < 64; ++batch) {
+            const auto count = read(pipe.read, buffer, sizeof(buffer));
+            if (count > 0) {
+                const auto retain = std::min<size_t>(count, r.outputLimit - result.output.size());
+                result.output.append(buffer, retain); result.outputTruncated |= retain != static_cast<size_t>(count);
+            } else {
+                if (count == 0) eof = true;
+                else if (errno == EINTR) continue;
+                else if (errno != EAGAIN && errno != EWOULDBLOCK) check(errno);
+                break;
+            }
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (!exited) {
+            const auto waited = waitpid(pid, &status, WNOHANG);
+            if (waited == pid) { exited = true; exitedAt = now; child.pid = -1; }
+            else if (waited < 0 && errno != EINTR) check(errno);
+        }
+        if (!exited && !terminated) {
+            result.cancelled = cancel && cancel->load();
+            result.timedOut = r.timeout.count() > 0 && now - started >= r.timeout;
+            if (result.cancelled || result.timedOut) { kill(-pid, SIGKILL); terminated = true; }
+        }
+        if (exited && !eof && now - exitedAt >= std::chrono::milliseconds(100)) {
+            kill(-pid, SIGKILL);
+            break;
+        }
+        if (!exited || !eof) { pollfd fd{pipe.read, POLLIN, 0}; poll(&fd, 1, 10); }
+    }
+    result.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+    return result;
 }
 } // namespace gfx
 #endif

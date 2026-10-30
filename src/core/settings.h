@@ -2,7 +2,7 @@
 
 #include <string>
 
-// Minimal key=value settings file next to the exe (theme, log level, ...).
+// Minimal key=value settings file (theme, log level, ...).
 namespace tpl {
 
 struct Settings {
@@ -18,5 +18,10 @@ void SaveSettings(const Settings& settings, const std::string& path);
 
 // Directory containing the running executable (UTF-8).
 std::string ExeDirectory();
+// macOS uses per-user Application Support so signed app bundles stay immutable.
+// Other platforms retain the portable executable-directory default.
+std::string SettingsDirectory();
+// Bundle Resources on macOS; executable directory for portable builds elsewhere.
+std::string ResourceDirectory();
 
 } // namespace tpl

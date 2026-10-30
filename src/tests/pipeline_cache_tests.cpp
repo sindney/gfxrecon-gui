@@ -5,16 +5,23 @@
 #include <unordered_map>
 #include <vector>
 #include <stdexcept>
+#include <cerrno>
 
 namespace gfx::tests {
 namespace {
 namespace format { using HandleId = uint64_t; }
 namespace util::platform {
 constexpr auto FileSeekEnd=SEEK_END, FileSeekSet=SEEK_SET, FileSeekCurrent=SEEK_CUR;
-int FileOpen(FILE** file,const char* name,const char* mode){return fopen_s(file,name,mode);}
 void FileClose(FILE* file){fclose(file);}
+#ifdef _WIN32
+int FileOpen(FILE** file,const char* name,const char* mode){return fopen_s(file,name,mode);}
 bool FileSeek(FILE* file,int64_t offset,int origin){return _fseeki64(file,offset,origin)==0;}
 int64_t FileTell(FILE* file){return _ftelli64(file);}
+#else
+int FileOpen(FILE** file,const char* name,const char* mode){*file=fopen(name,mode);return *file?0:errno;}
+bool FileSeek(FILE* file,int64_t offset,int origin){return fseeko(file,offset,origin)==0;}
+int64_t FileTell(FILE* file){return ftello(file);}
+#endif
 size_t FileRead(void* value,size_t bytes,FILE* file){return fread(value,bytes,1,file);}
 }
 struct Reader {

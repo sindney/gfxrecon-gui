@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <algorithm>
+#include <filesystem>
 
 #ifdef IMGUI_TEMPLATE_OSLAYER_SFML
 #include <imgui-SFML.h>
@@ -19,7 +20,6 @@
 #ifdef IMGUI_TEMPLATE_TESTS
 #include <imgui_te_engine.h>
 #include <imgui_internal.h>
-#include <filesystem>
 #endif
 
 namespace {
@@ -37,6 +37,9 @@ bool WantsTests(int argc, char** argv) {
 namespace tpl {
 void RegisterAppTests(ImGuiTestEngine* engine, App* app);
 void EnableTestScreenCapture(ImGuiTestEngine* engine);
+#if PLATFORM_MACOS
+void ConfigureMacTestCoroutines(ImGuiTestEngine* engine);
+#endif
 ImGuiTest* RegisterThemeRecording(ImGuiTestEngine* engine, const char* outputPath,
                                 const char* encoderPath);
 }
@@ -73,9 +76,19 @@ int main(int argc, char** argv) {
 
     tpl::Log& log = tpl::Log::Instance();
 
-    const std::string exeDir = tpl::ExeDirectory();
-    const std::string settingsPath = exeDir + "/gfxrecon_gui.ini";
-    const std::string layoutPath = exeDir + "/gfxrecon_layout.ini";
+    const auto nativeArgs = gfx::NativeArguments();
+    std::string settingsDir = tpl::SettingsDirectory();
+    for (size_t i = 1; i < nativeArgs.size(); ++i) {
+        if (nativeArgs[i] != "--settings-dir") continue;
+        if (i + 1 == nativeArgs.size() || nativeArgs[i + 1].empty()) {
+            std::fprintf(stderr, "--settings-dir requires a directory\n");
+            return 1;
+        }
+        settingsDir = std::filesystem::absolute(std::filesystem::u8path(nativeArgs[++i])).u8string();
+    }
+    std::filesystem::create_directories(std::filesystem::u8path(settingsDir));
+    const std::string settingsPath = settingsDir + "/gfxrecon_gui.ini";
+    const std::string layoutPath = settingsDir + "/gfxrecon_layout.ini";
 
     LOGI("app") << "GFXReconstruct Inspector starting";
 
@@ -128,7 +141,7 @@ int main(int argc, char** argv) {
     tpl::App app;
 #ifdef IMGUI_TEMPLATE_TESTS
     if (WantsTests(argc, argv)) {
-        const auto testDir = std::filesystem::u8path(exeDir) / "test-state";
+        const auto testDir = std::filesystem::u8path(tpl::ExeDirectory()) / "test-state";
         std::filesystem::create_directories(testDir);
         app.Init((testDir / "gfxrecon_gui.ini").u8string());
         ImGui::GetIO().IniFilename = nullptr;
@@ -136,7 +149,6 @@ int main(int argc, char** argv) {
     } else
 #endif
         app.Init(settingsPath);
-    const auto nativeArgs = gfx::NativeArguments();
     const bool quitWhenReady = std::find(nativeArgs.begin(), nativeArgs.end(), "--quit-when-ready") != nativeArgs.end();
     for (size_t i = 1; i + 1 < nativeArgs.size(); ++i)
         if (nativeArgs[i] == "--open") app.Workspace().Open(nativeArgs[++i]);
@@ -167,6 +179,9 @@ int main(int argc, char** argv) {
 
 #ifdef IMGUI_TEMPLATE_TESTS
     ImGuiTestEngine* engine = ImGuiTestEngine_CreateContext();
+#if PLATFORM_MACOS
+    tpl::ConfigureMacTestCoroutines(engine);
+#endif
     ImGuiTestEngine_GetIO(engine).ConfigLogToTTY = true;
     ImGuiTestEngine_GetIO(engine).ConfigVerboseLevel = ImGuiTestVerboseLevel_Info;
     ImGuiTestEngine_GetIO(engine).ConfigRunSpeed = ImGuiTestRunSpeed_Fast;
