@@ -49,7 +49,7 @@ void Workspace::OpenResource(const ResourceArtifact& artifact, uint64_t offset,b
                 },JobKind::Resource);
                 return;
             }
-            try{resourceImage_.LoadPng(png);resourceMode_=1;if(activate){focusImage_=true;status_="Replay resource: "+png.u8string();}}
+            try{resourceImage_.LoadPng(png,artifact.metadata.value("format",std::string{}));resourceMode_=1;if(activate){focusImage_=true;status_="Replay resource: "+png.u8string();}}
             catch(const std::exception& error){resourceImage_.Release();status_=error.what();LOGE("resources")<<status_;}
             return;
         }

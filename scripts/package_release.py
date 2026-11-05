@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 NAME = "gfxrecon-gui"
 ARCHIVE = NAME + "-windows-x64.zip"
 CLI = "gfxrecon-cli.exe"
-PUBLIC_DOCS = ("docs/GUI.md", "docs/CLI.md", "docs/BUILD.md", "docs/images/inspector-wireframe.png")
+PUBLIC_DOCS = ("docs/GUI.md", "docs/CLI.md", "docs/RELATIONS.md", "docs/BUILD.md", "docs/images/inspector-wireframe.png")
 # astcenc ships as two CPU variants; the core picks AVX2 when supported, else SSE2 (design D9).
 ASTCENC = ("astcenc-avx2.exe", "astcenc-sse2.exe")
 ASTCENC_LICENSE = "licenses/astc-encoder.txt"
@@ -76,6 +76,7 @@ def require_x64(path):
 def release_files(stage):
     required = {"gfxrecon-gui.exe", CLI, "README.md", "LICENSE", "build-info.json",
                 "msvcp140.dll", "vcruntime140.dll", "licenses/MSVC-RUNTIME-NOTICE.txt", ASTCENC_LICENSE,
+                "licenses/sqlite.txt", "dependencies.json",
                 *("tools/astcenc/" + name for name in ASTCENC), *PUBLIC_DOCS}
     files = []
     for path in sorted(stage.rglob("*")):
@@ -87,7 +88,7 @@ def release_files(stage):
         tool_file = relative.parts[0] == "tools" and path.suffix.lower() in (".exe", ".dll", ".json", ".apk")
         sample_file = relative.parts[0] == "samples" and path.suffix.lower() in (".gfxr", ".md", ".spv")
         if not (relative.as_posix() in required or relative.parts[0] == "licenses" or tool_file or sample_file or
-                relative.as_posix() in ("dependencies.json", "tool-versions.json") or
+                relative.as_posix() in ("dependencies.json", "tool-versions.json", "tools/android/gpu-counter-producer") or
                 (len(relative.parts) == 1 and path.suffix.lower() == ".dll")):
             raise ValueError(f"Unexpected release file: {relative}")
         files.append(path)
@@ -138,6 +139,12 @@ def bundle_tools(stage, config, runtimes):
     for source in runtimes:shutil.copy2(source,validation/source.name)
     android = directory / "android"
     android.mkdir()
+    producer = Path(config.get("gpu_counter_producer", ""))
+    producer_capability = Path(str(producer) + ".capabilities.json")
+    if not producer.is_file() or not producer_capability.is_file():
+        raise ValueError("Build/configure the Android GPU counter producer with scripts/setup_backend.py android")
+    shutil.copy2(producer, android / "gpu-counter-producer")
+    shutil.copy2(producer_capability, android / "gpu-counter-producer.capabilities.json")
     for key, name in [("replay_apk", "replay-debug.apk"), ("test_apk", "test_launcher-debug.apk")]:
         source = Path(config.get(key, ""))
         if not source.is_file(): raise ValueError(f"Configure the source-built debuggable {key}")

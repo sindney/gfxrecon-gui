@@ -40,7 +40,7 @@ void Workspace::DrawPanelStatuses() {
         else { LOGI("status") << status_; }
         loggedStatus_ = status_;
     }
-    for (const auto* name : {"Frames"}) {
+    for (const auto* name : {"Frames", "Perf"}) {
         auto* window = ImGui::FindWindowByName(name);
         if (!window || window->LastFrameActive < ImGui::GetFrameCount() - 1) continue;
         const auto found = panelStatuses_.find(name);
@@ -51,13 +51,13 @@ void Workspace::DrawPanelStatuses() {
         const float padding = ImGui::GetFontSize();
         const ImVec2 center(rect.Min.x + padding * .32f, (rect.Min.y + rect.Max.y) * .5f);
         const float radius = 3.0f;
-        const ImU32 colors[] = {IM_COL32(128, 136, 144, 255), IM_COL32(244, 192, 65, 255), IM_COL32(75, 196, 116, 255), IM_COL32(237, 90, 90, 255)};
+        const ImU32 colors[] = {IM_COL32(128, 136, 144, 255), IM_COL32(244, 192, 65, 255), IM_COL32(75, 196, 116, 255), IM_COL32(237, 90, 90, 255), IM_COL32(238, 163, 58, 255)};
         auto* draw = docked ? window->DockNode->HostWindow->DrawList : window->DrawList;
         draw->PushClipRect(rect.Min, rect.Max, false);
         draw->AddCircleFilled(center, radius, colors[static_cast<int>(status.state)], 16);
         draw->PopClipRect();
         if (ImGui::IsMouseHoveringRect(ImVec2(center.x - 5, rect.Min.y), ImVec2(center.x + 5, rect.Max.y), false)) {
-            const char* states[] = {"Inactive / no operation", "Running", "Succeeded", "Failed"};
+            const char* states[] = {"Inactive / no operation", "Running", "Succeeded", "Failed", "Completed with warnings"};
             const auto summary = status.detail.substr(0, std::min<size_t>(status.detail.find('\n'), 240));
             ImGui::SetTooltip("%s: %s\n%s\nDetails are logged in Console.", name, states[static_cast<int>(status.state)], summary.c_str());
         }

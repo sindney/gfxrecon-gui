@@ -1,0 +1,9 @@
+SQLite 3.54.1
+
+Official source: https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip
+Copyright statement: https://www.sqlite.org/copyright.html
+
+SQLite's deliverable library source is dedicated to the public domain by its
+authors. This distribution embeds the official amalgamation; no external SQLite
+service or command-line executable is required. The original source headers
+and exact source/archive checksums are retained in thirdparty/sqlite.

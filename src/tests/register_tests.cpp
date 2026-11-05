@@ -8,6 +8,9 @@
 #include "core/artifacts.h"
 #include "gui/editor_input.h"
 #include "platform/os_layer.h"
+#include "replay/perf_session.h"
+#include "gui/image_viewer.h"
+#include "core/image_io.h"
 #ifdef IMGUI_TEMPLATE_OSLAYER_SDL3
 #include <SDL3/SDL.h>
 #endif
@@ -16,6 +19,8 @@
 #include <imgui_te_engine.h>
 #include <imgui_internal.h>
 #include <imgui_capture_tool.h>
+#include <implot.h>
+#include <implot_internal.h>
 
 #include <cstdio>
 #include <string>
@@ -26,6 +31,21 @@
 #include <algorithm>
 #include <chrono>
 #include <thread>
+#include <cmath>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#undef LoadImage
+#undef Yield
+#endif
+#ifdef __APPLE__
+#include <OpenGL/gl.h>
+#else
+#include <GL/gl.h>
+#endif
 
 namespace tpl {
 namespace {
@@ -47,11 +67,35 @@ void WaitForWorkspace(ImGuiTestContext* ctx, gfx::Workspace& workspace) {
         if (!workspace.Busy() && !workspace.HasPendingWork()) { ctx->Yield(2); if (!workspace.Busy() && !workspace.HasPendingWork()) return; }
     } while (std::chrono::steady_clock::now() < deadline && !ctx->IsError());
 }
+std::vector<std::string> PerfLogSnapshot() {
+    std::vector<std::string> result;
+    for (const auto& record : Log::Instance().RecentRecords())
+        if (record.category == "perf") result.push_back(record.formatted);
+    return result;
+}
+bool PerfLogAdded(const std::vector<std::string>& before) {
+    for (const auto& record : Log::Instance().RecentRecords())
+        if (record.category == "perf" && std::find(before.begin(), before.end(), record.formatted) == before.end()) return true;
+    return false;
+}
+bool PerfWarningAdded(const std::vector<std::string>& before) {
+    for (const auto& record : Log::Instance().RecentRecords())
+        if (record.category == "perf" && record.level == LogLevel::Warn &&
+            std::find(before.begin(), before.end(), record.formatted) == before.end()) return true;
+    return false;
+}
+std::string VisibleUiText(ImGuiTestContext* ctx) {
+    ImGui::LogToBuffer(0);
+    // Capture the complete frames, including tooltip windows. The default
+    // logger stops and clears its buffer when the current window ends.
+    GImGui->LogWindow = nullptr; ctx->Yield(2);
+    const std::string text = GImGui->LogBuffer.c_str(); ImGui::LogFinish(); return text;
+}
 void ReviewScreenshot(ImGuiTestContext* ctx,const char* suffix){
     const auto folder=std::getenv("GFXRECON_GUI_REVIEW_DIR");if(!folder)return;
     std::filesystem::create_directories(std::filesystem::u8path(folder));ctx->Yield(4);
     const auto path=std::filesystem::u8path(folder)/(std::string(suffix)+".png");const auto* viewport=ImGui::GetMainViewport();ctx->CaptureReset();
-    const int flags=std::string(suffix)=="phone-unlock-notice"||std::string(suffix)=="settings-dialog"?ImGuiCaptureFlags_IncludePopups:0;
+    const int flags=std::string(suffix)=="phone-unlock-notice"||std::string(suffix)=="settings-dialog"||std::string(suffix).rfind("perf-popup",0)==0?ImGuiCaptureFlags_IncludePopups:0;
     ctx->CaptureArgs->InCaptureRect=ImRect(viewport->Pos,ImVec2(viewport->Pos.x+viewport->Size.x,viewport->Pos.y+viewport->Size.y));
     std::snprintf(ctx->CaptureArgs->InOutputFile,sizeof(ctx->CaptureArgs->InOutputFile),"%s",path.u8string().c_str());IM_CHECK(ctx->CaptureScreenshot(flags));
 }
@@ -91,6 +135,45 @@ template<class F>bool WaitLive(ImGuiTestContext* ctx,gfx::Workspace& workspace,F
         if(state&&predicate(*state))return true;
     }return false;
 }
+struct ImageEncodingFixture {
+    gfx::ImageViewer viewer, baseline, modified, thumbnail;
+    std::filesystem::path directory;
+    std::string error;
+    int source = 0;
+    bool initialized = false, finish = false, cleaned = false, uploadedMatches = false, loadSaved = false;
+};
+bool UploadedImageMatchesDisplay(const gfx::ImageViewer& image) {
+    // Inspect the texture submitted by the real Draw() path. All GL calls are
+    // made by GuiFunc on the application's main context, never TestFunc.
+    for (auto* child : ImGui::GetCurrentWindow()->DC.ChildWindows) {
+        for (const auto& command : child->DrawList->CmdBuffer) {
+            if (!command.ElemCount || command.UserCallback || command.TexRef._TexData) continue;
+            const auto texture = static_cast<GLuint>(command.GetTexID());
+            if (!texture || !glIsTexture(texture)) continue;
+            GLint previous = 0, width = 0, height = 0;
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous); glBindTexture(GL_TEXTURE_2D, texture);
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+            if (width != image.Width() || height != image.Height()) { glBindTexture(GL_TEXTURE_2D, previous); continue; }
+            GLint alignment = 0, rowLength = 0, skipRows = 0, skipPixels = 0;
+            glGetIntegerv(GL_PACK_ALIGNMENT, &alignment); glGetIntegerv(GL_PACK_ROW_LENGTH, &rowLength);
+            glGetIntegerv(GL_PACK_SKIP_ROWS, &skipRows); glGetIntegerv(GL_PACK_SKIP_PIXELS, &skipPixels);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1); glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+            glPixelStorei(GL_PACK_SKIP_ROWS, 0); glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+            std::vector<unsigned char> uploaded(static_cast<size_t>(width) * height * 4);
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, uploaded.data());
+            glPixelStorei(GL_PACK_ALIGNMENT, alignment); glPixelStorei(GL_PACK_ROW_LENGTH, rowLength);
+            glPixelStorei(GL_PACK_SKIP_ROWS, skipRows); glPixelStorei(GL_PACK_SKIP_PIXELS, skipPixels);
+            glBindTexture(GL_TEXTURE_2D, previous);
+            for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
+                const auto displayed = image.DisplayPixel(x, y); const auto offset = (static_cast<size_t>(y) * width + x) * 4;
+                if (!std::equal(displayed.begin(), displayed.end(), uploaded.begin() + offset)) return false;
+            }
+            return true;
+        }
+    }
+    return false;
+}
 }
 
 #if PLATFORM_MACOS
@@ -100,6 +183,604 @@ void RegisterMacTests(ImGuiTestEngine* engine);
 void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
     (void)app;
     ImGuiTest* t = nullptr;
+
+    t = IM_REGISTER_TEST(engine, "image", "source encoding display range thumbnails and difference");
+    t->SetVarsDataType<ImageEncodingFixture>();
+    t->GuiFunc = [](ImGuiTestContext* ctx) {
+        auto& vars = ctx->GetVars<ImageEncodingFixture>();
+        if (vars.finish) {
+            vars.viewer.Release(); vars.baseline.Release(); vars.modified.Release(); vars.thumbnail.Release();
+            std::error_code error; std::filesystem::remove_all(vars.directory, error); vars.cleaned = true; return;
+        }
+        if (!vars.initialized) {
+            vars.initialized = true;
+            try {
+                vars.directory = std::filesystem::temp_directory_path() / ("gfx-image-encoding-gui-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+                std::filesystem::create_directories(vars.directory);
+                const gfx::Image linear{2, 1, {128,128,128,37, 192,192,192,211}};
+                const gfx::Image encoded{2, 1, {188,188,188,37, 224,224,224,211}};
+                const gfx::Image modified{2, 1, {64,64,64,11, 128,128,128,29}};
+                const gfx::Image depth{2, 1, {64,64,64,255, 191,191,191,255}};
+                gfx::WriteBmp(vars.directory / "linear.bmp", linear); gfx::WritePng(vars.directory / "linear.png", linear);
+                gfx::WriteBmp(vars.directory / "encoded.bmp", encoded); gfx::WritePng(vars.directory / "encoded.png", encoded);
+                gfx::WritePng(vars.directory / "modified.png", modified); gfx::WriteBmp(vars.directory / "depth.bmp", depth);
+                { const float values[]{0.25f, 0.75f}; std::ofstream sidecar(vars.directory / "depth.bmp.depth.bin", std::ios::binary);
+                  sidecar.write(reinterpret_cast<const char*>(values), sizeof(values)); }
+                vars.baseline.LoadPng(vars.directory / "linear.png", "VK_FORMAT_R16G16B16A16_SFLOAT");
+                vars.modified.LoadPng(vars.directory / "modified.png", "VK_FORMAT_R16G16B16A16_SFLOAT");
+                vars.viewer.LoadBmp(vars.directory / "linear.bmp", "COLOR", "VK_FORMAT_R16G16B16A16_SFLOAT");
+            } catch (const std::exception& error) { vars.error = error.what(); }
+        }
+        const auto* viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + 20, viewport->WorkPos.y + 20), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(std::min(900.0f, viewport->WorkSize.x - 40), std::min(520.0f, viewport->WorkSize.y - 40)), ImGuiCond_Always);
+        ImGui::Begin("Image encoding fixture", nullptr, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse);
+        try {
+            if (vars.loadSaved) {
+                vars.loadSaved = false;
+                vars.viewer.LoadBmp(std::filesystem::u8path(std::getenv("GFXRECON_GUI_IMAGE_PREVIEW")), "COLOR", "VK_FORMAT_B10G11R11_UFLOAT_PACK32");
+            }
+            ImGui::SetNextItemWidth(160);
+            if (ImGui::Combo("Source", &vars.source, "Linear BMP\0Linear PNG\0sRGB PNG\0Presentation\0Depth\0Difference\0Empty\0")) {
+                switch (vars.source) {
+                case 0: vars.viewer.LoadBmp(vars.directory / "linear.bmp", "COLOR", "VK_FORMAT_R16G16B16A16_SFLOAT"); break;
+                case 1: vars.viewer.LoadPng(vars.directory / "linear.png", "VK_FORMAT_R16G16B16A16_SFLOAT"); break;
+                case 2: vars.viewer.LoadPng(vars.directory / "encoded.png", "VK_FORMAT_R8G8B8A8_SRGB"); break;
+                case 3: vars.viewer.LoadPng(vars.directory / "encoded.png"); break;
+                case 4: vars.viewer.LoadBmp(vars.directory / "depth.bmp", "DEPTH", "VK_FORMAT_D32_SFLOAT"); break;
+                case 5: vars.viewer.AbsoluteDifference(vars.baseline, vars.modified); break;
+                case 6: vars.viewer.Release(); break;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Load thumbnail")) {
+                const bool encoded = vars.source == 2 || vars.source == 3;
+                vars.thumbnail.LoadThumbnailBmp(vars.directory / (encoded ? "encoded.bmp" : "linear.bmp"), "COLOR",
+                    encoded ? "VK_FORMAT_R8G8B8A8_SRGB" : "VK_FORMAT_R16G16B16A16_SFLOAT");
+            }
+            ImGui::SameLine(); if (ImGui::Button("Make thumbnail")) vars.thumbnail.MakeThumbnail(vars.viewer);
+            if (vars.error.empty()) { vars.viewer.Draw(); vars.uploadedMatches = UploadedImageMatchesDisplay(vars.viewer); }
+            else ImGui::TextWrapped("%s", vars.error.c_str());
+        } catch (const std::exception& error) { vars.error = error.what(); }
+        ImGui::End();
+    };
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        auto& vars = ctx->GetVars<ImageEncodingFixture>(); ctx->Yield(3); ctx->SetRef("//Image encoding fixture");
+        IM_CHECK(vars.error.empty()); IM_CHECK(vars.viewer.SrgbDisplay());
+        IM_CHECK(vars.viewer.SourceEncoding() == gfx::ImageSourceEncoding::Linear);
+        IM_CHECK_EQ(vars.viewer.Pixel(0,0)[0], 128); IM_CHECK_EQ(vars.viewer.DisplayPixel(0,0)[0], 188); IM_CHECK(vars.uploadedMatches);
+        ctx->ItemUncheck("sRGB"); ctx->Yield(); IM_CHECK_EQ(vars.viewer.DisplayPixel(0,0)[0], 128); IM_CHECK_EQ(vars.viewer.Pixel(0,0)[0], 128); IM_CHECK(vars.uploadedMatches);
+        ctx->ItemCheck("sRGB"); ctx->ComboClick("Source/Linear PNG"); ctx->Yield();
+        IM_CHECK_EQ(vars.viewer.Pixel(0,0)[3], 37); IM_CHECK_EQ(vars.viewer.DisplayPixel(0,0)[3], 37); IM_CHECK_EQ(vars.viewer.DisplayPixel(0,0)[0], 188); IM_CHECK(vars.uploadedMatches);
+        ctx->ItemClick("Auto"); const auto linearRange = vars.viewer.Range();
+        IM_CHECK(std::abs(linearRange.minimum - 128.0f/255) < 0.00001f && std::abs(linearRange.maximum - 192.0f/255) < 0.00001f);
+        ctx->ItemUncheck("sRGB"); ctx->ItemClick("Reset"); ctx->ItemClick("Auto");
+        IM_CHECK(std::abs(vars.viewer.Range().minimum - linearRange.minimum) < 0.00001f && std::abs(vars.viewer.Range().maximum - linearRange.maximum) < 0.00001f);
+        IM_CHECK_EQ(vars.viewer.Pixel(0,0)[0], 128); IM_CHECK_EQ(vars.viewer.Pixel(0,0)[3], 37); IM_CHECK(vars.uploadedMatches);
+        ctx->ItemClick("Reset"); ctx->ItemCheck("sRGB"); ctx->ItemClick("Make thumbnail");
+        IM_CHECK(vars.thumbnail.SourceEncoding() == gfx::ImageSourceEncoding::Srgb); IM_CHECK_EQ(vars.thumbnail.Pixel(0,0)[0], 188); IM_CHECK_EQ(vars.thumbnail.DisplayPixel(0,0)[0], 188);
+        IM_CHECK_EQ(vars.thumbnail.DisplayPixel(0,0)[3], 37);
+        ctx->ItemClick("Load thumbnail"); IM_CHECK(vars.thumbnail.SourceEncoding() == gfx::ImageSourceEncoding::Linear); IM_CHECK_EQ(vars.thumbnail.DisplayPixel(0,0)[0], 188);
+        ctx->ComboClick("Source/sRGB PNG"); ctx->Yield(); IM_CHECK(vars.viewer.SourceEncoding() == gfx::ImageSourceEncoding::Srgb);
+        IM_CHECK_EQ(vars.viewer.Pixel(0,0)[0], 188); IM_CHECK_EQ(vars.viewer.DisplayPixel(0,0)[0], 188); IM_CHECK_EQ(vars.viewer.DisplayPixel(0,0)[3], 37); IM_CHECK(vars.uploadedMatches);
+        ctx->ItemUncheck("sRGB"); ctx->Yield(); IM_CHECK_EQ(vars.viewer.DisplayPixel(0,0)[0], 128); IM_CHECK_EQ(vars.viewer.Pixel(0,0)[0], 188); IM_CHECK(vars.uploadedMatches);
+        ctx->ItemClick("Auto"); const auto encodedRange = vars.viewer.Range();
+        IM_CHECK(std::abs(encodedRange.minimum - 0.5028865f) < 0.00001f && std::abs(encodedRange.maximum - 0.7454042f) < 0.00001f);
+        ctx->ItemCheck("sRGB"); ctx->ItemClick("Reset"); ctx->ItemClick("Auto");
+        IM_CHECK(std::abs(vars.viewer.Range().minimum - encodedRange.minimum) < 0.00001f && std::abs(vars.viewer.Range().maximum - encodedRange.maximum) < 0.00001f);
+        ctx->ItemClick("Reset"); ctx->ItemClick("Load thumbnail"); IM_CHECK(vars.thumbnail.SourceEncoding() == gfx::ImageSourceEncoding::Srgb); IM_CHECK_EQ(vars.thumbnail.DisplayPixel(0,0)[0], 188);
+        ctx->ComboClick("Source/Presentation"); ctx->Yield(); IM_CHECK(vars.viewer.SourceEncoding() == gfx::ImageSourceEncoding::Srgb); IM_CHECK_EQ(vars.viewer.DisplayPixel(0,0)[0], 188);
+        ctx->ComboClick("Source/Depth"); ctx->Yield(); IM_CHECK(vars.viewer.HasDepthValues()); IM_CHECK_EQ(vars.viewer.DisplayPixel(0,0)[0], 64);
+        IM_CHECK((ctx->ItemInfo("sRGB").ItemFlags & ImGuiItemFlags_Disabled) != 0); ctx->ItemClick("Auto");
+        IM_CHECK(std::abs(vars.viewer.Range().minimum - 0.25f) < 0.00001f && std::abs(vars.viewer.Range().maximum - 0.75f) < 0.00001f);
+        const auto baselineRaw = vars.baseline.Pixel(0,0); ctx->ComboClick("Source/Difference"); ctx->Yield();
+        IM_CHECK(!vars.viewer.HasDepthValues()); IM_CHECK(vars.viewer.SourceEncoding() == gfx::ImageSourceEncoding::Linear);
+        IM_CHECK_EQ(vars.viewer.Range().minimum, 0.0f); IM_CHECK_EQ(vars.viewer.Range().maximum, 1.0f);
+        IM_CHECK((ctx->ItemInfo("sRGB").ItemFlags & ImGuiItemFlags_Disabled) == 0);
+        IM_CHECK_EQ(vars.viewer.Pixel(0,0)[0], 64); IM_CHECK_EQ(vars.viewer.DisplayPixel(0,0)[0], 137);
+        IM_CHECK(vars.baseline.Pixel(0,0) == baselineRaw); IM_CHECK(vars.uploadedMatches); IM_CHECK(vars.error.empty());
+        if (std::getenv("GFXRECON_GUI_IMAGE_PREVIEW")) {
+            vars.loadSaved = true; ctx->Yield(3);
+            IM_CHECK(vars.error.empty()); IM_CHECK(vars.uploadedMatches);
+            ctx->ItemCheck("sRGB"); ctx->Yield(); IM_CHECK(vars.uploadedMatches);
+            ReviewScreenshot(ctx, "saved-attachment-srgb");
+            ctx->ItemUncheck("sRGB"); ctx->Yield(); IM_CHECK(vars.uploadedMatches);
+            ReviewScreenshot(ctx, "saved-attachment-linear");
+        }
+        ctx->ComboClick("Source/Empty"); ctx->Yield();
+        for (const auto* control : {"R", "G", "B", "sRGB", "##range-min", "##range-max", "Auto", "Reset", "##rotate-left", "##rotate-right", "Flip H", "Flip V", "Fit", "##scale"})
+            IM_CHECK(!ctx->ItemExists(control));
+        vars.finish = true; ctx->Yield(2); IM_CHECK(vars.cleaned);
+    };
+
+    t = IM_REGISTER_TEST(engine, "performance", "toolbar dockable window and dense plots");
+    t->UserData = app;
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        auto* app = static_cast<App*>(ctx->Test->UserData);
+        ctx->MenuClick("//##MainMenuBar/View/Reset Layout"); ctx->Yield(4);
+        using gfx::Json;
+        const uint64_t origin = 1000000000000ull;
+        Json result{{"schema", "gfxrecon-perf/1"}, {"status", "complete"}, {"mode", "single-frame"}, {"runs_requested", 2},
+            {"policy", {{"frame", 3}, {"counter_profile", "precision"}, {"execution_model", "fresh_replay_per_run"}}},
+            {"metrics", Json::array()}, {"runs", Json::array()}};
+        std::map<std::string, std::vector<double>> baseline, modified;
+        const std::vector<int> ids{26, 132, 143, 145, 9999};
+        const std::vector<std::string> names{"Full fragment ALU instructions", "Half fragment ALU instructions", "Memory read bandwidth", "Time ALUs working", "Additional vendor activity"};
+        for (int variant = 0; variant != 2; ++variant) {
+            Json samples = Json::array(), counters = Json::array();
+            auto& values = variant ? modified : baseline;
+            for (int i = 0; i < 1; ++i) {
+                const auto time = origin;
+                const double elapsed = 10 + std::sin(i * 0.3) + variant * 0.2;
+                samples.push_back({{"frame", 3}, {"valid", true}, {"phase", "measurement"},
+                    {"start_boot_ns", time}, {"end_boot_ns", time + uint64_t(elapsed * 1e6)}, {"elapsed_ms", elapsed}});
+                values["gpu_time"].push_back(elapsed);
+            }
+            for (size_t metric = 0; metric < ids.size(); ++metric) {
+                Json points = Json::array(); const auto key = "counter_" + std::to_string(ids[metric]);
+                for (int i = 0; i < 3000; ++i) {
+                    if (i >= 1400 && i < 1415) continue;
+                    const auto time = origin + uint64_t(i) * 10000ull;
+                    const double scale = metric < 3 ? 1e9 : 1;
+                    const double value = (50 + 20 * std::sin(i * 0.013 + metric) + variant * 3) * scale * (i == 1901 ? 2 : 1);
+                    points.push_back({{"timestamp_boot_ns", time}, {"value", value}});
+                    if (time >= origin) values[key].push_back(value);
+                }
+                counters.push_back({{"id", ids[metric]}, {"name", names[metric]}, {"unit", metric < 2 ? "INSTRUCTION/SECOND" : metric == 2 ? "BYTE/SECOND" : "PERCENT"},
+                    {"samples", points}, {"summary", {{"coverage_estimate", 0.99}, {"gap_threshold_ns", 40000}}}});
+            }
+            result["runs"].push_back({{"variant", variant ? "modified" : "baseline"}, {"index", 1},
+                {"gpu", {{"device", {{"device_name", "UI fixture GPU"}, {"driver_name", "Fixture driver"}, {"driver_version", 1}}},
+                    {"swapchain", {{"effective", "offscreen"}}}, {"samples", samples},
+                    {"counter_window", {{"start_boot_ns", origin}, {"end_boot_ns", origin + 30000000ull}, {"status", "available"}}}}},
+                {"counters", {{"period_ns", 10000}, {"window_begin_boot_ns", origin}, {"window_end_boot_ns", origin + 30000000ull}, {"counters", counters}}}});
+        }
+        const auto firstRuns = result["runs"];
+        for (auto run : firstRuns) { run["index"] = 2; result["runs"].push_back(std::move(run)); }
+        for (auto* group : {&baseline, &modified}) for (auto& [key, values] : *group) {
+            const auto repeated = values; values.insert(values.end(), repeated.begin(), repeated.end());
+        }
+        for (const auto& [key, values] : baseline) {
+            int id = key == "gpu_time" ? 0 : std::stoi(key.substr(8));
+            auto found = std::find(ids.begin(), ids.end(), id); const auto metric = size_t(found - ids.begin());
+            Json row{{"key", key}, {"name", id ? names[metric] : "GPU frame elapsed"}, {"unit", id ? metric < 2 ? "INSTRUCTION/SECOND" : metric == 2 ? "BYTE/SECOND" : "PERCENT" : "ms"},
+                {"baseline", gfx::SummarizePerfValues(values)}, {"modified", gfx::SummarizePerfValues(modified[key])},
+                {"status", "available"}, {"scope", id ? "system-wide whole-loop" : "isolated render interval"}};
+            if (id) row["counter_id"] = id;
+            result["metrics"].push_back(row);
+        }
+        auto& workspace = app->Workspace(); workspace.SetPerformanceFixture(std::move(result));
+        // Simulate the old floating-window preference while Perf is closed.
+        // Opening it must dock immediately, without a visible move/resize step.
+        if(auto* saved=ImGui::FindWindowSettingsByID(ImHashStr("Perf"))){saved->DockId=0;saved->WantApply=true;}
+        ctx->SetRef("//Events");
+        const auto arrow = ctx->ItemInfo("Filters"); const auto perf = ctx->ItemInfo("Perf##event-perf");
+        IM_CHECK(perf.RectFull.Min.x >= arrow.RectFull.Max.x);
+        ctx->ItemClick("Perf##event-perf"); ctx->Yield(5);
+        ctx->SetRef("//Perf");
+        auto* perfWindow = ctx->WindowInfo("//Perf").Window;
+        IM_CHECK(perfWindow != nullptr && workspace.PerformanceOpen());
+        IM_CHECK((perfWindow->Flags & (ImGuiWindowFlags_Popup | ImGuiWindowFlags_Modal | ImGuiWindowFlags_NoDocking)) == 0);
+        IM_CHECK(perfWindow->HasCloseButton);
+        IM_CHECK(perfWindow->DockIsActive&&perfWindow->DockId==ctx->WindowInfo("//Pipeline").Window->DockId);
+        IM_CHECK(!ctx->ItemExists("Close"));
+        IM_CHECK(ctx->ItemExists("Probe") && ctx->ItemExists("Open...") && ctx->ItemExists("Settings"));
+        const auto tableId=ImHashStr("perf-metrics",0,perfWindow->ID);
+        const auto* table=ImGui::TableFindByID(tableId);IM_CHECK(table!=nullptr&&table->ColumnsCount==5);
+        IM_CHECK(ctx->ItemExists("**/Mean")&&ctx->ItemExists("**/Min")&&ctx->ItemExists("**/Max"));
+        IM_CHECK(!ctx->ItemExists("**/Mean B")&&!ctx->ItemExists("**/Coverage / scope"));
+        IM_CHECK(!ctx->ItemExists("**/Plot"));
+        const auto extraRow=ImHashStr("###metric-row",0,ImHashStr("counter_9999",0,tableId));
+        const auto memoryRow=ImHashStr("###metric-row",0,ImHashStr("counter_143",0,tableId));
+        IM_CHECK((ctx->ItemInfo(extraRow).ItemFlags&ImGuiItemFlags_Disabled)==0);
+        ctx->ItemClick(extraRow);ctx->Yield(3);
+        IM_CHECK(workspace.PerformanceSelectedMetricsForTests().count("counter_9999")==1);
+        IM_CHECK(workspace.PerformanceSelectedMetricsForTests().size()==6);
+        IM_CHECK(ctx->ItemExists("##perf-metric-filter")&&!ctx->ItemExists("Filter") && !ctx->ItemExists("Warm-up") && !ctx->ItemExists("Fit"));
+        const auto filterWidth=ctx->ItemInfo("##perf-metric-filter").RectFull.GetWidth();
+        IM_CHECK(filterWidth>=ImGui::GetFontSize()*12&&filterWidth<ImGui::GetFontSize()*16);
+        ctx->ItemInputValue("##perf-metric-filter","Memory");ctx->KeyPress(ImGuiKey_Enter);ctx->Yield(4);
+        auto* plots=ctx->WindowInfo("//Perf/perf-plots").Window;IM_CHECK(plots!=nullptr&&plots->ContentSize.y>100&&plots->ContentSize.y<200);
+        IM_CHECK(workspace.PerformanceSelectedMetricsForTests().size()==6);
+        ctx->ItemInputValue("##perf-metric-filter","no_matching_metric");ctx->KeyPress(ImGuiKey_Enter);ctx->Yield(4);
+        IM_CHECK(ctx->ItemInfo("##perf-metric-filter").RectFull.GetWidth()==filterWidth);
+        IM_CHECK(ctx->WindowInfo("//Perf/perf-plots").Window->ContentSize.y<20);
+        ctx->ItemInputValue("##perf-metric-filter","Additional,Memory");ctx->KeyPress(ImGuiKey_Enter);ctx->Yield(4);
+        ctx->ItemClick(extraRow);ctx->Yield(3);
+        IM_CHECK(workspace.PerformanceSelectedMetricsForTests().count("counter_9999")==0&&workspace.PerformanceSelectedMetricsForTests().count("counter_143")==1);
+        ctx->KeyDown(ImGuiMod_Shift);ctx->ItemClick(memoryRow);ctx->KeyUp(ImGuiMod_Shift);ctx->Yield(3);
+        IM_CHECK(workspace.PerformanceSelectedMetricsForTests().count("counter_143")==1&&workspace.PerformanceSelectedMetricsForTests().count("counter_9999")==1);
+        ctx->ItemClick(extraRow);ctx->Yield(3);
+        IM_CHECK(workspace.PerformanceSelectedMetricsForTests().count("counter_9999")==0);
+        ctx->ItemClick(extraRow);ctx->Yield(3);
+        const auto tableMenu=[&](const char* action){ctx->ItemClick(extraRow,ImGuiMouseButton_Right);ctx->SetRef("//$FOCUSED");ctx->ItemClick(action);ctx->Yield(3);ctx->SetRef("//Perf");};
+        tableMenu("Deselect all");
+        IM_CHECK(workspace.PerformanceSelectedMetricsForTests().count("counter_9999")==0&&workspace.PerformanceSelectedMetricsForTests().count("counter_143")==0);
+        IM_CHECK(workspace.PerformanceSelectedMetricsForTests().count("gpu_time")==1);
+        tableMenu("Select all");
+        ctx->ItemInputValue("##perf-metric-filter","");ctx->KeyPress(ImGuiKey_Enter);ctx->Yield(4);
+        IM_CHECK(workspace.PerformanceSelectedMetricsForTests().size()==6);
+        tableMenu("Deselect all");IM_CHECK(workspace.PerformanceSelectedMetricsForTests().empty());
+        IM_CHECK(ctx->WindowInfo("//Perf/perf-plots").Window->ContentSize.y<20);
+        tableMenu("Select all");IM_CHECK(workspace.PerformanceSelectedMetricsForTests().size()==6);
+        IM_CHECK(!ctx->ItemExists("Cancel"));
+        for (const auto* old : {"Probe capabilities", "Start measurement", "Cancel measurement", "Load result...", "Load Result", "Session settings", "Show warm-up samples", "Device, cadence and sampling"})
+            IM_CHECK(!ctx->ItemExists(old));
+        IM_CHECK((ctx->ItemInfo("Start").ItemFlags & ImGuiItemFlags_Disabled) != 0);
+        ctx->MouseMove("Open...");
+        IM_CHECK(VisibleUiText(ctx).find("UI fixture GPU") == std::string::npos);
+        IM_CHECK(!ctx->ItemExists("(i)##perf-device-info"));
+        ctx->MouseMoveToPos(ctx->ItemInfo("##perf-device-info").RectFull.GetCenter()); ctx->Yield(4);
+        const auto hoverDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        bool tooltipVisible = false;
+        do {
+            ctx->Yield();
+            for (const auto* window : GImGui->Windows) if (window->Active && (window->Flags & ImGuiWindowFlags_Tooltip)) tooltipVisible = true;
+            if (!tooltipVisible) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        } while (!tooltipVisible && std::chrono::steady_clock::now() < hoverDeadline);
+        IM_CHECK(tooltipVisible);
+        for(const auto* window:GImGui->Windows)if(window->Active&&(window->Flags&ImGuiWindowFlags_Tooltip)){
+            IM_CHECK(window->Size.x>=ImGui::GetFontSize()*30);
+            IM_CHECK(window->Size.y<window->Size.x);
+        }
+        const auto tooltipText = VisibleUiText(ctx);
+        IM_CHECK(tooltipText.find("UI fixture GPU") != std::string::npos && tooltipText.find("Fixture driver") != std::string::npos);
+        if(ctx->IsError())return;
+        ctx->MouseMove("Open..."); ctx->Yield(3);
+        const auto graphMenu = [&] {
+            ctx->SetRef("//Perf");
+            ImPlotPlot* graph = nullptr;
+            for (int i = 0; i < GImPlot->Plots.GetBufSize(); ++i) {
+                auto* plot = GImPlot->Plots.GetByIndex(i);
+                if (plot->TitleOffset >= 0 && std::string(plot->GetTitle()) == "GPU frame elapsed") { graph = plot; break; }
+            }
+            IM_CHECK(graph != nullptr);
+            ctx->MouseSetViewport(ctx->WindowInfo("//Perf").Window);
+            ctx->MouseMoveToPos(ImVec2(graph->PlotRect.Max.x - 24, graph->PlotRect.GetCenter().y));
+            ctx->MouseClick(ImGuiMouseButton_Right); ctx->Yield(2);
+            ctx->SetRef("//$FOCUSED");
+            IM_CHECK(!ctx->ItemExists("Warm-up") && ctx->ItemExists("Fit"));
+        };
+        graphMenu(); ctx->ItemClick("Fit"); ctx->Yield(4); ctx->SetRef("//Perf");
+        ImPlotPlot* timing=nullptr;
+        for(int i=0;i<GImPlot->Plots.GetBufSize();++i){auto* plot=GImPlot->Plots.GetByIndex(i);if(plot->TitleOffset>=0&&std::string(plot->GetTitle())=="GPU frame elapsed"){timing=plot;break;}}
+        IM_CHECK(timing!=nullptr);IM_CHECK(!timing->Axes[ImAxis_X1].HasLabel());
+        const auto oldX=timing->Axes[ImAxis_X1].Range,oldY=timing->Axes[ImAxis_Y1].Range;
+        ctx->MouseMoveToPos(timing->PlotRect.GetCenter());ctx->MouseWheelY(2);
+        const auto zoomDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+        while(timing->Axes[ImAxis_X1].Range.Size()>=oldX.Size()&&std::chrono::steady_clock::now()<zoomDeadline&&!ctx->IsError()){
+            ctx->Yield();std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        IM_CHECK(timing->Axes[ImAxis_X1].Range.Size()<oldX.Size());
+        IM_CHECK(timing->Axes[ImAxis_Y1].Range.Min==oldY.Min&&timing->Axes[ImAxis_Y1].Range.Max==oldY.Max);
+        ctx->MouseMoveToPos(timing->Axes[ImAxis_X1].HoverRect.GetCenter());ctx->Yield(4);
+        IM_CHECK(VisibleUiText(ctx).find("Time from frame GPU start (milliseconds)")!=std::string::npos);
+        graphMenu();ctx->ItemClick("Fit");ctx->Yield(4);ctx->SetRef("//Perf");
+        IM_CHECK(VisibleUiText(ctx).find("GB/s") != std::string::npos);
+        for (const auto* window : GImGui->Windows) if (window->Active)
+            IM_CHECK(window->DrawList->VtxBuffer.Size < 65536);
+        int checkedLegends = 0;
+        IM_CHECK(GImPlot != nullptr);
+        for (int i = 0; i < GImPlot->Plots.GetBufSize(); ++i) {
+            auto* plot = GImPlot->Plots.GetByIndex(i);
+            if (plot->TitleOffset < 0 || plot->Items.GetLegendCount() == 0) continue;
+            const std::string title = plot->GetTitle();
+            if (title != "GPU frame elapsed" && std::find(names.begin(), names.end(), title) == names.end()) continue;
+            if(title=="Memory read bandwidth") IM_CHECK(plot->Axes[ImAxis_Y1].Range.Max < 1000);
+            ++checkedLegends;
+            IM_CHECK(plot->Items.GetLegendCount() == 4);
+            IM_CHECK(plot->Axes[ImAxis_X1].Range.Min >= -0.01 && plot->Axes[ImAxis_X1].Range.Max > 25 && plot->Axes[ImAxis_X1].Range.Max <= 35);
+            for (int entry = 0; entry < plot->Items.GetLegendCount(); ++entry) {
+                const std::string label = plot->Items.GetLegendLabel(entry);
+                IM_CHECK(label == "baseline 1" || label == "modified 1" || label == "baseline 2" || label == "modified 2");
+            }
+        }
+        IM_CHECK(checkedLegends > 0);
+        ReviewScreenshot(ctx, "perf-window");
+        IM_CHECK(perfWindow->DockIsActive && perfWindow->DockId != 0);
+        const auto dockId = perfWindow->DockId;
+        ctx->WindowClose("//Perf"); ctx->Yield(3);
+        IM_CHECK(!workspace.PerformanceOpen());
+        workspace.OpenPerformance(); ctx->Yield(3);
+        IM_CHECK(workspace.PerformanceResult().at("metrics").size() == 6);
+        IM_CHECK(workspace.PerformanceOpen());
+        IM_CHECK(ctx->WindowInfo("//Perf").Window->DockId == dockId);
+        ctx->WindowClose("//Perf");
+    };
+
+    t = IM_REGISTER_TEST(engine, "performance", "unavailable counter clock retains GPU duration");
+    t->UserData = app;
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        using gfx::Json;
+        auto& workspace = static_cast<App*>(ctx->Test->UserData)->Workspace();
+        workspace.SetPerformanceFixture(Json{}, true); workspace.OpenPerformance(); ctx->Yield(2);
+        workspace.StartPerformanceJobFixture(20); WaitForWorkspace(ctx, workspace);
+        IM_CHECK(workspace.StateFor("Perf") == gfx::PanelState::Success);
+        workspace.ClosePerformance(); ctx->Yield(2);
+        const auto gpuStats = gfx::SummarizePerfValues({2.5});
+        const Json missing{{"mean", nullptr}, {"count", 0}, {"p95", nullptr}, {"stddev", nullptr}};
+        Json report{{"schema", "gfxrecon-perf/1"}, {"status", "complete"}, {"mode", "single-frame"}, {"runs_requested", 1},
+            {"policy", {{"frame", 1}, {"counter_profile", "bandwidth"}}},
+            {"metrics", Json::array({{{"key", "gpu_time"}, {"name", "GPU frame elapsed"}, {"unit", "ms"}, {"baseline", gpuStats}},
+                {{"key", "counter_5001"}, {"counter_id", 5001}, {"name", "Read Total"}, {"unit", "BYTE/SECOND"},
+                    {"baseline", missing}, {"status", "unavailable"}}})},
+            {"runs", Json::array({{{"variant", "baseline"}, {"index", 1},
+                {"gpu", {{"status", "complete"}, {"samples", Json::array({{{"frame", 1}, {"valid", true}, {"elapsed_ms", 2.5},
+                    {"start_boot_ns", uint64_t(18000000000000000000ull)}, {"end_boot_ns", nullptr}}})},
+                    {"counter_window", {{"status", "unavailable"}, {"start_boot_ns", nullptr}, {"end_boot_ns", nullptr}, {"reason", "clock mapping rejected"}}}}},
+                {"counters", {{"status", "unavailable"}, {"reason", "clock mapping rejected"}, {"window_begin_boot_ns", nullptr}, {"window_end_boot_ns", nullptr},
+                    {"counters", Json::array({{{"id", 5001}, {"status", "unavailable"}, {"samples", Json::array({{{"timestamp_boot_ns", 2000}, {"value", 1e90}}})},
+                        {"summary", {{"mean", nullptr}, {"coverage_estimate", nullptr}}}}})}}}}})}};
+        const auto logs = PerfLogSnapshot();
+        for (int variant = 0; variant < 3; ++variant) {
+            auto input = report;
+            if (variant == 1) input["runs"][0]["gpu"]["counter_window"]["status"] = "available"; // Null endpoints are invalid even with this status.
+            if (variant == 2) {
+                input["runs"][0]["gpu"]["counter_window"]["start_boot_ns"] = 1000;
+                input["runs"][0]["gpu"]["counter_window"]["end_boot_ns"] = uint64_t(17000000000000000000ull);
+                input["runs"][0]["counters"].update({{"status", "complete"}, {"window_begin_boot_ns", 1000},
+                    {"window_end_boot_ns", uint64_t(17000000000000000000ull)}});
+            }
+            workspace.SetPerformanceFixture(std::move(input), true); workspace.OpenPerformance(); ctx->Yield(5); ctx->SetRef("//Perf");
+            IM_CHECK(workspace.PerformanceOpen());
+            IM_CHECK(workspace.StateFor("Perf") == gfx::PanelState::Success);
+            IM_CHECK(workspace.PerformanceResult()["metrics"][0]["baseline"]["mean"] == 2.5);
+            IM_CHECK(VisibleUiText(ctx).find("2.5") != std::string::npos);
+            bool checked = false;
+            for (int i = 0; i < GImPlot->Plots.GetBufSize(); ++i) {
+                const auto* plot = GImPlot->Plots.GetByIndex(i);
+                if (plot->TitleOffset < 0) continue;
+                const std::string title = plot->GetTitle();
+                if (title == "GPU frame elapsed") {
+                    checked = true;
+                    IM_CHECK(plot->Items.GetLegendCount() == 1);
+                    IM_CHECK(plot->Axes[ImAxis_X1].Range.Min >= -0.01 && plot->Axes[ImAxis_X1].Range.Max >= 2.4 && plot->Axes[ImAxis_X1].Range.Max <= 2.6);
+                }
+                if (title == "Read Total") IM_CHECK(plot->Items.GetLegendCount() == 0);
+            }
+            IM_CHECK(checked);
+            for (const auto& record : Log::Instance().RecentRecords()) if (record.category == "perf" && record.level == LogLevel::Error)
+                IM_CHECK(std::find(logs.begin(), logs.end(), record.formatted) != logs.end());
+            ctx->WindowClose("//Perf"); ctx->Yield(2);
+        }
+    };
+
+    t = IM_REGISTER_TEST(engine, "performance", "cancellation and stale selection");
+    t->UserData = app;
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        auto& workspace = static_cast<App*>(ctx->Test->UserData)->Workspace();
+        workspace.SetPerformanceFixture(gfx::Json{}); workspace.OpenPerformance(); ctx->Yield(3);
+        workspace.StartPerformanceJobFixture(); ctx->Yield(2);
+        IM_CHECK(workspace.StateFor("Perf") == gfx::PanelState::Running);
+        ctx->SetRef("//Perf"); IM_CHECK(ctx->ItemExists("Cancel") && !ctx->ItemExists("Start")); ctx->ItemClick("Cancel");
+        WaitForWorkspace(ctx, workspace);
+        IM_CHECK(!workspace.Busy()); IM_CHECK(workspace.PerformanceResult().is_null());
+        IM_CHECK(workspace.StateFor("Perf") == gfx::PanelState::Inactive);
+        IM_CHECK(ctx->ItemExists("Start") && !ctx->ItemExists("Cancel"));
+        workspace.StartPerformanceJobFixture(); workspace.SupersedePerformanceFixtureSelection();
+        WaitForWorkspace(ctx, workspace);
+        IM_CHECK(!workspace.Busy()); IM_CHECK(workspace.PerformanceResult().is_null());
+        IM_CHECK(workspace.Status().find("previous selection") != std::string::npos);
+        IM_CHECK(workspace.StateFor("Perf") == gfx::PanelState::Inactive);
+        ctx->WindowClose("//Perf");
+    };
+
+    t = IM_REGISTER_TEST(engine, "performance", "closing active window retains job and logs completion");
+    t->UserData = app;
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        auto& workspace = static_cast<App*>(ctx->Test->UserData)->Workspace();
+        workspace.SetPerformanceFixture(gfx::Json{}); workspace.OpenPerformance(); ctx->Yield(3);
+        const auto previousLogs = PerfLogSnapshot();
+        workspace.StartPerformanceJobFixture(2000); ctx->Yield(2);
+        IM_CHECK(workspace.Busy()); IM_CHECK(workspace.StateFor("Perf") == gfx::PanelState::Running);
+        ctx->WindowClose("//Perf"); ctx->Yield(2);
+        IM_CHECK(!workspace.PerformanceOpen());
+        IM_CHECK(workspace.Busy());
+        WaitForWorkspace(ctx, workspace);
+        IM_CHECK(!workspace.Busy()); IM_CHECK(workspace.PerformanceResult().at("status") == "complete");
+        IM_CHECK(workspace.StateFor("Perf") == gfx::PanelState::Success);
+        IM_CHECK(PerfLogAdded(previousLogs));
+        workspace.OpenPerformance(); ctx->Yield(3);
+        IM_CHECK(workspace.PerformanceOpen());
+        IM_CHECK(workspace.PerformanceResult().at("status") == "complete");
+        ctx->WindowClose("//Perf");
+    };
+
+    t = IM_REGISTER_TEST(engine, "performance", "settings remain runnable without another probe");
+    t->UserData = app;
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        auto& workspace = static_cast<App*>(ctx->Test->UserData)->Workspace();
+        workspace.ClearPerformanceFixture(); workspace.SetReplayMode(gfx::ReplayMode::Local);
+        workspace.Open((std::filesystem::current_path() / "samples/windows-triangle.gfxr").u8string()); WaitForWorkspace(ctx, workspace);
+        auto capture = workspace.CurrentCapture(); IM_CHECK(capture != nullptr);
+        workspace.ConfigurePerformanceCaptureForTests(capture, 1, "fixture-only");
+        workspace.SetPerformanceFixture(gfx::Json{}, true); workspace.OpenPerformance(); ctx->Yield(4);
+        ctx->SetRef("//Perf");
+        const auto canStart = [&] { return (ctx->ItemInfo("Start").ItemFlags & ImGuiItemFlags_Disabled) == 0; };
+        IM_CHECK(canStart());
+        IM_CHECK(!ctx->ItemExists("Mode") && !ctx->ItemExists("FPS") && !ctx->ItemExists("Warm-up ms") && !ctx->ItemExists("Measure ms"));
+        IM_CHECK(!ctx->ItemExists("Counter us"));
+        ctx->ItemInputValue("Runs", 2); ctx->Yield(2); IM_CHECK(canStart());
+        ctx->ItemInputValue("Runs", 0); ctx->Yield(2); IM_CHECK(!canStart());
+        ctx->ItemInputValue("Runs", 2); ctx->Yield(2); IM_CHECK(canStart());
+        IM_CHECK(!ctx->ItemExists("Profile"));
+        ctx->ItemCheck("Counters"); ctx->Yield(2); IM_CHECK(canStart());
+        IM_CHECK(ctx->ItemExists("Counter us"));
+        const auto counters=ctx->ItemInfo("Counters"),overrides=ctx->ItemInfo("Shader Override");
+        IM_CHECK(std::abs(counters.RectFull.GetCenter().y-overrides.RectFull.GetCenter().y)<3);
+        IM_CHECK(!ctx->ItemExists("Compare applied shader overrides"));
+        ctx->ItemInputValue("Counter us", 2000); ctx->Yield(2); IM_CHECK(canStart());
+        ctx->ItemInputValue("Counter us", 0); ctx->Yield(2); IM_CHECK(!canStart());
+        ctx->ItemInputValue("Counter us", 1000); ctx->Yield(2); IM_CHECK(canStart());
+        ctx->ItemInputValue("Frame",0);ctx->Yield(2);IM_CHECK(!canStart());
+        ctx->ItemInputValue("Frame",1);ctx->Yield(2);IM_CHECK(canStart());
+        ctx->ItemUncheck("Counters"); ctx->Yield(2); IM_CHECK(canStart());
+        ctx->ItemCheck("Counters");ctx->Yield(2);IM_CHECK(canStart());
+        ctx->ItemUncheck("Counters");ctx->Yield(2);IM_CHECK(canStart());
+        IM_CHECK(!ctx->ItemExists("Counter us"));
+        ctx->MouseMove("Shader Override");
+        const auto tooltipDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+        bool overrideTooltipVisible=false;
+        do {
+            overrideTooltipVisible=VisibleUiText(ctx).find("Compare applied shader overrides")!=std::string::npos;
+            if(!overrideTooltipVisible)std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        } while(!overrideTooltipVisible&&std::chrono::steady_clock::now()<tooltipDeadline&&!ctx->IsError());
+        IM_CHECK(overrideTooltipVisible);
+        ReviewScreenshot(ctx,"perf-settings-ready");
+        ctx->WindowClose("//Perf");
+    };
+
+    t = IM_REGISTER_TEST(engine, "performance", "local timing uses shared session core");
+    t->UserData = app;
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        auto& workspace = static_cast<App*>(ctx->Test->UserData)->Workspace();
+        const auto file = std::filesystem::current_path() / "samples/windows-triangle.gfxr";
+        IM_CHECK(std::filesystem::is_regular_file(file));
+        workspace.ClearPerformanceFixture(); workspace.SetReplayMode(gfx::ReplayMode::Local);
+        workspace.Open(file.u8string()); WaitForWorkspace(ctx, workspace);
+        IM_CHECK(workspace.CurrentCapture() != nullptr);
+        workspace.OpenPerformance(); WaitForWorkspace(ctx, workspace);
+        ctx->SetRef("//Perf");
+        ctx->ItemCheck("Counters"); WaitForWorkspace(ctx, workspace);
+        const auto probeLogs = PerfLogSnapshot();
+        ctx->ItemClick("Probe"); WaitForWorkspace(ctx, workspace);
+        IM_CHECK(workspace.StateFor("Perf") != gfx::PanelState::Failed);
+        IM_CHECK((ctx->ItemInfo("Start").ItemFlags & ImGuiItemFlags_Disabled) == 0);
+        IM_CHECK(PerfLogAdded(probeLogs));
+        ctx->ItemUncheck("Counters");
+        ctx->Yield(2);
+        IM_CHECK((ctx->ItemInfo("Start").ItemFlags & ImGuiItemFlags_Disabled) == 0);
+        ctx->ItemClick("Start"); WaitForWorkspace(ctx, workspace);
+        IM_CHECK(workspace.PerformanceResult().at("status") == "complete");
+        IM_CHECK(workspace.PerformanceResult().at("mode") == "single-frame");
+        IM_CHECK(workspace.PerformanceResult().at("runs")[0].at("gpu").at("samples")[0].at("valid") == true);
+        IM_CHECK(workspace.StateFor("Perf") == gfx::PanelState::Success);
+        ctx->WindowClose("//Perf"); workspace.SetReplayMode(gfx::ReplayMode::Automatic);
+    };
+
+    if (std::getenv("GFXRECON_GUI_PERF_CAPTURE") && std::getenv("GFXRECON_GUI_PERF_INDEX") && std::getenv("GFXRECON_GUI_PERF_SERIAL")) {
+        t = IM_REGISTER_TEST(engine, "performance-device", "fresh frame counters from performance window"); t->UserData = app;
+        t->TestFunc = [](ImGuiTestContext* ctx) {
+            auto& workspace = static_cast<App*>(ctx->Test->UserData)->Workspace();
+            auto capture = gfx::ReadCapture(std::filesystem::u8path(std::getenv("GFXRECON_GUI_PERF_INDEX")));
+            capture->source = std::filesystem::u8path(std::getenv("GFXRECON_GUI_PERF_CAPTURE")); capture->fingerprint = gfx::Sha256File(capture->source);
+            workspace.ConfigurePerformanceCaptureForTests(capture, 3, std::getenv("GFXRECON_GUI_PERF_SERIAL"));
+            workspace.OpenPerformance(); WaitForWorkspace(ctx, workspace); ctx->SetRef("//Perf");
+            ctx->ItemCheck("Counters"); ctx->ItemClick("Probe"); WaitForWorkspace(ctx, workspace);
+            IM_CHECK((ctx->ItemInfo("Start").ItemFlags & ImGuiItemFlags_Disabled) == 0);
+            ctx->ItemClick("Start"); WaitForWorkspace(ctx, workspace);
+            if (!workspace.PerformanceResult().is_object()) { IM_CHECK(false && "Device performance run failed; inspect workspace status and retained artifacts"); return; }
+            IM_CHECK(workspace.PerformanceResult().at("status") == "complete");
+            IM_CHECK(workspace.PerformanceResult().at("mode") == "single-frame");
+            const auto& run = workspace.PerformanceResult().at("runs")[0];
+            IM_CHECK(run.at("gpu").at("samples").size() == 1);
+            IM_CHECK(run.at("counters").at("status") == "complete" || run.at("counters").at("status") == "sparse" || run.at("counters").at("status") == "unavailable");
+            ctx->Yield(5); ReviewScreenshot(ctx, "perf-window-device"); ctx->WindowClose("//Perf");
+        };
+    }
+
+    if (std::getenv("GFXRECON_GUI_PERF_RESULT")) {
+        t = IM_REGISTER_TEST(engine, "performance-retained", "real result in dockable window"); t->UserData = app;
+        t->TestFunc = [](ImGuiTestContext* ctx) {
+            auto& workspace = static_cast<App*>(ctx->Test->UserData)->Workspace();
+            WaitForWorkspace(ctx, workspace);
+            const auto reportPath = std::filesystem::u8path(std::getenv("GFXRECON_GUI_PERF_RESULT"));
+            std::ifstream input(reportPath);
+            IM_CHECK(input.good());
+            auto report = gfx::Json::parse(input);
+            bool qualityWarning = false;
+            for (const auto& run : report.value("runs", gfx::Json::array())) {
+                if (run.contains("gpu") && run.at("gpu").is_object() && run.at("gpu").contains("sustained") && run.at("gpu").at("sustained").is_object())
+                    qualityWarning = qualityWarning || run.at("gpu").at("sustained").value("missed_deadlines", uint64_t(0)) > 0;
+            }
+            for (const auto& comparison : report.value("comparisons", gfx::Json::array()))
+                qualityWarning = qualityWarning || comparison.value("status", "") != "comparable";
+            const auto logs = PerfLogSnapshot();
+            workspace.LoadPerformanceReport(reportPath);
+            // Open while the real loader owns the job, so merely viewing a
+            // saved report cannot launch a device capability probe.
+            workspace.OpenPerformance(); WaitForWorkspace(ctx, workspace); ctx->Yield(4);
+            IM_CHECK(!workspace.Busy());
+            IM_CHECK(workspace.StateFor("Perf") == (qualityWarning ? gfx::PanelState::Warning : gfx::PanelState::Success));
+            IM_CHECK(PerfLogAdded(logs));
+            if (qualityWarning) IM_CHECK(PerfWarningAdded(logs));
+            IM_CHECK(workspace.PerformanceOpen());
+            auto* window = ctx->WindowInfo("//Perf").Window;
+            IM_CHECK(window != nullptr && (window->Flags & (ImGuiWindowFlags_Popup | ImGuiWindowFlags_Modal | ImGuiWindowFlags_NoDocking)) == 0);
+            IM_CHECK(window->DockIsActive&&window->DockId==ctx->WindowInfo("//Pipeline").Window->DockId);
+            IM_CHECK(workspace.PerformanceResult().at("status") == "complete");
+            ctx->SetRef("//Perf");
+            IM_CHECK(ctx->ItemExists("Open...") && ctx->ItemExists("Start") && !ctx->ItemExists("Cancel"));
+            IM_CHECK(!ctx->ItemExists("Load result...") && !ctx->ItemExists("Device, cadence and sampling"));
+            ReviewScreenshot(ctx, "perf-window-retained");
+            ctx->WindowClose("//Perf");
+        };
+    }
+
+    t = IM_REGISTER_TEST(engine, "image-toolbar", "compact mode and scale placement"); t->UserData = app;
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        auto& workspace = static_cast<App*>(ctx->Test->UserData)->Workspace();
+        workspace.ClearPerformanceFixture(); workspace.SetReplayMode(gfx::ReplayMode::Local);
+        if (!workspace.CurrentCapture()) {
+            ctx->WindowFocus("//Image"); ctx->Yield(3); ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);
+            for (const auto* control : {"##draw-visualization", "##indirect-subdraw", "R", "sRGB", "Fit", "##scale"})
+                IM_CHECK(!ctx->ItemExists(control));
+            ReviewScreenshot(ctx, "image-toolbar-empty");
+        }
+        workspace.Open((std::filesystem::current_path() / "samples/windows-triangle.gfxr").u8string()); WaitForWorkspace(ctx, workspace);
+        workspace.SelectExecution(0, true); WaitForWorkspace(ctx, workspace);
+        IM_CHECK(workspace.SelectedExecution() == 0);
+        IM_CHECK(workspace.CurrentCapture()->events[workspace.SelectedEvent()].name.rfind("vkCmdDraw", 0) == 0);
+        ctx->WindowFocus("//Image"); ctx->DockClear("Image", nullptr);
+        ctx->WindowResize("//Image", ImVec2(1550, 850)); ctx->WindowMove("//Image", ImVec2(20, 40)); ctx->Yield(4);
+        ctx->WindowCollapse("//Image", false); ctx->Yield(3);
+        ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);
+        ReviewScreenshot(ctx, "image-toolbar-before-controls");
+        const auto checkRows = [&](bool indirect) {
+            const auto mode = ctx->ItemInfo("##draw-visualization"), subdraw = ctx->ItemInfo("##indirect-subdraw"), red = ctx->ItemInfo("R");
+            if (ctx->IsError()) return;
+            IM_CHECK(mode.RectFull.Max.x < subdraw.RectFull.Min.x);
+            IM_CHECK(std::abs(mode.RectFull.GetCenter().y - subdraw.RectFull.GetCenter().y) < 3);
+            IM_CHECK(std::abs(mode.RectFull.GetWidth() - ImGui::GetFontSize()*8) < 1);
+            IM_CHECK(std::abs(mode.RectFull.GetWidth() - subdraw.RectFull.GetWidth()) < 1);
+            IM_CHECK(((subdraw.ItemFlags & ImGuiItemFlags_Disabled) == 0) == indirect);
+            IM_CHECK(red.RectFull.Min.y > mode.RectFull.Max.y);
+            for (const auto* control : {"G", "B", "sRGB", "##range-min", "##range-max", "Auto", "Reset"})
+                IM_CHECK(std::abs(ctx->ItemInfo(control).RectFull.GetCenter().y - red.RectFull.GetCenter().y) < 3);
+            const auto scale = ctx->ItemInfo("##scale"), flip = ctx->ItemInfo("Flip V"), fit = ctx->ItemInfo("Fit");
+            IM_CHECK(std::abs(scale.RectFull.GetCenter().y - mode.RectFull.GetCenter().y) < 3);
+            const auto rotate = ctx->ItemInfo("##rotate-left");
+            IM_CHECK(rotate.RectFull.Min.x - subdraw.RectFull.Max.x >= ImGui::GetStyle().ItemSpacing.x * 3);
+            IM_CHECK(flip.RectFull.Max.x < fit.RectFull.Min.x && fit.RectFull.Max.x < scale.RectFull.Min.x);
+            IM_CHECK(fit.RectFull.Min.x - flip.RectFull.Max.x >= ImGui::GetStyle().ItemSpacing.x * 3);
+            for (const auto* control : {"##rotate-left", "##rotate-right", "Flip H", "Flip V", "Fit"})
+                IM_CHECK(std::abs(ctx->ItemInfo(control).RectFull.GetCenter().y - scale.RectFull.GetCenter().y) < 3);
+        };
+        checkRows(false); if (ctx->IsError()) return;
+        if (!workspace.SelectedImage().Width()) { IM_CHECK(false && "Draw output image was not loaded"); return; }
+        const auto original = workspace.SelectedImage().Pixel(0, 0);
+        ctx->ItemClick("Flip V"); IM_CHECK(workspace.SelectedImage().Orientation().vertical);
+        ctx->ItemClick("Flip V"); IM_CHECK(!workspace.SelectedImage().Orientation().vertical);
+        IM_CHECK(workspace.SelectedImage().Pixel(0, 0) == original);
+        ctx->ComboClick("##draw-visualization/Solid coverage"); WaitForWorkspace(ctx, workspace);
+        IM_CHECK(workspace.DrawVisualization() == 1);
+        ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window); ctx->ComboClick("##draw-visualization/Original"); WaitForWorkspace(ctx, workspace);
+        IM_CHECK(workspace.DrawVisualization() == 0);
+        ReviewScreenshot(ctx, "image-toolbar-compact");
+        workspace.Open((std::filesystem::current_path() / "samples/indirect-triangles.gfxr").u8string()); WaitForWorkspace(ctx, workspace);
+        workspace.SelectExecution(0, true); WaitForWorkspace(ctx, workspace);
+        ctx->WindowFocus("//Image"); ctx->Yield(3); ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);
+        checkRows(true); if (ctx->IsError()) return;
+        ctx->ComboClick("##indirect-subdraw/###subdraw-1"); WaitForWorkspace(ctx, workspace); IM_CHECK_EQ(workspace.SelectedSubdraw(), 1);
+        ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window); checkRows(true);
+        ReviewScreenshot(ctx, "image-toolbar-indirect");
+        ctx->WindowResize("//Image", ImVec2(600, 850)); ctx->Yield(4);
+        const auto document = ctx->WindowInfo("//Image/image-document").Window;
+        IM_CHECK(document->ScrollbarX && document->ContentSize.x > document->InnerRect.GetWidth());
+        ctx->SetRef(document);
+        IM_CHECK(std::abs(ctx->ItemInfo("##scale").RectFull.GetCenter().y - ctx->ItemInfo("Flip V").RectFull.GetCenter().y) < 3);
+        ReviewScreenshot(ctx, "image-toolbar-narrow");
+    };
 
     t = IM_REGISTER_TEST(engine, "shell", "app starts and menu bar exists");
     t->TestFunc = [](ImGuiTestContext* ctx) {
@@ -131,6 +812,22 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         ctx->Yield(3);const auto width=ImGui::FindWindowByName("Capture application")->Size.x;ctx->Yield(30);
         IM_CHECK(std::abs(ImGui::FindWindowByName("Capture application")->Size.x-width)<1);
         ctx->ItemClick("Close");
+    };
+
+    t = IM_REGISTER_TEST(engine, "replay-policy", "memory translation setting persists"); t->UserData = app;
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        auto& workspace = static_cast<App*>(ctx->Test->UserData)->Workspace(); WaitForWorkspace(ctx, workspace);
+        const auto original = workspace.MemoryTranslation();
+        ctx->MenuClick("//##MainMenuBar/File/Settings..."); ctx->SetRef("//Settings");
+        IM_CHECK(ctx->ItemExists("Memory translation"));
+        ctx->ComboClick("Memory translation/Remap"); ctx->Yield(2);
+        IM_CHECK(workspace.MemoryTranslation() == "remap");
+        std::ifstream saved(std::filesystem::u8path(ExeDirectory()) / "test-state/gfxrecon_preferences.json");
+        IM_CHECK(gfx::Json::parse(saved).at("memory_translation") == "remap");
+        const std::map<std::string, std::string> labels{{"default","Default"},{"none","None"},{"remap","Remap"},{"realign","Realign"},{"rebind","Rebind"}};
+        ctx->ComboClick(("Memory translation/" + labels.at(original)).c_str());
+        IM_CHECK(workspace.MemoryTranslation() == original);
+        ReviewScreenshot(ctx, "settings-dialog"); ctx->ItemClick("Close");
     };
 
     t = IM_REGISTER_TEST(engine, "shell", "theme switch applies");
@@ -398,7 +1095,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             IM_CHECK(ctx->ItemExists("**/Frame presentation"));IM_CHECK(workspace.SelectedImage().Width()>0);
             if(!android){
                 for(const auto* mode:{"Solid coverage","Wireframe","Depth pass & fail","Original"}){
-                    ctx->ComboClick((std::string("##draw-visualization/")+mode).c_str());wait();
+                    ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window); ctx->ComboClick((std::string("##draw-visualization/")+mode).c_str());wait();
                     IM_CHECK(workspace.ExecutionState(0)==gfx::PanelState::Success);
                     IM_CHECK(workspace.SelectedImage().Width()>0);
                     const auto& image=workspace.SelectedImage();const auto center=image.Pixel(image.Width()/2,image.Height()/2);
@@ -430,7 +1127,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             IM_CHECK(workspace.StateFor("Image") == gfx::PanelState::Success);
             ImGui::SetWindowFocus("Image"); ctx->Yield(2); ctx->SetRef("//Image");
             const auto scale = workspace.BaselineImage().Zoom();
-            ctx->SetRef("//Image/image-document");
+            ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);
             auto* pixels = ctx->WindowInfo("//Image/image-document/pixels").Window;
             ctx->MouseMoveToPos(ImVec2(pixels->Pos.x + 80, pixels->Pos.y + 80)); ctx->MouseWheelY(2); ctx->Yield(3);
             IM_CHECK(workspace.BaselineImage().Zoom() > scale);
@@ -634,19 +1331,19 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             auto& w=static_cast<App*>(ctx->Test->UserData)->Workspace();
             w.SetReplayMode(gfx::ReplayMode::Local);w.Open(std::getenv("GFXRECON_GUI_INDIRECT_CAPTURE"));WaitForWorkspace(ctx,w);
             w.SelectExecution(0);WaitForWorkspace(ctx,w);ImGui::SetWindowFocus("Image");ctx->Yield(3);ctx->SetRef("//Image");
-            IM_CHECK(ctx->ItemExists("##indirect-subdraw"));
+            IM_CHECK(ctx->ItemExists("**/##indirect-subdraw"));
             auto orange=[&](){const auto& image=w.SelectedImage();size_t count=0;for(int y=0;y<image.Height();++y)for(int x=0;x<image.Width();++x){const auto p=image.Pixel(x,y);if(p[0]>250&&p[1]>120&&p[1]<240&&p[2]<5)++count;}return count;};
-            ctx->ComboClick("##draw-visualization/Solid coverage");WaitForWorkspace(ctx,w);IM_CHECK(w.ExecutionState(0)==gfx::PanelState::Success);
+            ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);ctx->ComboClick("##draw-visualization/Solid coverage");WaitForWorkspace(ctx,w);IM_CHECK(w.ExecutionState(0)==gfx::PanelState::Success);
             const auto all=orange();IM_CHECK(all>10000);size_t sum=0;
-            for(int i=0;i<3;++i){ctx->SetRef("//Image");ctx->ComboClick(("##indirect-subdraw/###subdraw-"+std::to_string(i)).c_str());WaitForWorkspace(ctx,w);
+            for(int i=0;i<3;++i){ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);ctx->ComboClick(("##indirect-subdraw/###subdraw-"+std::to_string(i)).c_str());WaitForWorkspace(ctx,w);
                 IM_CHECK_EQ(w.SelectedSubdraw(),i);IM_CHECK(w.ExecutionState(0)==gfx::PanelState::Success);const auto count=orange();IM_CHECK(count>10000);IM_CHECK(count<all);sum+=count;}
             IM_CHECK_EQ(sum,all);
             w.SetDrawVisualization(1,0);w.SetDrawVisualization(2,1);w.SetDrawVisualization(1,2);WaitForWorkspace(ctx,w);
             IM_CHECK_EQ(w.SelectedSubdraw(),2);IM_CHECK_EQ(w.DrawVisualization(),1);IM_CHECK(w.ExecutionState(0)==gfx::PanelState::Success);IM_CHECK(orange()<all);
             ReviewScreenshot(ctx,"indirect-draw-visualization");
-            ctx->SetRef("//Image");ctx->ComboClick("##indirect-subdraw/All 3 draws");WaitForWorkspace(ctx,w);IM_CHECK_EQ(orange(),all);
-            ctx->ComboClick("##draw-visualization/Original");WaitForWorkspace(ctx,w);IM_CHECK_EQ(orange(),0u);
-            ctx->ComboClick("##draw-visualization/Orange outline");WaitForWorkspace(ctx,w);IM_CHECK(orange()>0);IM_CHECK(orange()<all/5);IM_CHECK(!w.Busy());ReviewScreenshot(ctx,"orange-outline");
+            ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);ctx->ComboClick("##indirect-subdraw/All 3 draws");WaitForWorkspace(ctx,w);IM_CHECK_EQ(orange(),all);
+            ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);ctx->ComboClick("##draw-visualization/Original");WaitForWorkspace(ctx,w);IM_CHECK_EQ(orange(),0u);
+            ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);ctx->ComboClick("##draw-visualization/Orange outline");WaitForWorkspace(ctx,w);IM_CHECK(orange()>0);IM_CHECK(orange()<all/5);IM_CHECK(!w.Busy());ReviewScreenshot(ctx,"orange-outline");
         };
     }
 

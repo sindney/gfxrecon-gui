@@ -1,8 +1,17 @@
 #include "capture/capture.h"
+#include "core/artifacts.h"
 #include "platform/android_display.h"
+#include "replay/android_replay_failure.h"
 #include <fstream>
 #include <map>
 #include <stdexcept>
+#include <chrono>
+#include <future>
+#include <thread>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 namespace gfx::tests {
 namespace {
@@ -72,10 +81,57 @@ struct Phone {
 };
 }
 void RunDeviceTests(const std::filesystem::path& root) {
+#ifdef _WIN32
+    {
+        const auto directory=root/"atomic-json-replacement";std::filesystem::create_directory(directory);
+        const auto file=directory/"state.json";AtomicJson(file,{{"generation",1}});
+        struct ReadLock{
+            HANDLE value;
+            explicit ReadLock(const std::filesystem::path& path):value(CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr)){
+                Require(value!=INVALID_HANDLE_VALUE,"Cannot create the Windows replacement-lock fixture");
+            }
+            void Close(){if(value!=INVALID_HANDLE_VALUE){CloseHandle(value);value=INVALID_HANDLE_VALUE;}}
+            ~ReadLock(){Close();}
+        };
+        {
+            ReadLock lock(file);std::promise<void> started;auto ready=started.get_future();
+            auto writer=std::async(std::launch::async,[&]{started.set_value();AtomicJson(file,{{"generation",2}});});
+            ready.wait();std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            Require(writer.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready,"Replacement did not wait for the Windows reader lock");
+            Require(Load(file)["generation"]==1,"Retry discarded or changed the original artifact while locked");
+            lock.Close();writer.get();Require(Load(file)["generation"]==2,"Replacement did not recover after the reader released its lock");
+        }
+        {
+            ReadLock lock(file);bool failed=false;const auto start=std::chrono::steady_clock::now();
+            try{AtomicJson(file,{{"generation",3}});}catch(const std::filesystem::filesystem_error&){failed=true;}
+            Require(failed,"A permanent Windows replacement lock was silently ignored");
+            Require(std::chrono::steady_clock::now()-start<std::chrono::seconds(2),"Replacement retries are not bounded");
+            Require(Load(file)["generation"]==2,"A failed replacement damaged the prior artifact");
+        }
+        Require(std::distance(std::filesystem::directory_iterator(directory),std::filesystem::directory_iterator{})==1,"Failed replacement leaked its private staged artifact");
+        std::filesystem::remove(file);std::filesystem::remove(directory);
+    }
+#endif
+    {
+        const std::string pkg = "com.lunarg.gfxreconstruct.replay";
+        const std::string exit = "ApplicationExitInfo #0:\n timestamp=2026-11-03 16:24:16.001 pid=25112 reason=5 (APP CRASH(NATIVE))\n";
+        const std::string crash = "*** *** ***\nTimestamp: 2026-11-03 16:24:15.999+0800\nCmdline: " + pkg +
+            "\npid: 25112, tid: 29077\nAbort message: '[gfxrecon] FATAL - vkAllocateMemory: VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS'\n";
+        Require(AndroidNativeCrashReason(exit, crash, pkg).find("VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS") != std::string::npos, "Matching native abort was lost");
+        auto stale = crash; stale.replace(stale.find("16:24:15"), 8, "15:24:15");
+        Require(AndroidNativeCrashReason(exit, stale, pkg).empty(), "Stale reused-PID crash was attributed to current replay");
+        auto foreign = crash; foreign.replace(foreign.find(pkg), pkg.size(), "another.package");
+        Require(AndroidNativeCrashReason(exit, foreign, pkg).empty(), "Foreign-package crash was attributed to replay");
+        auto otherPid = crash; otherPid.replace(otherPid.find("pid: 25112"), 10, "pid: 25113");
+        Require(AndroidNativeCrashReason(exit, otherPid, pkg).empty(), "Foreign-PID crash was attributed to replay");
+        auto memoryExit = exit; memoryExit.replace(memoryExit.find("reason=5"), 8, "reason=3");
+        Require(AndroidNativeCrashReason(memoryExit, crash, pkg).empty(), "Old native crash replaced a non-native exit reason");
+    }
     for(int displayScenario=0;displayScenario<8;++displayScenario){
         const auto journal=root/("display-"+std::to_string(displayScenario)+".json");
         bool panelOff=displayScenario==1,offline=false,rejectReset=displayScenario==7;unsigned offCommands=0,resets=0;std::atomic_bool cancelled{false};
         AdbConnection connection{"fake-adb","phone-a",&cancelled,[&](const ProcessRequest& request,const std::atomic_bool* token){
+            Require(request.allowChildServices,"ADB transport must preserve its shared host server");
             Require(request.arguments[1]=="phone-a","Display operation escaped its serial");
             if(offline)return ProcessResult{1,"offline"};if(token&&token->load())return ProcessResult{-1,"cancelled",true};
             const auto words=ShellWords(request.arguments[3]);
@@ -93,7 +149,7 @@ void RunDeviceTests(const std::filesystem::path& root) {
             if(displayScenario==3)cancelled=true;
             if(displayScenario==4)offline=true;
             if(displayScenario==5)panelOff=false;
-        }catch(const std::runtime_error&){Require(displayScenario==2||displayScenario==6,"Unexpected display setup failure");}
+        }catch(const std::runtime_error& error){if(displayScenario!=2&&displayScenario!=6)throw std::runtime_error("Unexpected display setup failure in scenario "+std::to_string(displayScenario)+": "+error.what());}
         if(displayScenario==6){Require(offCommands==0&&!std::filesystem::exists(journal),"Unsupported device was modified");continue;}
         if(displayScenario==4||displayScenario==7){Require(!Load(journal).value("restored",true),"Failed panel restoration was reported complete");offline=false;rejectReset=false;RestoreAndroidReplayDisplay(connection,journal);}
         Require(Load(journal).value("restored",false),"Display recovery did not complete");

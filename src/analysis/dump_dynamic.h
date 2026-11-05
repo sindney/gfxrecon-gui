@@ -15,6 +15,7 @@ Json BuildBatchDumpRequest(const Capture& capture, const std::vector<size_t>& ex
 
 struct DynamicDumpOptions {
     std::string tier = "none";           // none|frame|pass|draws|full
+    std::string memoryTranslation = "default";
     size_t batchDraws = 64;              // selector rows per replay (memory/storage bound on device)
     uint64_t maxBytes = 0;               // 0: no budget; beyond it dynamic slots are "skipped" (budget)
     std::vector<size_t> filtered;        // executions selected by --draws (a tier that needs filters)

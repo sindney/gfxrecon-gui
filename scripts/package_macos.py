@@ -58,6 +58,10 @@ def verify_manifest(directory):
     manifest = json.loads((directory / "build-info.json").read_text())
     if manifest["files"] != inventory(directory):
         raise ValueError("macOS distribution inventory or hashes changed")
+    required = {"dependencies.json", "docs/RELATIONS.md", f"{APP}/Contents/Resources/licenses/sqlite.txt"}
+    missing = sorted(name for name in required if not (directory / name).is_file())
+    if missing:
+        raise ValueError(f"Missing release files: {', '.join(missing)}")
     app = directory / APP
     with (app / "Contents/Info.plist").open("rb") as stream:
         info = plistlib.load(stream)
@@ -197,10 +201,12 @@ def package_runtime(args):
         if config.get("adb"):
             shutil.copy2(config["adb"], tools / "adb")
             binaries.append(tools / "adb")
-        for key, name in (("replay_apk", "replay-debug.apk"), ("test_apk", "test_launcher-debug.apk")):
+        for key, name in (("replay_apk", "replay-debug.apk"), ("test_apk", "test_launcher-debug.apk"), ("gpu_counter_producer", "gpu-counter-producer")):
             if config.get(key):
                 (tools / "android").mkdir(exist_ok=True)
                 shutil.copy2(config[key], tools / "android" / name)
+                if key == "gpu_counter_producer":
+                    shutil.copy2(str(config[key]) + '.capabilities.json', tools / 'android' / (name + '.capabilities.json'))
                 if key == "replay_apk":
                     from write_replay_capability import write_capability
                     write_capability(tools / "android" / name)

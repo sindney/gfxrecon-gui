@@ -1,4 +1,7 @@
+#include "replay/android_replay_failure.h"
 #include "replay/replay.h"
+#include "replay/gpu_measurement.h"
+#include "replay/measurement_telemetry.h"
 #include "platform/android_display.h"
 #include "platform/process.h"
 #include "core/artifacts.h"
@@ -13,6 +16,7 @@
 #include <optional>
 #include <regex>
 #include <cstdlib>
+#include <cctype>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -20,6 +24,20 @@
 #endif
 
 namespace gfx {
+std::string ResolveMemoryTranslation(const std::string& requested, bool android) {
+    if (requested == "none" || requested == "remap" || requested == "realign" || requested == "rebind") return requested;
+    if (requested != "default") throw std::runtime_error("Unsupported memory translation policy: " + requested);
+#ifdef __APPLE__
+    if (!android) return "rebind";
+#else
+    (void)android;
+#endif
+    return "none";
+}
+Json ReplayMemoryTranslationPolicy(const std::string& requested, bool android) {
+    return {{"requested", requested}, {"effective", ResolveMemoryTranslation(requested, android)},
+        {"source", "backend_arguments"}, {"backend_confirmed", false}};
+}
 namespace {
 constexpr const char* kPackage = "com.lunarg.gfxreconstruct.replay";
 std::string LocalDriverIdentity() {
@@ -73,6 +91,16 @@ bool CacheCapable(const std::filesystem::path& binary, const std::string& hash) 
         const auto capability = ReadJson(std::filesystem::u8path(binary.u8string() + ".capabilities.json"));
         return capability.value("pipeline_cache_protocol", 0) == 1 && capability.value("binary_sha256", "") == hash;
     } catch (...) { return false; }
+}
+bool GpuCapable(const std::filesystem::path& binary, const std::string& hash) {
+    try {
+        const auto capability = ReadJson(std::filesystem::u8path(binary.u8string() + ".capabilities.json"));
+        return capability.value("gpu_profiling_protocol", 0) == 1 && capability.value("binary_sha256", "") == hash;
+    } catch (...) { return false; }
+}
+std::string Trim(std::string text) {
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) text.pop_back();
+    return text;
 }
 Json PrepareOptimized(ReplayRequest& replay, const std::string& sourceHash,
                       const std::map<std::string,std::string>& tools, const std::atomic_bool* cancel) {
@@ -196,11 +224,11 @@ ReplayResult RunLocal(const ReplayRequest& r, const std::map<std::string, std::s
         args.insert(args.end(), {"--measurement-frame-range", r.measurement.frameRange, "--measurement-file", (r.output / "measurement.json").u8string()});
         if (r.measurement.quitAfter) args.push_back("--quit-after-measurement-range");
     }
-#ifdef __APPLE__
-    // Captured Windows/Android memory types do not match Metal's allocation modes.
-    // Rebind resources using the replay GPU's requirements instead of captured indices.
-    args.insert(args.end(), {"--memory-translation", "rebind"});
-#endif
+    if (r.measurement.gpu) args.insert(args.end(), {"--gpu-measurement-request", (r.output / "gpu-measurement-request.json").u8string()});
+    if (!r.measurement.counterWindow.is_null())
+        throw std::runtime_error("Frame counter collection currently requires an Android target");
+    args.insert(args.end(), {"--swapchain", r.swapchainMode});
+    args.insert(args.end(), {"--memory-translation", ResolveMemoryTranslation(r.memoryTranslation, false)});
     std::filesystem::path pendingCache, readyCache;
     bool cacheLoaded = false;
     const auto backend = tools.find("replay");
@@ -245,6 +273,8 @@ ReplayResult RunLocal(const ReplayRequest& r, const std::map<std::string, std::s
     }
     auto result = RunProcess(process, cancel);
     Write(r.output / "replay.log", result.output);
+    Json swapchain;
+    if (result.Success()) swapchain = VerifyReplaySwapchain(r.swapchainMode, result.output, r.swapchainMode != "virtual");
     if (result.Success() && !pendingCache.empty() && std::filesystem::is_regular_file(pendingCache)) {
         std::filesystem::copy_file(pendingCache, readyCache, std::filesystem::copy_options::overwrite_existing);
         std::filesystem::remove(pendingCache);
@@ -253,6 +283,14 @@ ReplayResult RunLocal(const ReplayRequest& r, const std::map<std::string, std::s
         throw std::runtime_error("The local GPU lacks a Vulkan extension required by this capture. For an Android capture, choose Automatic or Android device under Frames > Replay.\n" + result.output);
     ReplayResult local{{}, Checked(result, "Local replay"), LocalReplayLabel()};
     local.timings = {{"pipeline_cache_loaded", cacheLoaded}, {"screen_off", false}};
+    local.timings["swapchain"] = std::move(swapchain);
+    local.timings["memory_translation"] = ReplayMemoryTranslationPolicy(r.memoryTranslation, false);
+    if (r.measurement.gpu) {
+        local.timings["pipeline_cache_identity"] = identity;
+        local.timings["pipeline_cache_saved"] = !pendingCache.empty() && std::filesystem::is_regular_file(readyCache);
+        local.timings["pipeline_cache_sha256"] = !readyCache.empty() && std::filesystem::is_regular_file(readyCache) ? Json(Sha256File(readyCache, cancel)) : Json(nullptr);
+        local.timings["telemetry"] = {{"before", QueryMeasurementTelemetry({}, {}, cancel)}, {"after", QueryMeasurementTelemetry({}, {}, cancel)}};
+    }
     return local;
 }
 
@@ -326,15 +364,38 @@ ReplayResult RunAndroid(const ReplayRequest& r, const ReplayTarget& target, cons
             adb.Put(kPackage, file, relative + "/overrides/sh" + std::to_string(module));
         args += " --replace-shaders " + remote + "/overrides";
     }
+    if (r.measurement.gpu) {
+        auto config = ReadJson(r.output / "gpu-measurement-request.json");
+        config["output_file"] = remote + "/gpu-measurement.json";
+        if (!r.measurement.counterWindow.is_null()) {
+            config["counter_window"]["ready_file"] = remote + "/perf-ready.json";
+            config["counter_window"]["continue_file"] = remote + "/perf-continue.json";
+        }
+        AtomicJson(r.output / "gpu-measurement-request.json", config);
+        adb.Put(kPackage, r.output / "gpu-measurement-request.json", relative + "/gpu-measurement-request.json");
+        args += " --gpu-measurement-request " + remote + "/gpu-measurement-request.json";
+    }
+    args += " --swapchain " + r.swapchainMode;
+    args += " --memory-translation " + ResolveMemoryTranslation(r.memoryTranslation, true);
     args += " " + captureFile;
     if(r.validation)args="--validate "+args;
     Write(r.output / "launch-arguments.json", Json{{"args", args}}.dump(2));
+    if (!r.measurement.counterWindow.is_null()) {
+        const auto active = adb.TryShell({"pidof", kPackage});
+        if (active.Success() && active.output.find_first_not_of(" \r\n\t") != std::string::npos)
+            throw DeviceBusy(target.serial, "Replay process already active; frame profiling will not interrupt another session");
+    }
     adb.Stop(kPackage);
     bool running = false;
+    Json telemetryBefore, telemetryAfter;
     AndroidReplayDisplay display(adb,r.output/"display-journal.json");
     try {
         EnsureAndroidReplayReady(adb);
         if(r.screenOff)display.TurnOff();
+        if (r.measurement.gpu) {
+            telemetryBefore = QueryMeasurementTelemetry(tools.at("adb"), target.serial, cancel);
+            AtomicJson(r.output / "measurement-telemetry-before.json", telemetryBefore);
+        }
         running = true;
         // NativeActivity can complete replay while Android's activity-launch/
         // visibility acknowledgment is still pending after keyguard dismissal. Its completion log,
@@ -349,13 +410,49 @@ ReplayResult RunAndroid(const ReplayRequest& r, const ReplayTarget& target, cons
             throw std::runtime_error("Android replay could not start:\n" + launched);
         const auto launchedAt = std::chrono::steady_clock::now();
         const auto deadline = launchedAt + r.timeout;
+        const auto describeFailure = [&](const std::string& fallback = std::string{}) {
+            const auto exitInfo = adb.TryShell({"dumpsys", "activity", "exit-info", kPackage});
+            Write(r.output / "exit-info.txt", exitInfo.output);
+            std::string reason;
+            try {
+                const auto crash = adb.Run({"logcat", "-b", "crash", "-d", "-v", "threadtime", "-t", "500"}, {}, {}, true);
+                Write(r.output / "native-crash-logcat.txt", crash.output);
+                if (crash.Success()) reason = AndroidNativeCrashReason(exitInfo.output, crash.output, kPackage);
+            } catch (const std::exception& error) {
+                Write(r.output / "native-crash-logcat.txt", std::string("Crash log unavailable: ") + error.what());
+            }
+            std::string message = reason.empty() ? (fallback.empty() ? DescribeAndroidReplayExit(exitInfo.output) : fallback) :
+                "Android native replay failed: " + reason;
+            if (reason.find("VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS") != std::string::npos)
+                message += " Cross-device allocation may require --memory-translation remap (Settings > Replay > Memory translation).";
+            return message + " See " + (r.output / "exit-info.txt").u8string() + ", native-crash-logcat.txt and replay.log.";
+        };
         std::string log;
         bool complete = false;
+        bool measurementStarted = r.measurement.counterWindow.is_null();
         auto displayChecked=std::chrono::steady_clock::now();
         auto processChecked=launchedAt;
         auto lastProgress=launchedAt;
         while (std::chrono::steady_clock::now() < deadline) {
             if (cancel && cancel->load()) throw std::runtime_error("Replay cancelled.");
+            if (!measurementStarted) {
+                const auto ready = adb.TryShell({"run-as", kPackage, "cat", relative + "/perf-ready.json"});
+                if (ready.Success()) {
+                    const auto state = Json::parse(ready.output);
+                    const auto config = ReadJson(r.output / "gpu-measurement-request.json");
+                    if (state.value("request_id", "") != config.at("request_id").get<std::string>() || state.value("status", "") != "ready")
+                        throw std::runtime_error("Frame counter ready handshake identity/status mismatch");
+                    AtomicJson(r.output / "perf-ready.json", state);
+                    if (!r.measurementReady) throw std::runtime_error("Frame counter collection requires a start callback");
+                    if (r.progress) r.progress("Starting optional GPU counters before the selected frame");
+                    r.measurementReady(state);
+                    const auto ack = r.output / "perf-continue.json";
+                    AtomicJson(ack, {{"request_id", config.at("request_id")}, {"status", "continue"}});
+                    adb.Put(kPackage, ack, relative + "/perf-continue.partial.json");
+                    adb.Shell({"run-as", kPackage, "mv", relative + "/perf-continue.partial.json", relative + "/perf-continue.json"});
+                    measurementStarted = true;
+                }
+            }
             if(r.screenOff&&std::chrono::steady_clock::now()-displayChecked>std::chrono::seconds(1)){display.Observe();displayChecked=std::chrono::steady_clock::now();}
             const auto read = adb.Run({"shell", Command({"run-as", kPackage, "cat", relative + "/replay.log"})});
             if (read.cancelled || read.timedOut) Checked(read, "Android replay status");
@@ -366,7 +463,7 @@ ReplayResult RunAndroid(const ReplayRequest& r, const ReplayTarget& target, cons
                 !adb.TryShell({"pidof", kPackage}).Success()) {
                 const auto diagnostics = adb.Run({"logcat", "-d", "-s", "gfxrecon:V"});
                 Write(r.output / "startup-logcat.log", diagnostics.output);
-                throw std::runtime_error("Android replay exited before creating its log. See " + (r.output / "startup-logcat.log").u8string());
+                throw std::runtime_error(describeFailure("Android replay exited before creating its log."));
             }
             if (read.Success()) {
                 auto incoming=read.output;
@@ -392,15 +489,19 @@ ReplayResult RunAndroid(const ReplayRequest& r, const ReplayTarget& target, cons
                         if(final.outputTruncated){const auto tail=adb.TryShell({"run-as",kPackage,"tail","-c","65536",relative+"/replay.log"});if(tail.Success())log+="\n[GUI: final log preview truncated]\n"+tail.output;}
                         Write(r.output/"replay.log",log);if(log.find("Exiting android_main")!=std::string::npos){complete=true;break;}
                     }
-                    const auto exitInfo=adb.TryShell({"dumpsys","activity","exit-info",kPackage});Write(r.output/"exit-info.txt",exitInfo.output);
-                    throw std::runtime_error(DescribeAndroidReplayExit(exitInfo.output)+" See "+(r.output/"exit-info.txt").u8string()+" and replay.log.");
+                    throw std::runtime_error(describeFailure());
                 }
                 if(!alive.Success()&&!alive.output.empty())Checked(alive,"Replay process check");
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
         if (!complete) throw std::runtime_error("Android replay did not complete before its timeout. Check device state and " + (r.output / "replay.log").u8string());
+        const auto swapchain = VerifyReplaySwapchain(r.swapchainMode, log, r.swapchainMode != "virtual");
         const auto replayed = std::chrono::steady_clock::now();
+        if (r.measurement.gpu) {
+            telemetryAfter = QueryMeasurementTelemetry(tools.at("adb"), target.serial, cancel);
+            AtomicJson(r.output / "measurement-telemetry-after.json", telemetryAfter);
+        }
         if(r.validation)adb.Get(kPackage,relative+"/replay.log",r.output/"validation-full.log");
         if (!pipelineFile.empty() && !pipelineReady && adb.TryShell({"run-as", kPackage, "test", "-s", pendingPipeline}).Success())
             adb.Shell({"run-as", kPackage, "mv", pendingPipeline, pipelineFile});
@@ -428,9 +529,36 @@ ReplayResult RunAndroid(const ReplayRequest& r, const ReplayTarget& target, cons
             {"prepare_seconds", std::chrono::duration<double>(uploaded - started).count()},
             {"replay_seconds", std::chrono::duration<double>(replayed - uploaded).count()},
             {"download_seconds", std::chrono::duration<double>(std::chrono::steady_clock::now() - replayed).count()}};
+        result.timings["swapchain"] = swapchain;
+        result.timings["memory_translation"] = ReplayMemoryTranslationPolicy(r.memoryTranslation, true);
+        if (r.measurement.gpu) {
+            result.timings["pipeline_cache_identity"] = identity;
+            result.timings["pipeline_cache_saved"] = !pipelineFile.empty() && !pipelineReady && adb.TryShell({"run-as", kPackage, "test", "-s", pipelineFile}).Success();
+            const auto checksum = pipelineFile.empty() ? ProcessResult{} : adb.TryShell({"run-as", kPackage, "sha256sum", pipelineFile});
+            result.timings["pipeline_cache_sha256"] = !pipelineFile.empty() && checksum.Success() && checksum.output.size() >= 64 ? Json(checksum.output.substr(0, 64)) : Json(nullptr);
+            result.timings["telemetry"] = {{"before", telemetryBefore}, {"after", telemetryAfter}};
+        }
         return result;
     } catch (...) {
-        if (running) { try { adb.Stop(kPackage); } catch (...) {} }
+        if (r.measurement.gpu && !(cancel && cancel->load())) try {
+            AdbConnection diagnostics{tools.at("adb"), target.serial};
+            diagnostics.Get(kPackage, relative + "/gpu-measurement.json", r.output / "gpu-measurement.json");
+        } catch (...) {}
+        if (running && !r.measurement.counterWindow.is_null()) {
+            // Cancellation must not cancel cleanup itself. A lost transport can
+            // prevent remote cleanup; retain that uncertainty instead of
+            // treating an attempted force-stop as proof of completion.
+            Json cleanup{{"status", "unknown"}, {"method", "owned_replay_package_force_stop"}, {"cancel_ignored", true}};
+            try {
+                const auto stopped = adb.TryShell({"am", "force-stop", kPackage}, true);
+                const auto alive = adb.TryShell({"pidof", kPackage}, true);
+                cleanup["stop_exit_code"] = stopped.exitCode; cleanup["stop_output"] = stopped.output;
+                cleanup["process_check_exit_code"] = alive.exitCode; cleanup["process_check_output"] = alive.output;
+                if (stopped.Success() && alive.exitCode == 1 && !alive.cancelled && !alive.timedOut &&
+                    alive.output.find_first_not_of(" \r\n\t") == std::string::npos) cleanup["status"] = "stopped";
+            } catch (const std::exception& error) { cleanup["error"] = error.what(); }
+            try { AtomicJson(r.output / "replay-cleanup.json", cleanup); } catch (...) {}
+        } else if (running) { try { adb.Stop(kPackage); } catch (...) {} }
         if(r.validation&&!(cancel&&cancel->load()))try{
             AdbConnection diagnostics{tools.at("adb"),target.serial};diagnostics.Get(kPackage,relative+"/replay.log",r.output/"validation-full.log");
         }catch(...){}
@@ -460,7 +588,8 @@ std::vector<AndroidDevice> ParseAdbDevices(const std::string& text) {
 }
 std::vector<AndroidDevice> QueryAndroidDevices(const std::string& adb, const std::atomic_bool* cancel) {
     if (adb.empty()) throw std::runtime_error("Configure ADB in Tools and devices to replay this Android capture on a phone.");
-    return ParseAdbDevices(Checked(RunProcess({adb, {"devices", "-l"}}, cancel), "Android device discovery"));
+    ProcessRequest request{adb, {"devices", "-l"}}; request.allowChildServices = true;
+    return ParseAdbDevices(Checked(RunProcess(request, cancel), "Android device discovery"));
 }
 ReplayTarget SelectReplayTarget(ReplayMode mode, bool androidCapture, const std::string& serial,
                                  const std::vector<AndroidDevice>& devices) {
@@ -491,10 +620,24 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
         static const std::regex range("[0-9]+-[0-9]+");
         if(!std::regex_match(replay.measurement.frameRange,range))throw std::runtime_error("Measurement frame range must be <start>-<end> (end exclusive)");
     }
+    if (replay.measurement.gpu) {
+        if (!replay.measurement.enabled) throw std::runtime_error("GPU profiling requires a measurement frame range");
+        if (replay.validation || !replay.dump.is_null() || HasVisualization(replay))
+            throw std::runtime_error("GPU profiling cannot include validation, resource readback or diagnostic visualization");
+        replay.optimize = false;
+        replay.reuseArtifacts = false;
+        if (!replay.measurement.counterWindow.is_null()) {
+            if (!target.android) throw std::runtime_error("Frame counter collection currently requires an Android target");
+            replay.measurement.quitAfter = true;
+        }
+    }
     const auto& r=replay;
+    if (r.swapchainMode != "virtual" && r.swapchainMode != "captured" && r.swapchainMode != "offscreen")
+        throw std::runtime_error("Unsupported replay swapchain mode: " + r.swapchainMode);
+    const auto memoryPolicy = ReplayMemoryTranslationPolicy(r.memoryTranslation, target.android);
     const auto started = std::chrono::steady_clock::now();
     std::optional<DeviceLock> deviceLock;
-    if (target.android) deviceLock.emplace(target.serial);
+    if (target.android) deviceLock.emplace(target.serial, cancel);
     if(r.visualization!="original"&&r.visualization!="solid"&&r.visualization!="wireframe"&&r.visualization!="depth"&&r.visualization!="uv"&&r.visualization!="silhouette")throw std::runtime_error("Unknown draw visualization");
     if(r.visualization=="uv"&&r.uvShader.empty())throw std::runtime_error("UV visualization requires a reflected UV shader");
     if(r.visualization=="silhouette"&&(r.outlineBaseImage.empty()||r.outlineCoverageImage.empty()))throw std::runtime_error("Orange outline requires original color and solid coverage from this selection");
@@ -510,6 +653,30 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
         throw std::runtime_error("Replay output must be a new, empty session directory");
     const auto optimization=PrepareOptimized(replay,sourceHash,tools,cancel);
     const auto captureHash=r.capture==request.capture?sourceHash:Sha256File(r.capture,cancel);
+    if (r.measurement.gpu) {
+        const auto& plan = r.measurement.gpuPlan;
+        if (!plan.is_object() || plan.value("mode", "") != "isolated-frame" || plan.value("capture_sha256", "") != sourceHash)
+            throw std::runtime_error("GPU measurement plan does not match the original capture. Reimport and plan the selected frames.");
+        const auto dash = r.measurement.frameRange.find('-');
+        const auto first = std::stoull(r.measurement.frameRange.substr(0, dash)), end = std::stoull(r.measurement.frameRange.substr(dash + 1));
+        const auto frames = plan.value("frames", Json::array());
+        if (first == 0 || end <= first || !frames.is_array() || frames.size() != end - first)
+            throw std::runtime_error("GPU measurement plan does not cover the requested frame range");
+        for (size_t i = 0; i < frames.size(); ++i) {
+            const auto& frame = frames.at(i);
+            const auto blocks = frame.value("submit_blocks", Json::array());
+            if (frame.value("frame", uint64_t(0)) != first + i || frame.value("queue_id", uint64_t(0)) == 0 ||
+                !blocks.is_array() || blocks.empty() || frame.at("first_submit") != blocks.front() || frame.at("last_submit") != blocks.back())
+                throw std::runtime_error("GPU measurement plan has invalid frame or submission boundaries");
+            uint64_t previous = 0;
+            for (const auto& block : blocks) {
+                if (!block.is_number_unsigned() && !block.is_number_integer()) throw std::runtime_error("GPU submission block identity is invalid");
+                const auto index = block.get<uint64_t>();
+                if (!index || index <= previous) throw std::runtime_error("GPU submission blocks must increase strictly");
+                previous = index;
+            }
+        }
+    }
     Json overrides = Json::array();
     for (const auto& [module, file] : r.overrides) {
         if (!module) throw std::runtime_error("Replacement module identity is unavailable");
@@ -520,7 +687,8 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
         {"capture", r.capture.u8string()}, {"capture_sha256", captureHash}, {"target", target.Label()},
         {"source_capture",request.capture.u8string()},{"source_capture_sha256",sourceHash},{"optimization",optimization},
         {"serial", target.serial}, {"frame", r.frame}, {"timeout_seconds",r.timeout.count()}, {"selection_generation", r.selectionGeneration},
-        {"dump_request", r.dump}, {"overrides", overrides}, {"outputs_only", r.outputsOnly},
+        {"dump_request", r.dump}, {"overrides", overrides}, {"outputs_only", r.outputsOnly}, {"swapchain_mode", r.swapchainMode},
+        {"memory_translation", memoryPolicy},
         {"captured_pipeline_cache_data", "excluded; only target-generated caches may be loaded"}};
     const auto backend = tools.find(target.android ? "replay_apk" : "replay");
     if (backend != tools.end()) {
@@ -528,14 +696,34 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
         if (std::filesystem::is_regular_file(std::filesystem::u8path(backend->second)))
             manifest["backend_sha256"] = Sha256File(std::filesystem::u8path(backend->second), cancel);
     }
+    if (r.measurement.gpu && (backend == tools.end() || !GpuCapable(std::filesystem::u8path(backend->second), manifest.value("backend_sha256", ""))))
+        throw std::runtime_error("GPU profiling requires the bundled replay backend/APK with frame GPU profiling protocol 1 and an identity-matched capability file. Rebuild/update the backend.");
+    if (!r.measurement.counterWindow.is_null()) {
+        const auto capability = ReadJson(std::filesystem::u8path(backend->second + ".capabilities.json"));
+        if (capability.value("frame_counter_window_protocol", 0) != 1)
+            throw std::runtime_error("Replay backend lacks frame counter window protocol 1; update the bundled backend/APK and matching capability file");
+    }
     std::string deviceIdentity = target.android ? "" : LocalDriverIdentity();
+    Json deviceMetadata{{"target", target.Label()}, {"serial", target.serial}};
+#ifdef _WIN32
+    deviceMetadata["os"] = "Windows";
+#elif defined(__APPLE__)
+    deviceMetadata["os"] = "macOS";
+#else
+    deviceMetadata["os"] = "Linux";
+#endif
     bool pipelineCapable = false;
-    if (target.android && !r.cacheDirectory.empty()) {
+    if (target.android && (!r.cacheDirectory.empty() || r.measurement.gpu)) {
         AdbConnection adb{tools.at("adb"), target.serial, cancel};
-        deviceIdentity = adb.Shell({"getprop", "ro.build.fingerprint"}) + adb.Shell({"getprop", "ro.vendor.build.fingerprint"});
+        const auto build = adb.Shell({"getprop", "ro.build.fingerprint"}), vendorBuild = adb.Shell({"getprop", "ro.vendor.build.fingerprint"});
+        deviceIdentity = build + vendorBuild;
+        if (r.measurement.gpu) deviceMetadata = {{"os", "Android"}, {"serial", target.serial}, {"build_fingerprint", Trim(build)},
+            {"vendor_build_fingerprint", Trim(vendorBuild)}, {"model", Trim(adb.Shell({"getprop", "ro.product.model"}))},
+            {"os_version", Trim(adb.Shell({"getprop", "ro.build.version.release"}))}};
         auto driverPackage = adb.Shell({"getprop", "ro.gfx.driver.0"});
         while (!driverPackage.empty() && (driverPackage.back() == '\n' || driverPackage.back() == '\r' || driverPackage.back() == ' ')) driverPackage.pop_back();
         deviceIdentity += driverPackage;
+        if (r.measurement.gpu) deviceMetadata["configured_driver_package"] = driverPackage;
         if (!driverPackage.empty()) {
             std::istringstream lines(adb.Shell({"dumpsys", "package", driverPackage})); std::string line;
             while (std::getline(lines, line)) if (line.find("versionCode=") != std::string::npos || line.find("lastUpdateTime=") != std::string::npos) deviceIdentity += line;
@@ -548,18 +736,55 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
             deviceIdentity += installedHash;
             pipelineCapable = backend != tools.end() && installedHash == manifest.value("backend_sha256", "") &&
                 CacheCapable(std::filesystem::u8path(backend->second), installedHash);
+            if (r.measurement.gpu) {
+                deviceMetadata["installed_apk_sha256"] = installedHash;
+                if (installedHash != manifest.value("backend_sha256", ""))
+                    throw std::runtime_error("Installed replay APK differs from the GPU-capable configured APK. Install the newly built bundled APK before GPU measurement.");
+            }
         }
+        else if (r.measurement.gpu) throw std::runtime_error("Install the bundled GPU-capable replay APK before GPU measurement");
     }
     Json identity{{"schema", 1}, {"capture_sha256", captureHash}, {"target", target.Label()},
-        {"device_build", deviceIdentity}, {"backend_sha256", manifest.value("backend_sha256", "")}, {"overrides", overrides}};
-    const auto pipelineIdentity = Sha256Text(identity.dump());
+        {"device_build", deviceIdentity}, {"backend_sha256", manifest.value("backend_sha256", "")}, {"overrides", overrides},
+        {"swapchain_mode", r.swapchainMode}, {"memory_translation", memoryPolicy.at("effective")}};
+    auto pipelineRequest = identity;
+    if (r.measurement.gpu) {
+        // Shader staging locations are unique per session; target cache reuse depends
+        // on effective module bytes, not the temporary staging directory.
+        for (auto& replacement : pipelineRequest["overrides"]) replacement.erase("file");
+        pipelineRequest["profiling_mode"] = "single-frame";
+    }
+    const auto pipelineIdentity = Sha256Text(pipelineRequest.dump());
+    identity["memory_translation_policy"] = memoryPolicy;
     identity["frame"] = r.frame; identity["dump"] = r.dump; identity["outputs_only"] = r.outputsOnly; identity["prefix"] = r.prefix;
     identity["descriptor_images"]=r.descriptorImages;identity["validation"]=r.validation;
     identity["draw_inspection"]=r.drawInspection;
     if(r.drawInspection)identity["input_readback_protocol"]=2; // Exclude older image-only partial caches.
     identity["visualization"]=VisualizationConfig(r);
+    if(r.visualization=="silhouette")identity["outline_composite_encoding_protocol"]=1;
     identity["screen_off"]=r.screenOff;
     if(r.measurement.enabled)identity["measurement"]={{"frame_range",r.measurement.frameRange},{"quit_after",r.measurement.quitAfter}};
+    Json gpuRequest;
+    if (r.measurement.gpu) {
+        const auto timeoutSeconds = std::max<int64_t>(1, std::min<int64_t>(30, r.timeout.count() - 10));
+        gpuRequest = {{"protocol", 1}, {"mode", "isolated-frame"}, {"swapchain_mode", r.swapchainMode}, {"capture_sha256", captureHash},
+            {"memory_translation", memoryPolicy},
+            {"backend_sha256", manifest.at("backend_sha256")}, {"frames", r.measurement.gpuPlan.at("frames")},
+            {"output_file", (r.output / "gpu-measurement.json").u8string()},
+            {"timeout_ns", uint64_t(timeoutSeconds) * 1000000000ull}, {"overrides", Json::array()}};
+        if (!r.measurement.counterWindow.is_null()) {
+            gpuRequest["counter_window"] = r.measurement.counterWindow;
+            gpuRequest["counter_window"]["ready_file"] = (r.output / "perf-ready.json").u8string();
+            gpuRequest["counter_window"]["continue_file"] = (r.output / "perf-continue.json").u8string();
+        }
+        for (const auto& replacement : overrides) gpuRequest["overrides"].push_back({{"module", replacement.at("module")}, {"sha256", replacement.at("sha256")}});
+        gpuRequest["request_id"] = Sha256Text(captureHash + manifest.at("backend_sha256").get<std::string>() +
+            r.output.u8string() + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + gpuRequest.dump());
+        AtomicJson(r.output / "gpu-measurement-request.json", gpuRequest);
+        identity["measurement"]["gpu_mode"] = "isolated-frame";
+        identity["measurement"]["gpu_plan"] = r.measurement.gpuPlan;
+        if (!r.measurement.counterWindow.is_null()) identity["measurement"]["counter_window"] = r.measurement.counterWindow;
+    }
     identity["readback_options"]=r.dump.is_null()?Json():DumpOptions(r,"<session-output>");
     manifest["request_identity"] = identity;
     const auto cache = r.cacheDirectory.empty() ? std::filesystem::path{} : r.cacheDirectory / "results" / Sha256Text(identity.dump());
@@ -579,6 +804,29 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
         result.validationReport["source_capture"]=request.capture.u8string();AtomicJson(r.output/"validation.json",result.validationReport);
         if(!result.validationReport.value("enabled",false))throw std::runtime_error("Vulkan validation was requested but VK_LAYER_KHRONOS_validation was not enabled. Install/configure the validation layer. See "+(r.output/"validation.json").u8string());
     }
+    if (r.measurement.gpu) {
+        const auto file = r.output / "gpu-measurement.json";
+        if (!std::filesystem::is_regular_file(file)) throw std::runtime_error("Replay completed without a GPU measurement report. See replay.log; no CPU timing fallback is available.");
+        result.gpuMeasurement = ReadJson(file);
+        VerifyGpuMeasurementReport(gpuRequest, result.gpuMeasurement);
+        if (gpuRequest.contains("counter_window"))
+            result.gpuMeasurement["counter_window"] = ValidateFrameCounterWindow(gpuRequest,result.gpuMeasurement);
+        result.gpuMeasurement["memory_translation"] = memoryPolicy;
+        const bool cacheEnabled = !r.cacheDirectory.empty() && (target.android ? pipelineCapable : CacheCapable(std::filesystem::u8path(backend->second), manifest.value("backend_sha256", "")));
+        result.gpuMeasurement["provenance"] = {{"source_capture_sha256", sourceHash}, {"capture_sha256", captureHash},
+            {"backend_sha256", manifest.at("backend_sha256")}, {"request_id", gpuRequest.at("request_id")},
+            {"optimization", optimization}, {"device", deviceMetadata}, {"swapchain", result.gpuMeasurement.at("swapchain")}, {"memory_translation", memoryPolicy},
+            {"cache_policy", {{"result_cache", "bypassed"}, {"captured_pipeline_cache", "excluded"},
+                {"memory_translation", memoryPolicy.at("effective")},
+                {"target_pipeline_cache", cacheEnabled ? "allowed; load if present, save if missing" : "disabled"},
+                {"driver_cache_state", "unknown; uncontrolled"}, {"hardware_cache_state", "unknown; uncontrolled"}}},
+            {"cache_observations", {{"pipeline_cache_loaded", result.timings.value("pipeline_cache_loaded", false)},
+                {"pipeline_cache_saved", result.timings.value("pipeline_cache_saved", false)},
+                {"pipeline_cache_identity", result.timings.value("pipeline_cache_identity", "")},
+                {"pipeline_cache_sha256", result.timings.value("pipeline_cache_sha256", Json{})}}}};
+        result.gpuMeasurement["telemetry"] = result.timings.value("telemetry", Json::object());
+        AtomicJson(file, result.gpuMeasurement);
+    }
     if(r.measurement.enabled){
         const auto file=r.output/"measurement.json";
         if(!std::filesystem::is_regular_file(file))throw std::runtime_error("Replay completed without a measurement file (is the measurement range inside the capture?). See "+(r.output/"replay.log").u8string());
@@ -593,6 +841,7 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
             throw std::runtime_error("Replay completed without the requested frame image. See " + r.output.u8string());
     }
     for (const auto& [module, file] : r.overrides) {
+        if (r.measurement.gpu) continue; // Structured, hash-matched creation evidence was verified above.
         std::istringstream lines(result.log); std::string line; bool found = false;
         const auto name = "sh" + std::to_string(module);
         while (std::getline(lines, line)) if (line.find("Replacement shader found:") != std::string::npos) {
@@ -613,7 +862,8 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
     if(r.visualization=="silhouette"&&!hit){
         bool composed=false;
         for(const auto& asset:result.resources)if(asset.metadata.value("category","")=="output"&&asset.metadata.value("aspect","")=="COLOR"&&asset.metadata.value("location",0u)==0&&asset.file.extension()==".bmp"){
-            WriteBmp(asset.file,ComposeDrawOutline(LoadImage(r.outlineBaseImage),LoadImage(r.outlineCoverageImage),LoadImage(asset.file)));composed=true;
+            WriteBmp(asset.file,ComposeDrawOutline(LoadImage(r.outlineBaseImage),LoadImage(r.outlineCoverageImage),LoadImage(asset.file),2,
+                SourceEncodingForImage(asset.metadata.value("format",std::string{}))));composed=true;
         }
         if(!composed)throw std::runtime_error("Orange outline requires a readable COLOR 0 attachment");
     }
@@ -636,8 +886,10 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
             {"bytes", entry.file_size()}, {"sha256", Sha256File(entry.path(), cancel)}});
     manifest["complete"] = true; manifest["image"] = result.image.filename().u8string();
     manifest["artifact_cache_hit"] = hit;
+    manifest["swapchain"] = result.timings.value("swapchain", Json{{"requested", r.swapchainMode}, {"effective", nullptr}, {"source", "unavailable"}});
     manifest["validation"]=result.validationReport;
     if(r.measurement.enabled)manifest["measurement"]=result.measurement;
+    if(r.measurement.gpu)manifest["gpu_measurement"]=result.gpuMeasurement;
     manifest["backend_timing"] = result.timings;
     manifest["elapsed_seconds"] = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     manifest["override_count"] = r.overrides.size();

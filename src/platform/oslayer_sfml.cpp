@@ -4,6 +4,7 @@
 #include <SFML/Graphics/RenderWindow.hpp>
 #include <SFML/OpenGL.hpp>
 #include <SFML/Window/Event.hpp>
+#include <SFML/Window/Context.hpp>
 #include <imgui-SFML.h>
 
 #if PLATFORM_MACOS

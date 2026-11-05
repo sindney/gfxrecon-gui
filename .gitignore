@@ -23,6 +23,8 @@ crash/
 # Local tool bundles, session artifacts, and machine configuration
 .tools/
 .sessions/
+/reports/
+.pytest_cache/
 local-tools.json
 gfxrecon_gui.ini
 gfxrecon_layout.ini

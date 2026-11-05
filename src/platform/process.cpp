@@ -185,6 +185,7 @@ ProcessResult RunProcess(const ProcessRequest& r, const std::atomic_bool* cancel
     if (!job.value) Fail("CreateJobObjectW");
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (r.allowChildServices) limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
     if (!SetInformationJobObject(job.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) Fail("Set job limits");
     PROCESS_INFORMATION info{};
     if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, TRUE,
@@ -201,11 +202,22 @@ ProcessResult RunProcess(const ProcessRequest& r, const std::atomic_bool* cancel
     ProcessResult result;
     // Drain the pipe through EOF on a reader thread. A poll-and-exit loop can
     // lose short child output around process termination on Windows.
+    std::atomic_bool stopServiceReader{false};
     auto reader = std::async(std::launch::async, [&] {
         char buffer[8192];
         for (;;) {
+            DWORD requested = sizeof(buffer);
+            if (r.allowChildServices) {
+                // A service may retain an inherited writer after its client
+                // exits. Never block waiting for that unrelated service's EOF.
+                if (stopServiceReader.load()) break;
+                DWORD available = 0;
+                if (!PeekNamedPipe(read.value, nullptr, 0, nullptr, &available, nullptr)) break;
+                if (!available) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); continue; }
+                requested = std::min<DWORD>(requested, available);
+            }
             DWORD count = 0;
-            const BOOL ok = ReadFile(read.value, buffer, sizeof(buffer), &count, nullptr);
+            const BOOL ok = ReadFile(read.value, buffer, requested, &count, nullptr);
             const auto retain = std::min<size_t>(count, r.outputLimit - result.output.size());
             result.output.append(buffer, retain);
             result.outputTruncated |= retain != count;
@@ -226,8 +238,10 @@ ProcessResult RunProcess(const ProcessRequest& r, const std::atomic_bool* cancel
     }
     // Let final writes/helper shutdown reach EOF before closing this owned job.
     // Bound the grace period so a lingering inherited writer cannot hang us.
-    if (reader.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready)
+    if (reader.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
         TerminateJobObject(job.value, 0);
+        if (r.allowChildServices) stopServiceReader = true;
+    }
     reader.get();
     DWORD code = 0;
     GetExitCodeProcess(process.value, &code);

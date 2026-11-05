@@ -141,7 +141,8 @@ Json BatchProvenance(const DynamicDumpOptions& options, const std::string& captu
                      const ReplayTarget& target) {
     Json exec = Json::array(); for (const auto e : executions) exec.push_back(e);
     return {{"capture_sha256", captureSha256}, {"tier", options.tier}, {"full", options.full}, {"batch_draws", options.batchDraws},
-        {"batch", batchIndex}, {"executions", exec}, {"target", target.Label()}};
+        {"batch", batchIndex}, {"executions", exec}, {"target", target.Label()},
+        {"memory_translation", ReplayMemoryTranslationPolicy(options.memoryTranslation, target.android)}};
 }
 
 fs::path BatchFile(const fs::path& out, size_t n) {
@@ -208,13 +209,15 @@ DynamicDumpResult RunDynamicDump(const Capture& capture, const DumpIndex& index,
     size_t batchIndex = 0;
     for (const auto frame : frameList) {
         const auto batchFile = BatchFile(out, batchIndex);
-        const auto provenance = Json{{"kind", "frame"}, {"frame", frame}, {"capture_sha256", captureSha256}, {"tier", options.tier}, {"target", target.Label()}};
+        const auto provenance = Json{{"kind", "frame"}, {"frame", frame}, {"capture_sha256", captureSha256}, {"tier", options.tier}, {"target", target.Label()},
+            {"memory_translation", ReplayMemoryTranslationPolicy(options.memoryTranslation, target.android)}};
         if (fs::is_regular_file(batchFile)) {
             try { std::ifstream in(batchFile); const auto done = Json::parse(in); if (done.value("provenance", Json()) == provenance && done.value("status", "") == "ok") {
                 result.batches.push_back(done); ++batchIndex; continue; } } catch (...) {}
         }
         ReplayRequest request;
         request.capture = capture.source; request.expectedCaptureHash = captureSha256; request.cacheDirectory = replayCache;
+        request.memoryTranslation = options.memoryTranslation;
         request.frame = frame; request.prefix = "baseline"; request.outputsOnly = false; request.timeout = timeout; request.optimize = true;
         const auto dir = out / "dynamic" / ("frame-" + std::to_string(frame));
         fs::remove_all(dir); request.output = dir;
@@ -267,6 +270,7 @@ DynamicDumpResult RunDynamicDump(const Capture& capture, const DumpIndex& index,
         Json rejected; const auto dump = BuildBatchDumpRequest(capture, batch, rejected);
         ReplayRequest request;
         request.capture = capture.source; request.expectedCaptureHash = captureSha256; request.cacheDirectory = replayCache;
+        request.memoryTranslation = options.memoryTranslation;
         request.frame = capture.executions[batch.front()].frame; request.prefix = "baseline"; request.outputsOnly = !options.full;
         request.dump = dump; request.timeout = timeout; request.optimize = true; request.drawInspection = options.full; request.descriptorImages = options.full;
         const auto dir = out / "dynamic" / ("batch-" + std::to_string(batchIndex));

@@ -1,4 +1,5 @@
 #include "cli/cli.h"
+#include "analysis/relations.h"
 #include "platform/adb.h"
 #include "platform/device_lock.h"
 #include "core/tools.h"
@@ -162,7 +163,7 @@ Json Describe() {
     Json commands = Json::array();
     for (const auto& c : Commands())
         commands.push_back({{"name", c.Name()}, {"summary", c.summary}, {"arguments", c.positional}, {"options", options(c.options)}});
-    return {{"schema", kCliSchema}, {"dump_schema", kDumpSchema}, {"usage", "gfxrecon-cli <command> [<verb>] [arguments] [--options]"},
+    return {{"schema", kCliSchema}, {"dump_schema", kDumpSchema}, {"query_schema", kRelationQuerySchema}, {"usage", "gfxrecon-cli <command> [<verb>] [arguments] [--options]"},
         {"output", "Commands: stdout is one JSON document {ok, command, result | error{code,message,detail}}; stderr: progress and logs. Help is plain text."},
         {"help", "gfxrecon-cli help [command [verb]], --help or -h"},
         {"global_options", options(GlobalOptions())}, {"commands", commands},
@@ -229,6 +230,13 @@ void Help(const std::vector<std::string>& argv,std::ostream& out){
 std::pair<int, Json> ErrorJson(const std::exception_ptr& error) {
     try { std::rethrow_exception(error); }
     catch (const CliError& e) { Json j{{"code", e.code}, {"message", e.what()}}; if (!e.detail.is_null()) j["detail"] = e.detail; if(e.exit==kUsage)j["hint"]="Run gfxrecon-cli --help or gfxrecon-cli <command> --help.";return {e.exit, j}; }
+    catch (const RelationError& e) {
+        const auto exit = e.kind == RelationErrorKind::Usage ? kUsage : e.kind == RelationErrorKind::Cancelled ? kCancelled : e.kind == RelationErrorKind::MissingTool ? kMissingTool : kFailed;
+        Json error{{"code", e.code}, {"message", e.what()}};
+        if (!e.detail.is_null()) error["detail"] = e.detail;
+        if (exit == kUsage) error["hint"] = "Run gfxrecon-cli query fields --entity executions or gfxrecon-cli query --help.";
+        return {exit, error};
+    }
     catch (const AndroidUnlockRequired& e) {
         return {kHumanAction, {{"code", "unlock_device"}, {"message", e.what()},
             {"detail", {{"human_action", "unlock_device"}, {"serial", e.state.serial}, {"secure", e.state.secure}, {"locked", e.state.locked}}}}};

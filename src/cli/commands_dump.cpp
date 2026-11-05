@@ -144,9 +144,13 @@ void WriteShader(Sink& sink, const std::filesystem::path& cacheDir, uint64_t mod
 }
 
 Json Dump(Context& context, const Args& args) {
+    const auto memoryTranslation = args.Get("memory-translation", "default");
+    try { (void)ResolveMemoryTranslation(memoryTranslation, false); }
+    catch (const std::exception&) { throw Usage("--memory-translation expects default, none, remap, realign or rebind"); }
     const auto started = Clock::now();
     const auto tier = args.Get("dynamic", "none");
     if (tier != "none" && tier != "frame" && tier != "pass" && tier != "draws" && tier != "full") throw Usage("--dynamic must be none, frame, pass, draws or full");
+    if (tier == "none" && memoryTranslation != "default") throw Usage("--memory-translation applies to dynamic replay; use --dynamic");
     const auto filter = ParseFilter(args.All("draws"));
     if (tier == "full" && !filter.any) throw Usage("--dynamic full requires a --draws filter (block=, pass= or pipeline=); use 'replay draw --full' to probe a single draw");
     const auto captureFile = std::filesystem::absolute(std::filesystem::u8path(args.Get("capture")));
@@ -163,8 +167,9 @@ Json Dump(Context& context, const Args& args) {
     const auto disassembler = ToolPath(context, "disassembler");
     if (!disassembler.empty() && std::filesystem::is_regular_file(std::filesystem::u8path(disassembler))) tools["disassembler_sha256"] = Sha256File(std::filesystem::u8path(disassembler), context.cancel);
     else tools["disassembler_sha256"] = nullptr;
-    const Json provenance{{"schema", kDumpSchema}, {"capture_sha256", sha}, {"tools", tools},
-        {"options", {{"frames", frames}, {"draws", filter.ToJson()}, {"dynamic", tier}}}};
+    Json dumpOptions{{"frames", frames}, {"draws", filter.ToJson()}, {"dynamic", tier}};
+    if (tier != "none") dumpOptions["memory_translation"] = memoryTranslation;
+    const Json provenance{{"schema", kDumpSchema}, {"capture_sha256", sha}, {"tools", tools}, {"options", dumpOptions}};
 
     const auto manifestPath = out / "manifest.json";
     if (std::filesystem::exists(out)) {
@@ -341,6 +346,7 @@ Json Dump(Context& context, const Args& args) {
     if (tier != "none") {
         const auto target = ResolveTarget(context, capture);
         DynamicDumpOptions doptions;
+        doptions.memoryTranslation = memoryTranslation;
         doptions.tier = tier; doptions.batchDraws = static_cast<size_t>(args.Number("batch-draws", 64));
         doptions.maxBytes = args.Number("max-bytes", 0);
         // Executions selected by --draws (needed by tiers that restrict to a filter).
@@ -398,6 +404,7 @@ void RegisterDumpCommands() {
          {"draws", "FILTER", "Draw selection for dynamic tiers: block=B[,B] | pass=<frame>/<PPP> | pipeline=P (repeatable). Static data is written for all draws of the selected frames; the filter is recorded in index.json (dynamic_selected)", true},
          {"batch-draws", "N", "Draws per batched replay (default 64; bounded by device memory)"},
          {"max-bytes", "N", "Stop scheduling dynamic batches after roughly N bytes of dynamic data (remaining draws are skipped)"},
+         {"memory-translation", "default|none|remap|realign|rebind", "Memory portability policy for dynamic replays (default: platform default)", false, false, "default"},
          {"dynamic", "none|frame|pass|draws|full",
           "Omitted: static only. Bare --dynamic: pass outputs. draws: per-draw outputs (potentially slow/large). full: inputs and geometry; requires --draws. Use replay draw --full for one draw.",
           false, false, "", "pass"},

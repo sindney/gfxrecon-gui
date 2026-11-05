@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <vector>
 #include <chrono>
+#include <thread>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -93,6 +94,25 @@ void AtomicJson(const std::filesystem::path& file, const nlohmann::json& value) 
     auto temporary = file;
     temporary += "." + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".partial";
     { std::ofstream output(temporary, std::ios::binary); if (!(output << value.dump(2))) throw std::runtime_error("Cannot write artifact manifest"); }
-    std::filesystem::rename(temporary, file);
+    std::error_code error;
+#ifdef _WIN32
+    // File scanners/readers may briefly deny replacement even after our writer
+    // has closed. Retry only transient Windows access/share/lock failures;
+    // never remove the destination, which would lose the atomic-write guarantee.
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(250);
+    for(;;){
+        std::filesystem::rename(temporary,file,error);
+        if(!error)return;
+        const bool transient=error==std::errc::permission_denied ||
+            (error.category()==std::system_category() && (error.value()==ERROR_SHARING_VIOLATION || error.value()==ERROR_LOCK_VIOLATION));
+        if(!transient||std::chrono::steady_clock::now()>=deadline)break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+#else
+    std::filesystem::rename(temporary,file,error);
+    if(!error)return;
+#endif
+    std::error_code cleanupError;std::filesystem::remove(temporary,cleanupError);
+    throw std::filesystem::filesystem_error("rename",temporary,file,error);
 }
 } // namespace gfx

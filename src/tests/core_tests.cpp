@@ -24,6 +24,7 @@
 #include <future>
 #include <iostream>
 #include <stdexcept>
+#include <sstream>
 #include <thread>
 #include <cstring>
 #ifdef _WIN32
@@ -53,6 +54,18 @@ void RunExportTests(const std::filesystem::path& root);
 void RunImageDecodeTests(const std::filesystem::path& root);
 void RunCliTests(const std::filesystem::path& root);
 void RunReplayCliTests(const std::filesystem::path& root);
+void GpuMeasurementTests(const std::filesystem::path& root);
+void MeasurementTelemetryTests();
+void PerfSessionTests(const std::filesystem::path& root);
+void GpuCounterTests(const std::filesystem::path& root);
+void PerformanceSeriesTests();
+void ImageDisplayTests(const std::filesystem::path& root);
+void ImageDisplayOutlineTests(const std::filesystem::path& root);
+void RelationStorageTests(const std::filesystem::path& root);
+void RelationCacheTests(const std::filesystem::path& root);
+void RelationQueryTests(const std::filesystem::path& root);
+void RelationCliTests(const std::filesystem::path& root);
+gfx::Json RelationBenchmark(const std::filesystem::path& root, size_t executionCount = 100000);
 }
 namespace {
 using Color = TextEditor::PaletteIndex;
@@ -314,6 +327,87 @@ void ResourceTests(const std::filesystem::path& dir) {
     for (const auto& name : {"buffer.bin", "image.bmp", "fixture_dr.json", "inputs_dr.json"}) std::filesystem::remove(folder / name);
     std::filesystem::remove(folder);
 }
+int ProcessServiceFixture(int argc, char** argv) {
+#ifdef _WIN32
+    if (argc == 4 && std::string(argv[1]) == "--process-service-child") {
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::stoul(argv[3])));
+        const auto file = std::filesystem::u8path(argv[2]); auto temporary = file; temporary += ".partial";
+        { std::ofstream output(temporary, std::ios::binary); output << GetCurrentProcessId() << '\n'; if (!output) return 1; }
+        std::filesystem::rename(temporary, file); return 0;
+    }
+    if (argc == 6 && std::string(argv[1]) == "--process-service-client") {
+        const auto flag = std::filesystem::u8path(argv[3]);
+        const bool inheritedWriter = std::string(argv[5]) == "inherit-writer";
+        if (inheritedWriter) {
+            // Deliberately retain the client's output pipe in a finite child to
+            // verify the explicit service policy cannot hang waiting for EOF.
+            const auto exe = std::filesystem::u8path(argv[2]).wstring();
+            std::wstring command = L"\"" + exe + L"\" --process-service-child \"" + flag.wstring() + L"\" ";
+            command += std::filesystem::u8path(argv[4]).wstring();
+            STARTUPINFOW startup{}; startup.cb = sizeof(startup); startup.dwFlags = STARTF_USESTDHANDLES;
+            startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE); startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE); startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+            PROCESS_INFORMATION process{};
+            if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) return 2;
+            CloseHandle(process.hThread); CloseHandle(process.hProcess);
+        } else {
+            gfx::ProcessRequest child{argv[2], {"--process-service-child", argv[3], argv[4]}};
+            child.stdoutFile = flag; child.stdoutFile += ".log";
+            gfx::GameProcess service(child); // Its private job deliberately has no kill-on-close policy.
+        }
+        { auto started = flag; started += ".started"; std::ofstream signal(started); signal << "started"; }
+        std::cout << "client-output\n" << std::flush;
+        if (std::string(argv[5]) == "wait") std::this_thread::sleep_for(std::chrono::seconds(10));
+        return 0;
+    }
+#else
+    (void)argc; (void)argv;
+#endif
+    return -1;
+}
+void ProcessServiceTests(const std::string& self, const std::filesystem::path& dir) {
+#ifdef _WIN32
+    auto waitFor = [](const std::filesystem::path& file) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (!std::filesystem::exists(file) && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CHECK(std::filesystem::exists(file));
+    };
+    auto waitForService = [&](const std::filesystem::path& file) {
+        waitFor(file); DWORD pid = 0; { std::ifstream input(file); input >> pid; } CHECK(pid);
+        const auto process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+        if (process) { const auto state = WaitForSingleObject(process, 2000); CloseHandle(process); CHECK(state == WAIT_OBJECT_0); }
+    };
+    auto client = [&](const char* name, const char* delay, const char* mode, bool services) {
+        gfx::ProcessRequest request{self, {"--process-service-client", self, (dir / name).u8string(), delay, mode}};
+        request.allowChildServices = services; request.timeout = std::chrono::seconds(3); return request;
+    };
+    const auto ordinary = dir / "owned-service-child";
+    CHECK(gfx::RunProcess(client("owned-service-child", "500", "exit", false)).Success());
+    std::this_thread::sleep_for(std::chrono::milliseconds(650));
+    CHECK(!std::filesystem::exists(ordinary)); // Default policy still kills descendant workloads.
+    const auto service = dir / "allowed-service-child";
+    const auto allowed = gfx::RunProcess(client("allowed-service-child", "250", "exit", true));
+    CHECK(allowed.Success() && (allowed.output == "client-output\n" || allowed.output == "client-output\r\n")); waitForService(service);
+    const auto writer = dir / "allowed-inherited-writer";
+    CHECK(gfx::RunProcess(client("allowed-inherited-writer", "1000", "inherit-writer", true)).Success());
+    CHECK(!std::filesystem::exists(writer)); // It returned before the service closed its inherited writer.
+    waitForService(writer);
+    const auto cancellation = dir / "allowed-cancelled-client";
+    auto request = client("allowed-cancelled-client", "500", "wait", true);
+    std::atomic_bool cancel{false};
+    auto pending = std::async(std::launch::async, [&] { return gfx::RunProcess(request, &cancel); });
+    auto started = cancellation; started += ".started"; waitFor(started); cancel = true;
+    CHECK(pending.get().cancelled); waitForService(cancellation); // The client is owned; the child service remains independent.
+    for (const auto* name : {"owned-service-child", "allowed-service-child", "allowed-inherited-writer", "allowed-cancelled-client"}) {
+        const auto file = dir / name; std::filesystem::remove(file);
+        auto extra = file; extra += ".started"; std::filesystem::remove(extra);
+        extra = file; extra += ".log"; std::filesystem::remove(extra);
+    }
+#else
+    (void)self; (void)dir;
+#endif
+}
+
 void ProcessTests(const std::string& self, const std::filesystem::path& dir) {
     const std::vector<std::string> args = {"--echo", "", "white space", "quote\"slash\\", "trailing\\", "$(not-a-command);&", u8"着色器"};
     gfx::ProcessRequest r{self, args};
@@ -353,6 +447,7 @@ void ProcessTests(const std::string& self, const std::filesystem::path& dir) {
     CHECK(gfx::RunProcess(r, &cancel).cancelled);
     r.arguments = {"--echo", std::string(10000, 'a')}; r.outputLimit = 100;
     CHECK(gfx::RunProcess(r).outputTruncated);
+    ProcessServiceTests(self, dir);
 }
 }
 int main(int argc, char** argv) {
@@ -373,6 +468,7 @@ int main(int argc, char** argv) {
     for (auto& s : utf8) pointers.push_back(s.data());
     argc = wideCount; argv = pointers.data();
 #endif
+    if (const auto fixture = ProcessServiceFixture(argc, argv); fixture >= 0) return fixture;
     if(argc==3 && std::getenv("GFXRECON_GUI_TEST_OPTIMIZER") && std::filesystem::is_regular_file(std::filesystem::u8path(argv[1]))) {
         const std::string mode=std::getenv("GFXRECON_GUI_TEST_OPTIMIZER");
         if(const auto count=std::getenv("GFXRECON_GUI_TEST_OPTIMIZER_COUNTER")){std::ofstream out(std::filesystem::u8path(count),std::ios::app);out<<'x';}
@@ -543,6 +639,41 @@ int main(int argc, char** argv) {
     const auto dir = std::filesystem::temp_directory_path() / ("gfx-gui-tests-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     try {
         std::filesystem::create_directories(dir);
+        if (argc == 2 && std::string(argv[1]) == "--image-display-tests") {
+            gfx::tests::ImageDisplayTests(dir);
+            gfx::tests::ImageDisplayOutlineTests(dir);
+            std::filesystem::remove(dir); std::cout << "Image display and outline checks passed\n"; return 0;
+        }
+        if (argc == 2 && std::string(argv[1]) == "--replay-cli-tests") {
+            gfx::tests::RunCliTests(dir);
+            gfx::tests::RunReplayCliTests(dir);
+            std::filesystem::remove(dir); std::cout << "CLI and replay CLI checks passed\n"; return 0;
+        }
+        if (argc >= 2 && std::string(argv[1]) == "--relation-benchmark") {
+            std::cout << gfx::tests::RelationBenchmark(dir, argc > 2 ? std::stoull(argv[2]) : 100000).dump(2) << '\n';
+            return 0;
+        }
+        if (argc == 2 && std::string(argv[1]) == "--relation-tests") {
+            gfx::tests::RelationStorageTests(dir);
+            gfx::tests::RelationCacheTests(dir);
+            gfx::tests::RelationQueryTests(dir);
+            gfx::tests::RelationCliTests(dir);
+            std::filesystem::remove(dir); std::cout << "Capture relation checks passed\n"; return 0;
+        }
+        if (argc == 2 && std::string(argv[1]) == "--process-service-tests") {
+            ProcessServiceTests(std::filesystem::absolute(argv[0]).u8string(), dir);
+            std::filesystem::remove(dir); std::cout << "Process child-service policy checks passed\n"; return 0;
+        }
+        if (argc == 2 && (std::string(argv[1]) == "--gpu-measurement-tests" || std::string(argv[1]) == "--perf-session-tests")) {
+            gfx::tests::GpuMeasurementTests(dir);
+            gfx::tests::MeasurementTelemetryTests();
+            gfx::tests::PerfSessionTests(dir);
+            gfx::tests::GpuCounterTests(dir);
+            gfx::tests::PerformanceSeriesTests();
+            std::filesystem::remove(dir);
+            std::cout << "GPU measurement and telemetry checks passed\n";
+            return 0;
+        }
         const auto validation=gfx::ParseValidationLog("[gfxrecon] INFO - Replay has added the following required layers to VkInstanceCreateInfo:\n[gfxrecon] INFO - \tVK_LAYER_KHRONOS_validation\n[gfxrecon] ERROR - VUID-VkGraphicsPipelineCreateInfo-test-00001 wrong pipeline\n[gfxrecon] WARNING - VUID-vkCmdDraw-test-00002 warning\n");
         CHECK(validation["enabled"]==true&&validation["errors"]==1&&validation["warnings"]==1);
         CHECK(!gfx::ParseValidationLog("Replay has removed layers:\n\tVK_LAYER_KHRONOS_validation")["enabled"].get<bool>());
@@ -580,7 +711,18 @@ int main(int argc, char** argv) {
         gfx::tests::RunMeshTests(dir);
         gfx::tests::RunExportTests(dir);
         gfx::tests::RunImageDecodeTests(dir);
+        gfx::tests::ImageDisplayTests(dir);
+        gfx::tests::ImageDisplayOutlineTests(dir);
         gfx::tests::RunCliTests(dir);
+        gfx::tests::GpuMeasurementTests(dir);
+        gfx::tests::MeasurementTelemetryTests();
+        gfx::tests::PerfSessionTests(dir);
+        gfx::tests::GpuCounterTests(dir);
+        gfx::tests::PerformanceSeriesTests();
+        gfx::tests::RelationStorageTests(dir);
+        gfx::tests::RelationCacheTests(dir);
+        gfx::tests::RelationQueryTests(dir);
+        gfx::tests::RelationCliTests(dir);
         gfx::tests::RunReplayCliTests(dir);
         std::filesystem::remove(dir / "fixture.jsonl"); std::filesystem::remove(dir);
         std::cout << "Core checks passed\n"; return 0;

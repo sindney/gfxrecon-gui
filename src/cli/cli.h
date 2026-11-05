@@ -98,8 +98,9 @@ void RegisterQueryCommands();   // info, frames, events, draw, pipeline, object
 void RegisterDumpCommands();    // dump
 void RegisterReplayCommands();  // replay frame/draw, compare, shader *, perf
 void RegisterCaptureCommands(); // capture *
+void RegisterRelationCommands(); // index *, query *
 inline void RegisterAll() {
     if (!Commands().empty()) return;
-    RegisterCoreCommands(); RegisterQueryCommands(); RegisterDumpCommands(); RegisterReplayCommands(); RegisterCaptureCommands();
+    RegisterCoreCommands(); RegisterQueryCommands(); RegisterDumpCommands(); RegisterReplayCommands(); RegisterCaptureCommands(); RegisterRelationCommands();
 }
 } // namespace gfx::cli

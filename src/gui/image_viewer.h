@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <functional>
 #include <imgui.h>
 #include "analysis/image_orientation.h"
 #include "analysis/image_display.h"
@@ -12,19 +13,23 @@ namespace gfx {
 class ImageViewer {
 public:
     void LoadBmp(const std::filesystem::path& path,const std::string& aspect = {},const std::string& format = {});
-    void LoadPng(const std::filesystem::path& path);
-    void Draw(const std::string& details = {}, const std::string& tooltip = {});
+    void LoadPng(const std::filesystem::path& path,const std::string& format = {});
+    // Draw selectors and image transforms share the first row; color controls
+    // occupy the second row. Empty views display only their placeholder.
+    void Draw(const std::string& details = {}, const std::string& tooltip = {},
+              const std::function<void()>& beforeChannels = {});
     void Release();
     void AbsoluteDifference(const ImageViewer& baseline, const ImageViewer& modified);
     void MakeThumbnail(const ImageViewer& image);
     bool DrawThumbnail(const char* id, float height = 68) const;
-    void LoadThumbnailBmp(const std::filesystem::path& path);
+    void LoadThumbnailBmp(const std::filesystem::path& path,const std::string& aspect = {},const std::string& format = {});
     bool DrawPreview(const char* id, ImVec2 size, bool selected) const;
     std::array<unsigned char, 4> Pixel(int x, int y) const;
     int Width() const { return width_; }
     int Height() const { return height_; }
     float Zoom() const { return zoom_; }
     bool SrgbDisplay() const { return srgbDisplay_; }
+    ImageSourceEncoding SourceEncoding() const { return sourceEncoding_; }
     const ImageOrientation& Orientation()const{return orientation_;}
     const ImageDisplayRange& Range()const{return range_;}
     std::array<unsigned char,4> DisplayPixel(int x,int y)const;
@@ -36,6 +41,8 @@ private:
     float zoom_ = 0.5f;
     bool fitToView_ = true;
     bool srgbDisplay_ = true;
+    ImageSourceEncoding sourceEncoding_ = ImageSourceEncoding::Srgb;
+    std::string sourceFormat_;
     bool channels_[4] = {true, true, true, true};
     std::vector<unsigned char> rgba_;
     std::string name_;

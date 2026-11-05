@@ -1,8 +1,11 @@
 #include "cli/cli.h"
 #include "analysis/export.h"
+#include "analysis/relations.h"
 
 #include <algorithm>
 #include <fstream>
+#include <limits>
+#include <sstream>
 
 namespace gfx::cli {
 namespace {
@@ -13,6 +16,7 @@ Json Opened(const Context& context, const Args& args, ImportResult& imported) {
 }
 uint64_t Id(const Args& args, const char* what) {
     if (args.positional.empty()) throw Usage(std::string("Missing ") + what + " id");
+    if (args.positional[0].empty() || args.positional[0][0] == '-' || args.positional[0][0] == '+') throw Usage(std::string(what) + " id must be a non-negative integer");
     try { size_t used = 0; const auto value = std::stoull(args.positional[0], &used, 0); if (used == args.positional[0].size()) return value; } catch (...) {}
     throw Usage(std::string(what) + " id must be a non-negative integer");
 }
@@ -58,15 +62,61 @@ Json Events(Context& context, const Args& args) {
     return result;
 }
 Json DrawQuery(Context& context, const Args& args) {
+    if (args.Has("execution") == args.Has("block")) throw Usage("Specify exactly one of --execution I or --block B");
+    if (args.Has("execution") && args.Has("occurrence")) throw Usage("--occurrence requires --block and conflicts with --execution");
+    auto number = [&](const char* name) {
+        if (args.Get(name).empty() || args.Get(name).front() == '-' || args.Get(name).front() == '+') throw Usage(std::string("--") + name + " expects a non-negative integer");
+        return args.Number(name, 0);
+    };
+    const auto selector = number(args.Has("execution") ? "execution" : "block");
+    const auto occurrence = args.Has("occurrence") ? number("occurrence") : 0;
+    if (occurrence > std::numeric_limits<uint32_t>::max()) throw Usage("--occurrence is out of range");
+    if (args.Has("columns") || args.Has("section")) {
+        RelationQuery query;
+        if (args.Has("execution")) query.filters.executions = {selector};
+        else { query.filters.blocks = {selector}; query.filters.occurrence = static_cast<uint32_t>(occurrence); }
+        auto names = [&](const char* name, std::vector<std::string>& out) {
+            for (const auto& text : args.All(name)) {
+                std::istringstream input(text); std::string value;
+                while (std::getline(input, value, ',')) {
+                    auto first = value.find_first_not_of(" \t\r\n"), last = value.find_last_not_of(" \t\r\n");
+                    if (first == std::string::npos) throw Usage(std::string("--") + name + " contains an empty value");
+                    out.push_back(value.substr(first, last - first + 1));
+                }
+                if (text.empty() || text.back() == ',') throw Usage(std::string("--") + name + " contains an empty value");
+            }
+        };
+        names("columns", query.columns); names("section", query.sections); ValidateRelationQuery(query);
+        RelationBuildOptions options; options.progress = [&](const std::string& text) { context.Progress(text); };
+        const auto index = EnsureRelationIndex(std::filesystem::u8path(args.Get("capture")), context.CaptureCache(), context.tools, options, context.cancel);
+        return QueryRelations(index, query, context.cancel).ToJson();
+    }
     ImportResult imported; Opened(context, args, imported);
     const auto& c = *imported.capture;
-    const auto execution = FindExecution(c, args.Number("block", 0), static_cast<size_t>(args.Number("occurrence", 0)));
+    if (args.Has("execution") && selector >= c.executions.size()) throw CliError(kFailed, "draw_not_found", "Submitted execution index is out of range", {{"execution", selector}});
+    const auto execution = args.Has("execution") ? static_cast<size_t>(selector) : FindExecution(c, selector, static_cast<size_t>(occurrence));
     // The result IS the draw.json document (links are dump-root relative), so queries equal dumped files.
     return ExportDraw(c, DumpIndex::Build(c), execution);
 }
 Json PipelineQuery(Context& context, const Args& args) {
-    ImportResult imported; Opened(context, args, imported);
     const auto id = Id(args, "pipeline");
+    if (args.Has("columns") || args.Has("section")) {
+        RelationQuery query; query.entity = RelationEntity::Pipelines; query.filters.pipelines = {id};
+        for (const auto* key : {"columns", "section"}) for (const auto& text : args.All(key)) {
+            std::istringstream input(text); std::string value;
+            while (std::getline(input, value, ',')) {
+                const auto first = value.find_first_not_of(" \t\r\n"), last = value.find_last_not_of(" \t\r\n");
+                if (first == std::string::npos) throw Usage(std::string("--") + key + " contains an empty value");
+                (std::string(key) == "columns" ? query.columns : query.sections).push_back(value.substr(first, last - first + 1));
+            }
+            if (text.empty() || text.back() == ',') throw Usage(std::string("--") + key + " contains an empty value");
+        }
+        ValidateRelationQuery(query);
+        RelationBuildOptions options; options.progress = [&](const std::string& text) { context.Progress(text); };
+        const auto index = EnsureRelationIndex(std::filesystem::u8path(args.Get("capture")), context.CaptureCache(), context.tools, options, context.cancel);
+        return QueryRelations(index, query, context.cancel).ToJson();
+    }
+    ImportResult imported; Opened(context, args, imported);
     try { return ExportPipeline(*imported.capture, id); }
     catch (const std::out_of_range& e) { throw CliError(kFailed, "pipeline_not_found", e.what(), {{"id", id}}); }
 }
@@ -87,10 +137,16 @@ void RegisterQueryCommands() {
     eventOptions.push_back({"limit", "N", "Maximum events returned", false, false, "100"});
     Register({"events", "", "List recorded API calls in block order with arguments", {}, eventOptions, Events});
     auto drawOptions = kCaptureOption;
-    drawOptions.push_back({"block", "B", "Block number of the draw/dispatch call", false, true});
-    drawOptions.push_back({"occurrence", "K", "K-th submitted execution of that block (0-based)", false, false, "0"});
+    drawOptions.push_back({"block", "B", "Block number of the draw/dispatch call (alternative to --execution)"});
+    drawOptions.push_back({"execution", "I", "Submitted execution index (0-based; alternative to --block)"});
+    drawOptions.push_back({"occurrence", "K", "K-th submitted execution of --block (0-based; default 0)"});
+    drawOptions.push_back({"columns", "NAMES", "Opt into a projected gfxrecon-query/1 response", true});
+    drawOptions.push_back({"section", "NAMES", "Opt into named relation detail sections", true});
     Register({"draw", "", "Static data of one submitted draw/dispatch; equals the dump's draw.json", {}, drawOptions, DrawQuery});
-    Register({"pipeline", "", "Pipeline create info and shader stages; equals the dump's pipelines/<id>.json", {"ID"}, kCaptureOption, PipelineQuery});
+    auto pipelineOptions = kCaptureOption;
+    pipelineOptions.push_back({"columns", "NAMES", "Opt into a projected gfxrecon-query/1 response", true});
+    pipelineOptions.push_back({"section", "NAMES", "Opt into named relation detail sections", true});
+    Register({"pipeline", "", "Pipeline create info and shader stages; equals the dump's pipelines/<id>.json", {"ID"}, pipelineOptions, PipelineQuery});
     Register({"object", "", "Object type, name, lifetime and create info", {"ID"}, kCaptureOption, ObjectQuery});
 }
 } // namespace gfx::cli

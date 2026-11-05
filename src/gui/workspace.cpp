@@ -88,6 +88,9 @@ void Workspace::Init(const std::filesystem::path& dir) {
             captureExecutable_ = saved.value("capture_executable", std::string{});
             captureWorkingDirectory_ = saved.value("capture_working_directory", std::string{});
             windowsArguments_ = saved.value("windows_arguments", std::string{});
+            const auto memory = saved.value("memory_translation", std::string("default"));
+            if (memory == "default" || memory == "none" || memory == "remap" || memory == "realign" || memory == "rebind") memoryTranslation_ = memory;
+            else LOGW("settings") << "Ignoring unsupported memory translation preference: " << memory;
         } catch (const std::exception& e) { LOGW("settings") << e.what(); }
     }
     RefreshRecoveries();
@@ -110,7 +113,7 @@ void Workspace::Init(const std::filesystem::path& dir) {
 void Workspace::SaveConfiguration() const {
     WriteText(settingsDir_ / "gfxrecon_tools.json", Json(tools_).dump(2));
     WriteText(settingsDir_ / "gfxrecon_preferences.json", Json{{"replay_mode", static_cast<int>(replayMode_)}, {"android_serial", androidSerial_}, {"optimize_replay",optimizeReplay_},{"validation_replay",validationReplay_},{"phone_screen_off",phoneScreenOff_},
-        {"full_draw_replay",fullDrawReplay_},
+        {"full_draw_replay",fullDrawReplay_}, {"memory_translation", memoryTranslation_},
         {"capture_mode", captureMode_}, {"capture_package", capturePackage_}, {"capture_arguments", captureArguments_},
         {"capture_frames", captureFrames_}, {"capture_style", captureStyle_}, {"capture_length", captureLength_}, {"capture_executable", captureExecutable_},
         {"capture_working_directory", captureWorkingDirectory_}, {"windows_arguments", windowsArguments_}}.dump(2));
@@ -119,8 +122,21 @@ void Workspace::SetFullDrawReplay(bool full) {
     fullDrawReplay_=full;
     try { SaveConfiguration(); } catch(const std::exception& error) { LOGE("settings")<<error.what(); }
 }
+void Workspace::SetMemoryTranslation(const std::string& mode) {
+    if (mode != "default" && mode != "none" && mode != "remap" && mode != "realign" && mode != "rebind")
+        throw std::invalid_argument("Unsupported replay memory translation mode");
+    if (memoryTranslation_ == mode || Busy()) return;
+    memoryTranslation_ = mode; ++selectionGeneration_;
+    InvalidateDrawResources(); mesh_.Release(); meshGeneration_ = meshRequestGeneration_ = 0;
+    image_.Release(); modifiedImage_.Release(); differenceImage_.Release(); hasComparison_ = false;
+    for (auto& [frame, preview] : frameImages_) preview.image.Release();
+    frameImages_.clear(); frameStatuses_.clear(); failedFrames_.clear(); thumbnailQueue_.clear();
+    pendingDraw_ = false; pendingFrame_ = 0; perfCapabilities_ = Json(); perfResult_ = Json(); perfPlotCache_.clear();
+    jobFailed_ = false; status_ = "Replay memory translation: " + mode + ". Render again to apply it.";
+    try { SaveConfiguration(); } catch (const std::exception& error) { LOGE("settings") << error.what(); }
+}
 void Workspace::SetReplayMode(ReplayMode mode) {
-    if (replayMode_ != mode) { replayMode_ = mode;InvalidateDrawResources(); ++selectionGeneration_; }
+    if (replayMode_ != mode) { replayMode_ = mode;InvalidateDrawResources(); perfCapabilities_ = Json(); ++selectionGeneration_; }
 }
 void Workspace::Shutdown() {
     cancel_ = true;
@@ -146,6 +162,7 @@ void Workspace::Start(const std::string& name, std::function<WorkspaceResult()> 
     jobExecution_=-1;
     jobFailed_ = false;
     jobName_ = name;
+    perfJob_ = kind == JobKind::Perf;
     status_ = name;
     jobPanels_ = {"Console"};
     jobFrame_ = frame;
@@ -159,13 +176,19 @@ void Workspace::Start(const std::string& name, std::function<WorkspaceResult()> 
     case JobKind::Resource: panels({"Resources", "Image"}); break;
     case JobKind::Capture: panels({"Frames", "Events", "Pipeline"}); break;
     case JobKind::Tools: break;
+    case JobKind::Perf: panels({"Perf"}); break;
     }
     CompleteOperation(PanelState::Running, name);
     LOGI("jobs") << "Started: " << name; loggedStatus_ = status_;
     job_ = std::async(std::launch::async, std::move(work));
 }
 void Workspace::Poll() {
+    if (Busy() && perfJob_) {
+        std::lock_guard<std::mutex> lock(perfProgressMutex_);
+        if (!perfProgress_.empty()) panelStatuses_["Perf"].detail = perfProgress_;
+    }
     if (!Busy() || job_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    perfJob_ = false;
     const bool automatic = autoReplayRunning_; autoReplayRunning_ = false;
     try {
         auto result = job_.get();
@@ -179,6 +202,39 @@ void Workspace::Poll() {
         if (result.selectionGeneration && result.selectionGeneration != selectionGeneration_) {
             status_ = "Job finished for a previous selection; its artifacts were retained.";
             CompleteOperation(PanelState::Inactive, status_); LOGI("jobs") << status_; loggedStatus_ = status_;
+            return;
+        }
+        if (result.perfOperation) {
+            if (result.perfProbe) perfCapabilities_ = std::move(result.perfData);
+            else if (!result.perfData.is_null()) { perfResult_ = std::move(result.perfData); perfFitPlots_ = true; perfPlotsInitialized_ = false; perfPlotCache_.clear(); perfSettingsRequest_ = -1; }
+            status_ = result.message;
+            jobFailed_ = result.failed;
+            CompleteOperation(result.failed ? PanelState::Failed : PanelState::Success, status_);
+            if (result.failed) { LOGE("perf") << status_; }
+            else { LOGI("perf") << status_; }
+            if (!result.failed && !result.perfProbe && perfResult_.is_object()) {
+                std::string warning;
+                for (const auto& run : perfResult_.value("runs", Json::array())) {
+                    const auto state = run.value("gpu", Json::object()).value("sustained", Json::object());
+                    if (state.value("missed_deadlines", uint64_t(0))) {
+                        std::ostringstream text;
+                        text.precision(3);
+                        text << run.value("variant", "baseline") << ": completed at " << state.value("achieved_fps", 0.0)
+                             << " / " << perfResult_.value("policy", Json::object()).value("fps", 0.0)
+                             << " FPS (" << state.value("missed_deadlines", uint64_t(0))
+                             << " missed deadlines). Measurements retained; comparison deltas suppressed.";
+                        const auto message = text.str();
+                        LOGW("perf") << message; if (warning.empty()) warning = message;
+                    }
+                }
+                for (const auto& comparison : perfResult_.value("comparisons", Json::array()))
+                    if (comparison.value("status", "") != "comparable") {
+                        const auto message = "Comparison unavailable: " + comparison.value("reason", "measurement policies differ");
+                        LOGW("perf") << message; if (warning.empty()) warning = message;
+                    }
+                if (!warning.empty()) panelStatuses_["Perf"] = {PanelState::Warning, warning};
+            }
+            loggedStatus_ = status_;
             return;
         }
         if (result.thumbnailOnly) {
@@ -207,6 +263,8 @@ void Workspace::Poll() {
             // Keep the capture completion modal in front until Open capture is clicked.
             focusImage_=!captureInProgress_&&result.capture->source.extension()==".gfxr";
             capture_ = std::move(result.capture);
+            perfCapabilities_ = Json(); perfResult_ = Json(); perfValidationError_.clear(); perfPlotCache_.clear();
+            panelStatuses_["Perf"] = {PanelState::Inactive, "Capture changed; probe GPU performance capabilities."};
             session_ = result.session;
             selectedEvent_ = 0; frame_ = 1; inspectedPipeline_ = 0;drawVisualization_=0;
             displayedDraw_ = -1; pendingDraw_ = false;
@@ -298,7 +356,7 @@ void Workspace::Poll() {
             if(shader_.module==result.resetShaderModule)ResetShaderText();
         }
         if (!result.resourceImage.empty()) {
-            try { if (result.resourceImage.extension() == ".png") resourceImage_.LoadPng(result.resourceImage); else resourceImage_.LoadBmp(result.resourceImage); resourceMode_ = 1; focusImage_ = true; }
+            try { if (result.resourceImage.extension() == ".png") resourceImage_.LoadPng(result.resourceImage,resourceMetadata_.value("format",std::string{})); else resourceImage_.LoadBmp(result.resourceImage,resourceMetadata_.value("aspect",std::string{}),resourceMetadata_.value("format",std::string{})); resourceMode_ = 1; focusImage_ = true; }
             catch (const std::exception& error) { resourceImage_.Release(); status_ = error.what(); LOGE("resources") << status_; }
         }
         if (result.mesh) {
@@ -529,9 +587,9 @@ void Workspace::ResetShader(){
     const auto capture=capture_;const auto tools=tools_;const auto mode=replayMode_;const auto serial=androidSerial_;
     const auto module=shader_.module;auto overrides=activeOverrides_;overrides.erase(module);
     const auto frame=frame_>0?static_cast<uint32_t>(frame_):selectedExecution_>=0?capture->executions[selectedExecution_].frame:1u;
-    const auto generation=++selectionGeneration_;const auto optimize=optimizeReplay_;const auto validation=validationReplay_;const auto screenOff=phoneScreenOff_;
+    const auto generation=++selectionGeneration_;const auto optimize=optimizeReplay_;const auto validation=validationReplay_;const auto screenOff=phoneScreenOff_; const auto memoryTranslation=memoryTranslation_;
     pendingDraw_=false;pendingFrame_=0;
-    Start("Resetting shader and replaying original module",[this,capture,tools,mode,serial,module,overrides,frame,generation,optimize,validation,screenOff]{
+    Start("Resetting shader and replaying original module",[this,capture,tools,mode,serial,module,overrides,frame,generation,optimize,validation,screenOff,memoryTranslation]{
         WorkspaceResult r;r.selectionGeneration=generation;r.replayFrame=frame;r.retryReplay=true;r.retryShaderReset=true;r.resetShaderModule=module;
         try{
 #ifdef IMGUI_TEMPLATE_TESTS
@@ -540,6 +598,7 @@ void Workspace::ResetShader(){
 #endif
             const auto target=ResolveReplayTarget(mode,capture->android,serial,tools.at("adb"),&cancel_);
             ReplayRequest request;request.capture=capture->source;request.output=NewSession(sessionsDir_);request.frame=frame;
+            request.memoryTranslation = memoryTranslation;
             request.cacheDirectory=sessionsDir_.parent_path()/"replay-cache";request.expectedCaptureHash=capture->fingerprint;request.selectionGeneration=generation;
             request.overrides=overrides;request.optimize=optimize;request.validation=validation;request.screenOff=screenOff&&target.android;request.reuseArtifacts=false;
             if(validation)request.timeout=std::chrono::seconds(600);
@@ -556,6 +615,7 @@ void Workspace::Draw() {
     DrawCapture();
     DrawImages();
     DrawReplayUnlock();
+    DrawPerformance();
     ScheduleFrameReplay();
 }
 void Workspace::DrawReplayUnlock(){
@@ -591,7 +651,7 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
     const auto serial = androidSerial_;
     const auto optimize = optimizeReplay_;
     const auto validation=validationReplay_;
-    const auto screenOff=phoneScreenOff_;
+    const auto screenOff=phoneScreenOff_; const auto memoryTranslation=memoryTranslation_;
     if(!drawPreview&&!meshPreview){imageView_=0;resourceMode_=0;imageTab_=-1;imageTabRequest_=true;}
     if(validation)validationReport_={{"status","running"}};
     const auto overrides = revert ? std::map<uint64_t, std::filesystem::path>{} : activeOverrides_;
@@ -612,7 +672,7 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
     const auto frame = requestedFrame ? requestedFrame : dump && execution >= 0 ? capture->executions[execution].frame :
         frame_ > 0 ? static_cast<uint32_t>(frame_) : execution >= 0 ? capture->executions[execution].frame : 1u;
     if (dump && execution < 0) { status_ = "Select a submitted draw/dispatch occurrence before requesting its resources."; return; }
-    Start(drawPreview ? "Fetching selected draw data" : dump ? "Replaying selected event resources" : "Rendering frame " + std::to_string(frame), [this, capture, tools, generation, execution, frame, dump, revert, mode, serial, optimize, validation, overrides, thumbnailOnly, meshInstance, shaderDirectory, meshPreview, drawPreview, descriptorImages,documents,screenOff,subdraw,fresh,fullDrawReplay,requestedDrawMode,reuseDraw,cachedDiagnostics,cachedErrors,cachedUvDetail,cachedIndirect] {
+    Start(drawPreview ? "Fetching selected draw data" : dump ? "Replaying selected event resources" : "Rendering frame " + std::to_string(frame), [this, capture, tools, generation, execution, frame, dump, revert, mode, serial, optimize, validation, overrides, thumbnailOnly, meshInstance, shaderDirectory, meshPreview, drawPreview, descriptorImages,documents,screenOff,memoryTranslation,subdraw,fresh,fullDrawReplay,requestedDrawMode,reuseDraw,cachedDiagnostics,cachedErrors,cachedUvDetail,cachedIndirect] {
         const auto queryStarted=std::chrono::steady_clock::now();
         WorkspaceResult r; r.selectionGeneration = generation;
         r.replayResult = true;
@@ -642,6 +702,7 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
         auto run = NewSession(sessionsDir_);
         const auto target = ResolveReplayTarget(mode, capture->android, serial, tools.at("adb"), &cancel_);
         ReplayRequest request; request.capture = capture->source; request.output = run; request.frame = frame;
+            request.memoryTranslation = memoryTranslation;
         request.progress=[](const std::string& text){LOGI("replay")<<text;};
         request.expectedCaptureHash = capture->fingerprint; request.selectionGeneration = generation;
         request.cacheDirectory = sessionsDir_.parent_path() / "replay-cache";
@@ -764,11 +825,11 @@ void Workspace::ApplyCandidate() {
     const auto optimize = optimizeReplay_;
     const auto generation = selectionGeneration_;
     const auto validation=validationReplay_;
-    const auto screenOff=phoneScreenOff_;
+    const auto screenOff=phoneScreenOff_; const auto memoryTranslation=memoryTranslation_;
     if(validation)validationReport_={{"status","running"}};
     auto overrides = activeOverrides_; overrides[shader_.module] = candidate_;
     const auto frame = frame_ > 0 ? static_cast<uint32_t>(frame_) : selectedExecution_ >= 0 ? capture->executions[selectedExecution_].frame : 1u;
-    Start("Replaying baseline and modified shader", [this, capture, tools, generation, frame, overrides, mode, serial, optimize,validation,screenOff] {
+    Start("Replaying baseline and modified shader", [this, capture, tools, generation, frame, overrides, mode, serial, optimize,validation,screenOff,memoryTranslation] {
         WorkspaceResult r; r.selectionGeneration = generation; r.replayResult = true; r.overrides = overrides; r.replayFrame = frame;
         const auto run = NewSession(sessionsDir_);
         const auto target = ResolveReplayTarget(mode, capture->android, serial, tools.at("adb"), &cancel_);
@@ -776,6 +837,7 @@ void Workspace::ApplyCandidate() {
         for (auto name : {"baseline", "modified"}) {
             auto dir = run / name; std::filesystem::create_directories(dir);
             ReplayRequest request; request.capture = capture->source; request.output = dir; request.frame = frame; request.prefix = name;
+            request.memoryTranslation = memoryTranslation;
             request.expectedCaptureHash = capture->fingerprint; request.selectionGeneration = generation;
             request.cacheDirectory = sessionsDir_.parent_path() / "replay-cache";
             request.optimize = optimize;

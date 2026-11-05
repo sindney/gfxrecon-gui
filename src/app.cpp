@@ -72,6 +72,7 @@ bool App::Draw() {
         {static_cast<int>(Command::SaveCaptureAs), "Save capture as..."},
         {static_cast<int>(Command::CancelJob), "Cancel current operation"},
         {static_cast<int>(Command::Tools), "Tools and devices..."},
+        {static_cast<int>(Command::Performance), "Perf"},
         {static_cast<int>(Command::OpenWindowsSample), "Open Windows triangle sample"},
         {static_cast<int>(Command::OpenAndroidSample), "Open Android triangle sample"},
         {static_cast<int>(Command::OpenMeshSample), "Open indexed cube mesh sample"},
@@ -148,6 +149,10 @@ void App::DrawMenuBar() {
 
     if (ImGui::BeginMenu("View")) {
         if (ImGui::MenuItem("Tools and devices...")) pendingCommand_ = Command::Tools;
+        if (ImGui::MenuItem("Perf", nullptr, workspace_.PerformanceOpen())) {
+            if (workspace_.PerformanceOpen()) workspace_.ClosePerformance();
+            else pendingCommand_ = Command::Performance;
+        }
         if (ImGui::MenuItem("Console", nullptr, showConsole_))
             pendingCommand_ = Command::ToggleConsole;
         if (ImGui::MenuItem("Reset Layout"))
@@ -179,6 +184,7 @@ void App::ExecuteCommand(Command command) {
     case Command::SaveCaptureAs: workspace_.SaveCapture(true); break;
     case Command::CancelJob: workspace_.CancelJob(); break;
     case Command::Tools: workspace_.RequestTools(); break;
+    case Command::Performance: workspace_.OpenPerformance(); break;
     case Command::OpenWindowsSample:
     case Command::OpenAndroidSample:
     case Command::OpenMeshSample:
@@ -201,6 +207,7 @@ void App::DrawSettings() {
     bool open=true;
     if(!ImGui::BeginPopupModal("Settings",&open,ImGuiWindowFlags_NoDocking|ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoSavedSettings))return;
 
+    ImGui::SeparatorText("Editor");
     // Theme picker.
     if (ImGui::BeginCombo("Theme", kThemes[CurrentThemeIndex()].displayName)) {
         for (int i = 0; i < (int)kThemesCount; ++i) {
@@ -212,10 +219,19 @@ void App::DrawSettings() {
         ImGui::EndCombo();
     }
 
+    ImGui::SeparatorText("Replay");
     int drawReplay=workspace_.FullDrawReplay()?1:0;
     if(ImGui::Combo("Draw replay",&drawReplay,"Light (on demand)\0Full (all views)\0"))workspace_.SetFullDrawReplay(drawReplay==1);
     ImGui::SetItemTooltip("Light loads the selected view and its required passes.\nFull preloads all six views for instant switching.\nFetched views stay cached with either setting.");
+    const char* memoryModes[] = {"default", "none", "remap", "realign", "rebind"};
+    int memoryMode = 0;
+    for (int i = 0; i < IM_ARRAYSIZE(memoryModes); ++i) if (workspace_.MemoryTranslation() == memoryModes[i]) memoryMode = i;
+    ImGui::BeginDisabled(workspace_.Busy());
+    if (ImGui::Combo("Memory translation", &memoryMode, "Default\0None\0Remap\0Realign\0Rebind\0")) workspace_.SetMemoryTranslation(memoryModes[memoryMode]);
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Cross-device memory compatibility. Remap chooses compatible memory types; Realign/Rebind adapt allocations further.\nDefault preserves platform behavior (local macOS: Rebind; Windows/Android: None).\nChanging mode clears replay-derived views and separates caches. No silent fallback.");
 
+    ImGui::SeparatorText("Logging");
     // Logger minimum level.
     const char* levelNames[] = {"Error", "Warn", "Info", "Debug"};
     int level = (int)Log::Instance().MinLevel();
@@ -278,7 +294,7 @@ void App::DrawDockspace() {
         ImGuiID leftId = ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left,
                                                      0.22f, nullptr, &dockspaceId);
         ImGui::DockBuilderDockWindow("Events", leftId);
-        for(const auto* name:{"Image","Pipeline","Shader","Mesh","Resources"})ImGui::DockBuilderDockWindow(name,dockspaceId);
+        for(const auto* name:{"Image","Pipeline","Shader","Mesh","Resources","Perf"})ImGui::DockBuilderDockWindow(name,dockspaceId);
         ImGui::DockBuilderDockWindow("Console", footerId);
         ImGui::DockBuilderDockWindow("Frames", footerId);
         ImGui::DockBuilderFinish(rootId);

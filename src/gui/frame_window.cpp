@@ -32,6 +32,7 @@ void Workspace::ScheduleFrameReplay() {
     }
     if (!pendingOpen_.empty()) { const auto path = pendingOpen_; pendingOpen_.clear(); Open(path); return; }
     if (CaptureSessionActive()) return;
+    if (perfJob_) return; // profiling owns the target until collection and cleanup finish
     if (pendingDraw_) {
         if (std::chrono::steady_clock::now() - drawRequestedAt_ < std::chrono::milliseconds(160)) return;
         pendingDraw_ = false; pendingFrame_ = 0;
@@ -111,7 +112,7 @@ void Workspace::DrawFrames() {
         const auto tileMin = ImGui::GetItemRectMin();
         const auto state = frameStatuses_.find(frame);
         const auto frameState = state == frameStatuses_.end() ? PanelState::Inactive : state->second.state;
-        const ImU32 colors[] = {IM_COL32(128,136,144,255), IM_COL32(244,192,65,255), IM_COL32(75,196,116,255), IM_COL32(237,90,90,255)};
+        const ImU32 colors[] = {IM_COL32(128,136,144,255), IM_COL32(244,192,65,255), IM_COL32(75,196,116,255), IM_COL32(237,90,90,255), IM_COL32(238,163,58,255)};
         ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(tileMin.x + 92, tileMin.y + 8), 3, colors[static_cast<int>(frameState)], 16);
         ImGui::PopStyleColor();
         if (clicked) SelectFrame(frame);
@@ -119,7 +120,7 @@ void Workspace::DrawFrames() {
             DrawFrameActions(frame); ImGui::EndPopup();
         }
         if (ImGui::IsItemHovered()) {
-            const char* states[] = {"Inactive / pending", "Running", "Succeeded", "Failed"};
+            const char* states[] = {"Inactive / pending", "Running", "Succeeded", "Failed", "Completed with warnings"};
             ImGui::SetTooltip("Frame %u%s: %s\n%s\nOperation details are logged in Console.", frame, selected ? " (selected)" : "", states[static_cast<int>(frameState)], previewTarget.c_str());
         }
         ImGui::Text("Frame %u", frame);

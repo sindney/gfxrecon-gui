@@ -1,4 +1,5 @@
 #include "capture/capture.h"
+#include "core/artifacts.h"
 #include "platform/device_lock.h"
 
 #include <algorithm>
@@ -23,9 +24,7 @@ std::string Trim(std::string value) {
     return start == std::string::npos ? "" : value.substr(start);
 }
 void Save(const std::filesystem::path& path, const Json& document) {
-    auto temporary = path; temporary += ".tmp";
-    { std::ofstream file(temporary, std::ios::binary); if (!(file << document.dump(2))) throw std::runtime_error("Cannot save capture journal"); }
-    std::filesystem::rename(temporary, path);
+    AtomicJson(path,document);
 }
 Json Load(const std::filesystem::path& path) {
     std::ifstream input(path); if (!input) throw std::runtime_error("Cannot read capture journal");

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "analysis/capture.h"
+#include "analysis/performance_series.h"
 #include "gui/image_viewer.h"
 #include "platform/android_display.h"
 #include "gui/mesh_viewer.h"
@@ -18,10 +19,12 @@
 #include <set>
 
 namespace gfx {
-enum class PanelState { Inactive, Running, Success, Failed };
-enum class JobKind { Import, Shader, Compile, Replay, Dump, Resource, Capture, Tools };
+enum class PanelState { Inactive, Running, Success, Failed, Warning };
+enum class JobKind { Import, Shader, Compile, Replay, Dump, Resource, Capture, Tools, Perf };
 struct PanelStatus { PanelState state = PanelState::Inactive; std::string detail; };
 struct WorkspaceResult {
+    bool perfOperation = false, perfProbe = false;
+    Json perfData;
     std::shared_ptr<Capture> capture;
     std::filesystem::path session;
     std::map<std::string, std::string> versions;
@@ -78,6 +81,11 @@ struct WorkspaceResult {
 };
 class Workspace {
 public:
+    void OpenPerformance();
+    void LoadPerformanceReport(const std::filesystem::path& path);
+    void ClosePerformance() { perfPanelOpen_ = false; }
+    bool PerformanceOpen() const { return perfPanelOpen_; }
+    const Json& PerformanceResult() const { return perfResult_; }
     void Init(const std::filesystem::path& settingsDirectory);
     void Shutdown();
     void Draw();
@@ -104,6 +112,12 @@ public:
     const ImageViewer& SelectedImage() const {return resourceImage_;}
     const Json& ValidationReport() const {return validationReport_;}
 #ifdef IMGUI_TEMPLATE_TESTS
+    void SetPerformanceFixture(Json value, bool supported = false) { perfResult_ = std::move(value); perfCapabilities_ = {{"available", supported}, {"detail", "Fixture: no device is queried"}}; perfFixture_ = true; perfPlotCache_.clear(); perfPlotsInitialized_ = false; perfSettingsRequest_ = perfResult_.is_object() ? -1 : 1; }
+    const std::set<std::string>& PerformanceSelectedMetricsForTests() const { return perfPlotMetrics_; }
+    void StartPerformanceJobFixture(uint32_t durationMs = 400);
+    void SupersedePerformanceFixtureSelection() { ++selectionGeneration_; }
+    void ClearPerformanceFixture() { perfFixture_ = false; perfResult_ = Json(); perfCapabilities_ = Json(); }
+    void ConfigurePerformanceCaptureForTests(std::shared_ptr<Capture> capture, uint32_t frame, const std::string& serial);
     void ConfigureReplayFixture(const std::string& path){tools_["replay"]=path;RefreshToolAvailability();}
     void LoadMeshFixture(std::shared_ptr<MeshData> data){const auto generation=selectionGeneration_;Start("Loading mesh fixture",[data,generation]{WorkspaceResult r;r.mesh=data;r.meshPreview=true;r.selectionGeneration=generation;return r;});}
     void LoadDrawFixture(const std::filesystem::path& directory){const auto generation=selectionGeneration_;const auto execution=selectedExecution_;const auto block=capture_->events[selectedEvent_].block;Start("Loading draw fixture",[directory,generation,execution,block]{WorkspaceResult r;r.replayResult=true;r.drawPreview=true;r.descriptorImages=true;r.resources=CollectResources(directory);r.selectionGeneration=generation;r.dumpExecution=execution;r.dumpBlock=block;return r;});}
@@ -118,6 +132,8 @@ public:
     bool PhoneScreenOff()const{return phoneScreenOff_;}
     bool FullDrawReplay()const{return fullDrawReplay_;}
     void SetFullDrawReplay(bool full);
+    const std::string& MemoryTranslation() const { return memoryTranslation_; }
+    void SetMemoryTranslation(const std::string& mode);
     void RequestCapture();
     void RequestTools() { showTools_ = true; }
     void SaveCapture(bool saveAs = false);
@@ -147,6 +163,8 @@ private:
     void CompleteOperation(PanelState state, const std::string& detail);
     void Poll();
     void DrawEvents();
+    void DrawPerformance();
+    void StartPerformance(bool discover);
     void DrawPipeline();
     void DrawShader();
     void DrawResources();
@@ -219,6 +237,20 @@ private:
     uint64_t selectionGeneration_ = 1;
     bool onlyDraws_ = false;
     bool showTools_ = false;
+    bool openPerf_ = false, perfPanelOpen_ = false, perfJob_ = false, perfFixture_ = false;
+    bool perfCompare_ = true;
+    bool perfCollectCounters_ = false;
+    int perfSwapchain_ = 0, perfFrame_ = 1, perfRuns_ = 1, perfPeriodUs_ = 1000;
+    Json perfCapabilities_, perfResult_;
+    std::string perfProgress_, perfValidationError_;
+    std::mutex perfProgressMutex_;
+    std::set<std::string> perfPlotMetrics_;
+    ImGuiTextFilter perfMetricFilter_;
+    std::string perfSelectionAnchor_;
+    std::map<std::string, PerformanceSeries> perfPlotCache_;
+    double perfPlotMin_ = 0, perfPlotMax_ = 1;
+    bool perfFitPlots_ = true, perfPlotsInitialized_ = false;
+    int perfSettingsRequest_ = 0;
     ImGuiTextFilter eventFilter_;
     std::vector<size_t> filteredRows_;
     bool filterDirty_ = true;
@@ -251,6 +283,7 @@ private:
     bool validationReplay_ = false;
     bool phoneScreenOff_ = false;
     bool fullDrawReplay_ = false;
+    std::string memoryTranslation_ = "default";
     Json validationReport_;
     std::string androidSerial_, lastReplayTarget_;
     std::vector<AndroidDevice> devices_;

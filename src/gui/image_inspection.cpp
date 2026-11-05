@@ -98,14 +98,20 @@ void Workspace::DrawImages(){
     if(!ImGui::Begin("Image")){ImGui::End();return;}
     {
     RefreshOverlay refresh(Refreshing("Image"));
-    if(capture_&&selectedExecution_>=0&&capture_->events[selectedEvent_].name.rfind("vkCmdDraw",0)==0){
-        int mode=drawVisualization_;ImGui::SetNextItemWidth(210);
+    const std::function<void()> drawVisualizationToolbar = [this]{
+        const bool drawSelected=capture_&&selectedExecution_>=0&&selectedEvent_<capture_->events.size()&&capture_->events[selectedEvent_].name.rfind("vkCmdDraw",0)==0;
+        const float selectorWidth = ImGui::GetFontSize()*8;
+        ImGui::BeginDisabled(!drawSelected);
+        int mode=drawVisualization_; ImGui::SetNextItemWidth(selectorWidth);
         if(ImGui::Combo("##draw-visualization",&mode,"Original\0Solid coverage\0Wireframe\0Depth pass & fail\0UV density\0Orange outline\0"))SetDrawVisualization(mode,selectedSubdraw_);
         ImGui::SetItemTooltip("Solid/wireframe: geometry without depth occlusion.\nDepth: green passes, red fails against depth before the selected draw/batch.\nFragment discard, stencil and shader depth writes are not emulated.");
-        const auto args=capture_->ReadEvent(selectedEvent_).value("function",Json::object()).value("args",Json::object());
+        ImGui::EndDisabled();
+        const auto args=drawSelected?capture_->ReadEvent(selectedEvent_).value("function",Json::object()).value("args",Json::object()):Json::object();
         const auto count=args.value("drawCount",0u);
-        if(capture_->events[selectedEvent_].name.find("Indirect")!=std::string::npos&&count){
-            ImGui::SameLine();ImGui::SetNextItemWidth(230);const auto label=selectedSubdraw_<0?"All "+std::to_string(count)+" draws":"Draw "+std::to_string(selectedSubdraw_)+" / "+std::to_string(count);
+        const bool indirect=drawSelected&&capture_->events[selectedEvent_].name.find("Indirect")!=std::string::npos&&count;
+        ImGui::SameLine(); ImGui::BeginDisabled(!indirect);
+        ImGui::SetNextItemWidth(selectorWidth);
+        const auto label=!indirect?"All draws":selectedSubdraw_<0?"All "+std::to_string(count)+" draws":"Draw "+std::to_string(selectedSubdraw_)+" / "+std::to_string(count);
             if(ImGui::BeginCombo("##indirect-subdraw",label.c_str())){
                 if(ImGui::Selectable(("All "+std::to_string(count)+" draws").c_str(),selectedSubdraw_<0))SetDrawVisualization(drawVisualization_,-1);
                 ImGuiListClipper clipper;clipper.Begin(static_cast<int>(std::min(count,65536u)));
@@ -115,15 +121,16 @@ void Workspace::DrawImages(){
                     if(ImGui::Selectable(name.c_str(),selectedSubdraw_==int(i)))SetDrawVisualization(drawVisualization_,int(i));
                 }ImGui::EndCombo();
             }
-            ImGui::SetItemTooltip("Earlier subdraws replay normally; the chosen subdraw is inspected or highlighted. Later subdraws are omitted.");
-        }
-    }
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("Choose a subdraw for indirect events with a known draw count.\nEarlier subdraws replay normally; the chosen subdraw is inspected or highlighted. Later subdraws are omitted.");
+    };
     const bool matches=capture_&&selectedExecution_>=0&&dumpExecution_==selectedExecution_&&dumpBlock_==capture_->events[selectedEvent_].block;
     if(matches&&imageShownGeneration_==selectionGeneration_&&diagnosticExecution_==selectedExecution_){
         const auto error=diagnosticErrors_.find(drawVisualization_);
         if(error!=diagnosticErrors_.end())ImGui::TextWrapped("%s. Showing original color.",error->second.c_str());
     }
     if(resourceMode_==2){
+        if(drawVisualizationToolbar) drawVisualizationToolbar();
         if(ImGui::Button("Back to images"))resourceMode_=0;
         DrawBuffer();
     }else{
@@ -138,7 +145,7 @@ void Workspace::DrawImages(){
         }
         const float available=ImGui::GetContentRegionAvail().x;
         const float sidebar=std::clamp(available*.23f,170.0f,280.0f);
-        ImGui::BeginChild("image-document",ImVec2(std::max(120.0f,available-sidebar-8),0));
+        ImGui::BeginChild("image-document",ImVec2(std::max(120.0f,available-sidebar-8),0),ImGuiChildFlags_None,ImGuiWindowFlags_HorizontalScrollbar);
         if(ImGui::BeginTabBar("image-documents",ImGuiTabBarFlags_FittingPolicyScroll|ImGuiTabBarFlags_AutoSelectNewTabs)){
             if(ImGui::BeginTabItem("Frame presentation",nullptr,imageTabRequest_&&imageTab_<0?ImGuiTabItemFlags_SetSelected:0)){
                 if(!imageTabRequest_||imageTab_<0){imageTab_=-1;imageView_=0;resourceMode_=0;}
@@ -157,12 +164,12 @@ void Workspace::DrawImages(){
         if(imageTab_>=0&&imageTab_<int(imageTabs_.size())){
             const auto& asset=imageTabs_[imageTab_];
             const auto details=ImageName(asset)+" | mip "+std::to_string(Number(asset.metadata,"mipLevel"))+" | slice "+std::to_string(Number(asset.metadata,"arrayLayer"));
-            resourceImage_.Draw(details,ImageDetails(asset.metadata));
+            resourceImage_.Draw(details,ImageDetails(asset.metadata),drawVisualizationToolbar);
         }else if(hasComparison_){
             ImGui::Combo("Compare",&comparisonMode_,"Side by side\0Absolute difference\0");
-            if(comparisonMode_==1)differenceImage_.Draw();
-            else{ImGui::Columns(2,"comparison",true);ImGui::PushID("baseline");image_.Draw();ImGui::PopID();ImGui::NextColumn();ImGui::PushID("modified");modifiedImage_.Draw();ImGui::PopID();ImGui::Columns(1);}
-        }else image_.Draw();
+            if(comparisonMode_==1)differenceImage_.Draw({}, {}, drawVisualizationToolbar);
+            else{ImGui::Columns(2,"comparison",true);ImGui::PushID("baseline");image_.Draw({}, {}, drawVisualizationToolbar);ImGui::PopID();ImGui::NextColumn();ImGui::PushID("modified");modifiedImage_.Draw({}, {}, drawVisualizationToolbar);ImGui::PopID();ImGui::Columns(1);}
+        }else image_.Draw({}, {}, drawVisualizationToolbar);
         ImGui::EndChild();ImGui::SameLine(0,8);
         ImGui::BeginChild("image-bindings",ImVec2(0,0));
         const int sidebarSelection=imageSidebar_;
@@ -184,7 +191,7 @@ void Workspace::DrawImages(){
                 any=true;ImGui::PushID(row++);auto& thumbnail=assetThumbnails_[asset.file];
                 // Bound thumbnail storage and decode one visible preview per UI frame.
                 if(ImGui::IsRectVisible(ImVec2(100,112))&&!decoded&&!thumbnail.Width()&&!failedThumbnails_.count(asset.file)&&assetThumbnails_.size()<=128){
-                    try{thumbnail.LoadThumbnailBmp(asset.file);}catch(...){failedThumbnails_.insert(asset.file);}decoded=true;
+                    try{thumbnail.LoadThumbnailBmp(asset.file,asset.metadata.value("aspect",std::string{}),asset.metadata.value("format",std::string{}));}catch(...){failedThumbnails_.insert(asset.file);}decoded=true;
                 }
                 const auto label=ImageBinding(asset);
                 const bool selected=selectedDrawImage_==asset.file&&resourceMetadata_==asset.metadata&&imageTab_>=0;

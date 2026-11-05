@@ -40,6 +40,7 @@ set(BUILD_SHARED_LIBS OFF)
 
 find_package(OpenGL REQUIRED)
 find_package(Threads REQUIRED)
+include(cmake/sqlite.cmake)
 
 # --- Submodule presence checks ----------------------------------------------
 # imgui and imgui_test_engine have no upstream CMakeLists; check for a marker file.
@@ -180,6 +181,7 @@ else()
 endif()
 
 set(IMGUI_TE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/imgui_test_engine/imgui_test_engine")
+include(cmake/implot.cmake)
 add_library(imgui_te STATIC
     ${IMGUI_TE_DIR}/imgui_te_context.cpp
     ${IMGUI_TE_DIR}/imgui_te_coroutine.cpp
@@ -192,6 +194,7 @@ add_library(imgui_te STATIC
 )
 target_include_directories(imgui_te PUBLIC ${IMGUI_TE_DIR})
 target_link_libraries(imgui_te PUBLIC ${TEST_IMGUI_LIB})
+target_compile_definitions(imgui_te PRIVATE STB_IMAGE_STATIC STB_IMAGE_WRITE_STATIC)
 target_compile_definitions(imgui_te PUBLIC IMGUI_ENABLE_TEST_ENGINE
     IMGUI_TEST_ENGINE_ENABLE_COROUTINE_STDTHREAD_IMPL=1 IMGUI_TEST_ENGINE_ENABLE_CAPTURE=1)
 
@@ -208,8 +211,17 @@ set(CORE_SOURCES
     src/analysis/dump_dynamic.cpp
     src/analysis/resources.cpp
     src/analysis/geometry_summary.cpp
+    src/analysis/performance_series.cpp
+    src/analysis/relations_cache.cpp
+    src/analysis/relations_storage.cpp
+    src/analysis/relations_query.cpp
+    src/analysis/relations_export.cpp
     src/analysis/mesh.cpp
     src/replay/replay.cpp
+    src/replay/gpu_measurement.cpp
+    src/replay/measurement_telemetry.cpp
+    src/replay/perf_session.cpp
+    src/replay/gpu_counters.cpp
     src/capture/capture.cpp
     src/capture/live_capture.cpp
     src/capture/save_capture.cpp
@@ -238,6 +250,7 @@ set(APP_SOURCES
     src/gui/resource_window.cpp
     src/gui/pipeline_window.cpp
     src/gui/events_window.cpp
+    src/gui/performance_dialog.cpp
     src/gui/frame_window.cpp
     src/gui/panel_status.cpp
     src/gui/editor_input.cpp
@@ -291,6 +304,7 @@ add_library(gfxrecon_core STATIC ${CORE_SOURCES})
 target_include_directories(gfxrecon_core PUBLIC src thirdparty/json/include)
 target_include_directories(gfxrecon_core PRIVATE thirdparty/gfxreconstruct/external/stb thirdparty/SDL/src/video)
 target_link_libraries(gfxrecon_core PUBLIC Threads::Threads spirv-cross-glsl)
+target_link_libraries(gfxrecon_core PRIVATE gfxrecon_sqlite)
 if(WIN32)
     target_link_libraries(gfxrecon_core PUBLIC shell32 bcrypt)
 endif()
@@ -299,12 +313,12 @@ if(MSVC)
     target_compile_definitions(gfxrecon_core PUBLIC NOMINMAX PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
-set(APP_LIBS gfxrecon_core ${APP_IMGUI_LIB} ${OSLAYER_LIBS} OpenGL::GL Threads::Threads nfd::nfd spirv-cross-glsl)
+set(APP_LIBS gfxrecon_core ${APP_IMGUI_LIB} implot ${OSLAYER_LIBS} OpenGL::GL Threads::Threads nfd::nfd spirv-cross-glsl)
 if(WIN32)
     list(APPEND APP_LIBS dbghelp imm32 shell32 bcrypt)
 endif()
 # Tests exe links the instrumented imgui instead of the plain one.
-set(TEST_APP_LIBS gfxrecon_core ${TEST_IMGUI_LIB} ${OSLAYER_LIBS} OpenGL::GL Threads::Threads nfd::nfd spirv-cross-glsl)
+set(TEST_APP_LIBS gfxrecon_core ${TEST_IMGUI_LIB} implot_tested ${OSLAYER_LIBS} OpenGL::GL Threads::Threads nfd::nfd spirv-cross-glsl)
 if(WIN32)
     list(APPEND TEST_APP_LIBS dbghelp imm32 shell32 bcrypt)
 endif()
@@ -389,6 +403,7 @@ set(CLI_SOURCES
     src/cli/cli.cpp
     src/cli/commands_core.cpp
     src/cli/commands_query.cpp
+    src/cli/commands_relations.cpp
     src/cli/commands_dump.cpp
     src/cli/commands_replay.cpp
     src/cli/commands_capture.cpp
@@ -407,9 +422,14 @@ if(MSVC)
 endif()
 add_executable(gfxrecon_core_tests src/tests/core_tests.cpp src/tests/analysis_tests.cpp src/tests/cache_tests.cpp src/tests/pipeline_cache_tests.cpp src/tests/optimizer_tests.cpp src/tests/device_tests.cpp src/tests/mesh_tests.cpp src/tests/live_capture_tests.cpp src/tests/replay_performance_tests.cpp src/tests/dump_feasibility.cpp
     src/tests/capture_save_tests.cpp src/shaders/syntax.cpp
-    src/tests/export_tests.cpp src/tests/image_decode_tests.cpp src/tests/cli_tests.cpp src/tests/replay_cli_tests.cpp)
+    src/tests/export_tests.cpp src/tests/image_decode_tests.cpp src/tests/cli_tests.cpp src/tests/replay_cli_tests.cpp
+    src/tests/gpu_measurement_tests.cpp src/tests/measurement_telemetry_tests.cpp
+    src/tests/perf_session_tests.cpp src/tests/gpu_counter_tests.cpp src/tests/performance_series_tests.cpp
+    src/tests/image_display_tests.cpp src/tests/image_display_outline_tests.cpp
+    src/tests/relation_storage_tests.cpp src/tests/relation_cache_tests.cpp src/tests/relation_query_tests.cpp src/tests/relation_cli_tests.cpp src/tests/relation_benchmark.cpp)
 target_include_directories(gfxrecon_core_tests PRIVATE src thirdparty/ImGuiColorTextEdit thirdparty/json/include)
 target_link_libraries(gfxrecon_core_tests PRIVATE gfxrecon_cli_lib gfxrecon_core imgui Threads::Threads spirv-cross-glsl)
+target_link_libraries(gfxrecon_core_tests PRIVATE gfxrecon_sqlite)
 if(MSVC)
     target_compile_options(gfxrecon_core_tests PRIVATE /utf-8)
     target_compile_definitions(gfxrecon_core_tests PRIVATE NOMINMAX)
@@ -417,6 +437,12 @@ if(MSVC)
 endif()
 add_dependencies(gfxrecon_core_tests gfxrecon_astcenc gfxrecon_samples)
 add_test(NAME core COMMAND gfxrecon_core_tests)
+add_executable(gfxrecon_precision_counter_validation EXCLUDE_FROM_ALL src/tests/precision_counter_driver.cpp)
+set_target_properties(gfxrecon_precision_counter_validation PROPERTIES OUTPUT_NAME gfxrecon-precision-counter-validation)
+target_link_libraries(gfxrecon_precision_counter_validation PRIVATE gfxrecon_core)
+if(MSVC)
+    target_compile_options(gfxrecon_precision_counter_validation PRIVATE /utf-8)
+endif()
 add_test(NAME ui_auto COMMAND gfxrecon_gui_tests --test)
 set_tests_properties(ui_auto PROPERTIES TIMEOUT 300 WORKING_DIRECTORY "$<TARGET_FILE_DIR:gfxrecon_gui_tests>")
 

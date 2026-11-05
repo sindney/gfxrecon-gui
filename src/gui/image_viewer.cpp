@@ -28,7 +28,7 @@ std::array<unsigned char, 4> ImageViewer::Pixel(int x, int y) const {
 }
 std::array<unsigned char,4> ImageViewer::DisplayPixel(int x,int y)const{
     auto pixel=Pixel(x,y);const auto offset=static_cast<size_t>(y)*width_+x;
-    for(int c=0;c<3;++c)pixel[c]=channels_[c]?(depthValues_.empty()?range_.Map(pixel[c],!scalar_&&!srgbDisplay_):range_.MapValue(depthValues_[offset])):0;
+    for(int c=0;c<3;++c)pixel[c]=channels_[c]?(depthValues_.empty()?(scalar_?range_.Map(pixel[c]):range_.MapColor(pixel[c],sourceEncoding_,srgbDisplay_)):range_.MapValue(depthValues_[offset])):0;
     if(!channels_[3])pixel[3]=255;return pixel;
 }
 namespace {
@@ -47,6 +47,8 @@ void ImageViewer::AbsoluteDifference(const ImageViewer& baseline, const ImageVie
         throw std::runtime_error("Comparison images have different dimensions");
     width_ = baseline.width_; height_ = baseline.height_;
     fitToView_ = true;
+    scalar_=false;depthValues_.clear();range_={};rangeDomainMaximum_=1;
+    sourceEncoding_=baseline.sourceEncoding_;sourceFormat_.clear();
     rgba_.resize(baseline.rgba_.size());
     for (size_t i = 0; i < rgba_.size(); i += 4) {
         for (int c = 0; c < 3; ++c)
@@ -59,7 +61,8 @@ void ImageViewer::AbsoluteDifference(const ImageViewer& baseline, const ImageVie
 void ImageViewer::Release() {
     if (texture_) glDeleteTextures(1, &texture_);
     texture_ = 0;
-    width_ = height_ = 0; rgba_.clear(); depthValues_.clear(); name_.clear();
+    width_ = height_ = 0; rgba_.clear(); depthValues_.clear(); name_.clear();sourceFormat_.clear();
+    sourceEncoding_=ImageSourceEncoding::Srgb;scalar_=false;range_={};rangeDomainMaximum_=1;
 }
 void ImageViewer::MakeThumbnail(const ImageViewer& image) {
     if (!image.width_ || !image.height_) { Release(); return; }
@@ -67,9 +70,13 @@ void ImageViewer::MakeThumbnail(const ImageViewer& image) {
     width_ = std::max(1, static_cast<int>(image.width_ * scale)); height_ = std::max(1, static_cast<int>(image.height_ * scale));
     rgba_.resize(static_cast<size_t>(width_) * height_ * 4);
     for (int y = 0; y < height_; ++y) for (int x = 0; x < width_; ++x) {
-        const auto pixel = image.Pixel(x * image.width_ / width_, y * image.height_ / height_);
+        const auto pixel = image.DisplayPixel(x * image.width_ / width_, y * image.height_ / height_);
         std::copy(pixel.begin(), pixel.end(), rgba_.begin() + (static_cast<size_t>(y) * width_ + x) * 4);
     }
+    // Resampling above already produced display-ready bytes.
+    sourceEncoding_=ImageSourceEncoding::Srgb;sourceFormat_.clear();scalar_=false;
+    depthValues_.clear();range_={};rangeDomainMaximum_=1;srgbDisplay_=true;
+    for(auto& channel:channels_)channel=true;
     Upload();
 }
 bool ImageViewer::DrawThumbnail(const char* id, float height) const {
@@ -82,7 +89,7 @@ bool ImageViewer::DrawThumbnail(const char* id, float height) const {
     ImGui::GetWindowDrawList()->AddImage(static_cast<ImTextureID>(texture_), origin, ImVec2(origin.x + size.x, origin.y + size.y));
     return clicked;
 }
-void ImageViewer::LoadThumbnailBmp(const std::filesystem::path& path) {
+void ImageViewer::LoadThumbnailBmp(const std::filesystem::path& path,const std::string& aspect,const std::string& format) {
     std::ifstream input(path,std::ios::binary);std::array<unsigned char,54> header{};
     input.read(reinterpret_cast<char*>(header.data()),header.size());
     auto u16=[&](size_t n){uint16_t v;std::memcpy(&v,header.data()+n,2);return v;};
@@ -98,7 +105,11 @@ void ImageViewer::LoadThumbnailBmp(const std::filesystem::path& path) {
         const int sourceY=y*height/height_;input.seekg(offset+(h>0?height-sourceY-1:sourceY)*stride);input.read(reinterpret_cast<char*>(row.data()),row.size());
         if(!input)throw std::runtime_error("Thumbnail row read failed");
         for(int x=0;x<width_;++x){const size_t s=x*w/width_*(depth/8),d=(static_cast<size_t>(y)*width_+x)*4;rgba_[d]=row[s+2];rgba_[d+1]=row[s+1];rgba_[d+2]=row[s];rgba_[d+3]=255;}
-    }Upload();
+    }
+    sourceEncoding_=SourceEncodingForImage(format);sourceFormat_=format;scalar_=aspect=="DEPTH"||aspect=="STENCIL";
+    depthValues_.clear();range_={};rangeDomainMaximum_=1;srgbDisplay_=true;
+    for(auto& channel:channels_)channel=true;
+    Upload();
 }
 bool ImageViewer::DrawPreview(const char* id,ImVec2 size,bool selected)const{
     if(selected)ImGui::PushStyleColor(ImGuiCol_Button,ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
@@ -136,6 +147,7 @@ void ImageViewer::LoadBmp(const std::filesystem::path& path,const std::string& a
     width_ = width; height_ = static_cast<int>(rows); rgba_ = std::move(pixels);
     fitToView_ = true;
     name_ = path.filename().u8string();scalar_=aspect=="DEPTH"||aspect=="STENCIL";range_={};rangeDomainMaximum_=1;depthValues_.clear();
+    sourceEncoding_=SourceEncodingForImage(format);sourceFormat_=format;
     const auto sampleBytes=DepthSampleSize(format);const auto sidecar=std::filesystem::path(path.u8string()+".depth.bin");
     if(aspect=="DEPTH"&&sampleBytes&&std::filesystem::is_regular_file(sidecar)&&std::filesystem::file_size(sidecar)==static_cast<size_t>(width_)*height_*sampleBytes){
         std::ifstream raw(sidecar,std::ios::binary);std::vector<uint8_t> data(static_cast<size_t>(width_)*height_*sampleBytes);raw.read(reinterpret_cast<char*>(data.data()),data.size());
@@ -143,19 +155,23 @@ void ImageViewer::LoadBmp(const std::filesystem::path& path,const std::string& a
     }
     Upload();
 }
-void ImageViewer::LoadPng(const std::filesystem::path& path) {
+void ImageViewer::LoadPng(const std::filesystem::path& path,const std::string& format) {
     auto image = LoadImage(path);  // decoded host-side (e.g. from raw ASTC blocks); opaque/straight alpha as written by astcenc
     width_ = static_cast<int>(image.width); height_ = static_cast<int>(image.height); rgba_ = std::move(image.rgba);
     fitToView_ = true;
     name_ = path.filename().u8string();scalar_=false;range_={};rangeDomainMaximum_=1;depthValues_.clear();
+    sourceEncoding_=SourceEncodingForImage(format);sourceFormat_=format;
     Upload();
 }
 void ImageViewer::Upload() {
     if (!texture_) glGenTextures(1, &texture_);
     auto pixels = rgba_;
+    std::array<uint8_t,256> colorMap{};
+    for(size_t value=0;value<colorMap.size();++value)colorMap[value]=scalar_?range_.Map(static_cast<uint8_t>(value)):
+        range_.MapColor(static_cast<uint8_t>(value),sourceEncoding_,srgbDisplay_);
     for(size_t i=0;i<pixels.size();i+=4){
         const auto depth=depthValues_.empty()?0:range_.MapValue(depthValues_[i/4]);
-        for(int c=0;c<3;++c)pixels[i+c]=channels_[c]?(depthValues_.empty()?range_.Map(pixels[i+c],!scalar_&&!srgbDisplay_):depth):0;
+        for(int c=0;c<3;++c)pixels[i+c]=channels_[c]?(depthValues_.empty()?colorMap[pixels[i+c]]:depth):0;
         if(!channels_[3])pixels[i+3]=255;
     }
     glBindTexture(GL_TEXTURE_2D, texture_);
@@ -164,12 +180,26 @@ void ImageViewer::Upload() {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     glBindTexture(GL_TEXTURE_2D, 0);
 }
-void ImageViewer::Draw(const std::string& details,const std::string& tooltip) {
+void ImageViewer::Draw(const std::string& details,const std::string& tooltip,const std::function<void()>& beforeChannels) {
     if (!texture_) { ImGui::TextWrapped("Render a frame to inspect its replay screenshot."); return; }
+    if (beforeChannels) beforeChannels();
+    const auto& style = ImGui::GetStyle();
+    const float spacing = style.ItemSpacing.x;
+    const float numberWidth = ImGui::GetFontSize() * 3;
+    const float sliderWidth = ImGui::GetFontSize() * 8;
+    if (beforeChannels) {
+        ImGui::SameLine(0, spacing * 2); ImGui::TextDisabled("|"); ImGui::SameLine(0, spacing * 2);
+    }
+    if(RotateButton("##rotate-left",false)){orientation_.Rotate(-1);fitToView_=true;}ImGui::SetItemTooltip("Rotate left 90 degrees");
+    ImGui::SameLine();if(RotateButton("##rotate-right",true)){orientation_.Rotate();fitToView_=true;}ImGui::SetItemTooltip("Rotate right 90 degrees");
+    ImGui::SameLine();if(ImGui::Button("Flip H"))orientation_.horizontal=!orientation_.horizontal;
+    ImGui::SameLine();if(ImGui::Button("Flip V"))orientation_.vertical=!orientation_.vertical;
+    ImGui::SameLine(0, spacing * 2); ImGui::TextDisabled("|"); ImGui::SameLine(0, spacing * 2);
     if (ImGui::Button("Fit")) fitToView_ = true;
-    ImGui::SameLine(); const float sliderWidth=ImGui::GetFontSize()*14; ImGui::SetNextItemWidth(std::min(sliderWidth,std::max(40.0f,ImGui::GetContentRegionAvail().x)));
+    ImGui::SameLine(); ImGui::SetNextItemWidth(sliderWidth);
     if (ImGui::SliderFloat("##scale", &zoom_, 0.01f, 32.0f, "%.2fx", ImGuiSliderFlags_Logarithmic)) fitToView_ = false;
     ImGui::SetItemTooltip("Image scale. Use the mouse wheel over the image to zoom around the pointer.");
+
     bool changed = false;
     const char* labels[] = {"R", "G", "B"};
     for (int c = 0; c < 3; ++c) { if (c) ImGui::SameLine(); changed |= ImGui::Checkbox(labels[c], &channels_[c]); }
@@ -177,18 +207,16 @@ void ImageViewer::Draw(const std::string& details,const std::string& tooltip) {
     bool srgb=!scalar_&&srgbDisplay_;ImGui::BeginDisabled(scalar_);
     if(ImGui::Checkbox("sRGB",&srgb)){srgbDisplay_=srgb;changed=true;}
     ImGui::EndDisabled();
-    ImGui::SetItemTooltip("Display encoded sRGB, or disable to inspect linearized RGB.\nPixel readout retains unchanged screenshot values.");
-    if (changed) Upload();
-    if(ImGui::GetContentRegionAvail().x>600)ImGui::SameLine();
-    if(RotateButton("##rotate-left",false)){orientation_.Rotate(-1);fitToView_=true;}ImGui::SetItemTooltip("Rotate left 90 degrees");
-    ImGui::SameLine();if(RotateButton("##rotate-right",true)){orientation_.Rotate();fitToView_=true;}ImGui::SetItemTooltip("Rotate right 90 degrees");
-    ImGui::SameLine();if(ImGui::Button("Flip H"))orientation_.horizontal=!orientation_.horizontal;
-    ImGui::SameLine();if(ImGui::Button("Flip V"))orientation_.vertical=!orientation_.vertical;
+    std::string colorHelp="Display linear RGB with the sRGB transfer curve; encoded sRGB sources are not encoded twice.\nDisable for linear-number display. Raw pixel readout is unchanged.\nNon-sRGB resource formats are assumed linear; disable for shader-encoded UNORM data.";
+    if(!scalar_&&sourceFormat_.find("FLOAT")!=std::string::npos)
+        colorHelp+="\nFloat/HDR readbacks are already clamped to RGB8; sRGB does not apply exposure or scene tone mapping.";
+    ImGui::SetItemTooltip("%s",colorHelp.c_str());
+    ImGui::SameLine(0, spacing * 2); ImGui::TextDisabled("|"); ImGui::SameLine(0, spacing * 2);
     bool rangeChanged=false;
-    ImGui::SetNextItemWidth(100);rangeChanged|=ImGui::DragFloat("##range-min",&range_.minimum,.0001f,0,1,"%.6g",ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetNextItemWidth(numberWidth);rangeChanged|=ImGui::DragFloat("##range-min",&range_.minimum,.0001f,0,1,"%.6g",ImGuiSliderFlags_AlwaysClamp);
     ImGui::SetItemTooltip("Black point. Ctrl+click to enter an exact value.");ImGui::SameLine();
     const float buttons=ImGui::CalcTextSize("AutoReset").x+ImGui::GetStyle().FramePadding.x*4+ImGui::GetStyle().ItemSpacing.x*4;
-    const auto start=ImGui::GetCursorScreenPos();const ImVec2 barSize(std::min(sliderWidth,std::max(40.0f,ImGui::GetContentRegionAvail().x-100-buttons)),ImGui::GetFrameHeight());
+    const auto start=ImGui::GetCursorScreenPos();const ImVec2 barSize(std::min(sliderWidth,std::max(40.0f,ImGui::GetContentRegionAvail().x-numberWidth-buttons)),ImGui::GetFrameHeight());
     ImGui::InvisibleButton("##range-bar",barSize);
     if(ImGui::IsItemActivated()){
         const float u=std::clamp((ImGui::GetMousePos().x-start.x)/barSize.x,0.0f,1.0f)*rangeDomainMaximum_;rangeHandle_=std::abs(u-range_.minimum)<std::abs(u-range_.maximum)?0:1;
@@ -198,12 +226,13 @@ void ImageViewer::Draw(const std::string& details,const std::string& tooltip) {
         if(rangeHandle_==0)range_.minimum=std::min(u,std::nextafter(range_.maximum,0.0f));else range_.maximum=std::max(u,std::nextafter(range_.minimum,1.0f));rangeChanged=true;
     }
     auto* draw=ImGui::GetWindowDrawList();const float y=start.y+barSize.y*.5f;
-    draw->AddRectFilledMultiColor(ImVec2(start.x,y-4),ImVec2(start.x+barSize.x,y+4),IM_COL32(0,0,0,255),IM_COL32(255,255,255,255),IM_COL32(255,255,255,255),IM_COL32(0,0,0,255));
+    const auto black=ImGui::GetColorU32(ImVec4(0,0,0,1)),white=ImGui::GetColorU32(ImVec4(1,1,1,1));
+    draw->AddRectFilledMultiColor(ImVec2(start.x,y-4),ImVec2(start.x+barSize.x,y+4),black,white,white,black);
     const auto color=ImGui::GetColorU32(ImGuiCol_Text);
     const float low=start.x+std::clamp(range_.minimum/rangeDomainMaximum_,0.0f,1.0f)*barSize.x,high=start.x+std::clamp(range_.maximum/rangeDomainMaximum_,0.0f,1.0f)*barSize.x;
     draw->AddLine(ImVec2(low,y-9),ImVec2(low,y+9),color,2);draw->AddTriangleFilled(ImVec2(low,y-3),ImVec2(low-4,y-10),ImVec2(low+4,y-10),color);
     draw->AddLine(ImVec2(high,y-9),ImVec2(high,y+9),color,2);draw->AddTriangleFilled(ImVec2(high,y+3),ImVec2(high-4,y+10),ImVec2(high+4,y+10),color);
-    ImGui::SetItemTooltip("Display range: drag the black and white points.");ImGui::SameLine();ImGui::SetNextItemWidth(100);
+    ImGui::SetItemTooltip("Display range: drag the black and white points.");ImGui::SameLine();ImGui::SetNextItemWidth(numberWidth);
     rangeChanged|=ImGui::DragFloat("##range-max",&range_.maximum,.0001f,0,1,"%.6g",ImGuiSliderFlags_AlwaysClamp);
     ImGui::SetItemTooltip("White point. Ctrl+click to enter an exact value.");ImGui::SameLine();
     if(ImGui::Button("Auto")){
@@ -212,14 +241,15 @@ void ImageViewer::Draw(const std::string& details,const std::string& tooltip) {
         else{
             unsigned lo=255,hi=0;for(size_t i=0;i<rgba_.size();i+=4)for(int c=0;c<(scalar_?1:3);++c)if(channels_[c]){lo=std::min(lo,unsigned(rgba_[i+c]));hi=std::max(hi,unsigned(rgba_[i+c]));}
             low=lo/255.0f;high=hi/255.0f;
-            if(!scalar_&&!srgbDisplay_){auto linear=[](float v){return v<=.04045f?v/12.92f:std::pow((v+.055f)/1.055f,2.4f);};low=linear(low);high=linear(high);}
+            if(!scalar_&&sourceEncoding_==ImageSourceEncoding::Srgb){low=SrgbToLinear(low);high=SrgbToLinear(high);}
         }
         if(low>high){low=0;high=1;}
         range_.minimum=low;range_.maximum=high;
         if(high<=low){range_.minimum=std::max(0.0f,low-1.0f/255);range_.maximum=std::min(1.0f,high+1.0f/255);}rangeDomainMaximum_=std::max(range_.maximum,1e-12f);rangeChanged=true;
     }
     ImGui::SetItemTooltip("Fit the range to decoded image values.");ImGui::SameLine();if(ImGui::Button("Reset")){range_={};rangeDomainMaximum_=1;rangeChanged=true;}
-    if(rangeChanged){range_.minimum=std::clamp(range_.minimum,0.0f,std::nextafter(1.0f,0.0f));range_.maximum=std::clamp(range_.maximum,std::nextafter(range_.minimum,1.0f),1.0f);Upload();}
+    if(rangeChanged){range_.minimum=std::clamp(range_.minimum,0.0f,std::nextafter(1.0f,0.0f));range_.maximum=std::clamp(range_.maximum,std::nextafter(range_.minimum,1.0f),1.0f);changed=true;}
+    if (changed) Upload();
     const auto displayedWidth=orientation_.Width(width_,height_),displayedHeight=orientation_.Height(width_,height_);
     if (fitToView_) {
         const auto available = ImGui::GetContentRegionAvail();
@@ -253,7 +283,7 @@ void ImageViewer::Draw(const std::string& details,const std::string& tooltip) {
         }
     }
     ImGui::EndChild();
-    char display[128];std::snprintf(display,sizeof(display),"%d x %d  |  %.2fx  |  %s",width_,height_,zoom_,scalar_?"Scalar":srgbDisplay_?"sRGB":"Linearized RGB");
+    char display[128];std::snprintf(display,sizeof(display),"%d x %d  |  %.2fx  |  %s",width_,height_,zoom_,scalar_?"Scalar":srgbDisplay_?"sRGB display":"Linear RGB");
     const auto footer=std::string(display)+(details.empty()?"":"  |  "+details);
     const auto position=ImGui::GetCursorScreenPos();const auto available=ImGui::GetContentRegionAvail().x;
     const ImVec4 clip(position.x,position.y,position.x+available,position.y+ImGui::GetTextLineHeight());

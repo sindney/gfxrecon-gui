@@ -28,7 +28,7 @@ public:
     gfx::Workspace& Workspace() { return workspace_; }
 
 private:
-    enum class Command { OpenFile, OpenWindowsSample, OpenAndroidSample, OpenMeshSample, OpenIndirectSample, Capture, SaveCapture, SaveCaptureAs, CancelJob, Tools, Settings, ToggleConsole, ResetLayout, About, Exit };
+    enum class Command { OpenFile, OpenWindowsSample, OpenAndroidSample, OpenMeshSample, OpenIndirectSample, Capture, SaveCapture, SaveCaptureAs, CancelJob, Tools, Performance, Settings, ToggleConsole, ResetLayout, About, Exit };
     void ExecuteCommand(Command command);
     void DrawMenuBar();
     void DrawDockspace();

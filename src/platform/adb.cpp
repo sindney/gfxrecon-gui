@@ -29,6 +29,7 @@ ProcessResult AdbConnection::Run(std::vector<std::string> args, const std::files
     if (serial.empty()) throw std::runtime_error("Select an Android device first.");
     args.insert(args.begin(), {"-s", serial});
     ProcessRequest r{executable, std::move(args)};
+    r.allowChildServices = true; // The shared host ADB server is not this client's child workload.
     r.timeout = std::chrono::seconds(cleanup ? 5 : 30);
     r.stdinFile = input; r.stdoutFile = output;
     return transport ? transport(r, cleanup ? nullptr : cancel) : RunProcess(r, cleanup ? nullptr : cancel);

@@ -54,11 +54,24 @@ The CLI SHALL let an agent export a captured module, compile an edited GLSL or S
 - **THEN** the command exits with code 4 and the report status is `unavailable`
 
 ### Requirement: Replay performance metrics
-`gfxrecon-cli perf` SHALL run a configurable number of fresh replays of a frame range on a target and report state-load time, measured frame time and FPS per run with min, median and max, together with cache reuse and screen state. With overrides, it SHALL also measure the baseline and report deltas.
 
-#### Scenario: Override performance comparison
-- **WHEN** `perf --capture C --frames 2 --runs 5 --override M=X.spv` runs
-- **THEN** the result contains 5 baseline and 5 modified measurements with median frame-time delta, and results caches were not used
+`gfxrecon-cli perf` SHALL preserve existing CPU replay-elapsed measurements of fresh frame-range replays, including state-load/replay time, FPS, per-run samples, summary statistics, cache reuse and screen state. CPU-derived fields SHALL NOT be represented as GPU profiling. Opt-in device GPU timing SHALL retain individual full-frame samples with explicit support, scope, completion and validity. GPU-only defaults SHALL not start a counter provider. `--counters` or `--counter-profile all` SHALL request optional all-counter sampling for one explicit frame; legacy CLI `precision` and `bandwidth` profile names SHALL be compatibility aliases for `all`, not acquisition filters. `--runs` SHALL repeat fresh replay processes, preserving alternating baseline/modified order when overrides are supplied. No option SHALL introduce in-process frame restoration, warm-up or pacing, silently discard early samples or claim steady state. Numeric GPU/counter deltas SHALL require the corresponding valid and compatible evidence and remain distinct from CPU replay deltas.
+
+#### Scenario: Legacy CPU comparison
+- **WHEN** `perf --capture C --frames 2 --runs 5 --override M=X.spv` runs without a GPU/counter option
+- **THEN** it returns five baseline and five modified CPU replay measurements with replay-time deltas and no result-cache reuse
+
+#### Scenario: Fresh GPU comparison pairs
+- **WHEN** a supported frame is measured with GPU timing, three runs and a shader override
+- **THEN** three independent baseline/modified process pairs retain individual valid GPU samples and compatible deltas, without an in-process replay loop
+
+#### Scenario: All-counter compatibility alias
+- **WHEN** an existing script uses `--counter-profile bandwidth` or `precision`
+- **THEN** the request collects all supported provider counters under the current all-counter policy rather than retaining the old named-metric allowlist
+
+#### Scenario: Incomparable samples
+- **WHEN** variants differ in measured scope, device/driver, memory/swapchain or controlled cache policy, or required timing endpoints are invalid
+- **THEN** the affected numeric comparison is suppressed with a reason instead of producing a claimed optimization result
 
 ### Requirement: Image comparison
 `gfxrecon-cli compare A B` SHALL report extent equality, per-channel maximum and mean absolute difference, differing pixel count, PSNR, and optionally write a difference image.
@@ -68,9 +81,21 @@ The CLI SHALL let an agent export a captured module, compile an edited GLSL or S
 - **THEN** the differing pixel count and maximum difference are reported, and a mismatched extent is reported as an error rather than a difference
 
 ### Requirement: Replay provenance
-Every replay result SHALL include the replay manifest path with capture hash, backend hash, target and device identity, overrides with hashes, request options and artifact hashes, as produced by the shared replay core.
+
+Every replay result SHALL include the replay manifest path with capture hash, backend hash, target and device identity, overrides with hashes, request options and artifact hashes, as produced by the shared replay core. GPU measurement provenance SHALL additionally identify the effective replay GPU, Vulkan API and driver properties, device OS/build, effective capture/optimization settings, instrumentation and completion mode, and controlled cache policy and observed pipeline-cache reuse/identity. Uncontrolled driver and hardware cache state SHALL be identified as unknown in GPU reports. For GPU measurement/comparison requests, every requested override SHALL have structured successful application evidence matching its effective bytes; replacement-file discovery alone SHALL NOT establish successful application. Whether a replacement executes within measured scope SHALL be distinguished from successful replacement creation. Ordinary and CPU-only replay SHALL retain their existing backend compatibility and replacement checks.
 
 #### Scenario: Reproduce an agent's result
 - **WHEN** a user inspects a replay result directory produced by the CLI
 - **THEN** its manifest identifies the exact capture, backend, device and override files used, and the GUI can open the same capture and replay the same selection
 
+#### Scenario: Actual replay driver differs from system probe
+- **WHEN** Android selects a different driver for the replay process than a standalone system Vulkan probe
+- **THEN** GPU measurement provenance identifies the actual replay driver and does not substitute the standalone probe's driver properties
+
+#### Scenario: Requested replacement not successfully applied
+- **WHEN** any shader replacement requested for a GPU comparison lacks successful backend application evidence matching its hash
+- **THEN** the performance comparison fails and identifies the unconfirmed module rather than reporting an optimization result
+
+#### Scenario: No explicit pipeline cache loaded
+- **WHEN** the replay loads no target pipeline-cache file
+- **THEN** provenance records that fact and does not imply that driver or hardware caches were cold

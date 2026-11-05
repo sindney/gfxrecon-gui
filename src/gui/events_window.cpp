@@ -17,13 +17,29 @@ std::string Scope(const Execution& execution, const Event& event) {
 }
 void Workspace::DrawEvents() {
     ImGui::Begin("Events");
-    ImGui::SetNextItemWidth(-ImGui::GetFrameHeight() - ImGui::GetStyle().ItemSpacing.x);
+    const float perfWidth = ImGui::CalcTextSize("Perf").x + ImGui::GetFrameHeight() + ImGui::GetStyle().FramePadding.x * 2;
+    ImGui::SetNextItemWidth(-ImGui::GetFrameHeight() - perfWidth - ImGui::GetStyle().ItemSpacing.x * 2);
     if (ImGui::InputTextWithHint("##event-filter", "Find API, block, label, object...", eventFilter_.InputBuf, IM_ARRAYSIZE(eventFilter_.InputBuf))) {
         eventFilter_.Build(); filterDirty_ = true;
     }
     ImGui::SameLine();
     if (ImGui::ArrowButton("Filters", ImGuiDir_Down)) ImGui::OpenPopup("event-filters");
     ImGui::SetItemTooltip("Event filters");
+    ImGui::SameLine();
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.15f, 0.5f));
+    if (ImGui::Button("Perf##event-perf", ImVec2(perfWidth, 0))) OpenPerformance();
+    ImGui::PopStyleVar();
+    // A vector clock is readable even when the UI font has no emoji glyphs.
+    const auto rect = ImGui::GetItemRectMin();
+    const float radius = ImGui::GetFrameHeight() * 0.23f;
+    const ImVec2 clock(rect.x + perfWidth - ImGui::GetFrameHeight() * 0.5f,
+                       rect.y + ImGui::GetFrameHeight() * 0.5f);
+    const auto color = ImGui::GetColorU32(ImGuiCol_Text);
+    auto* draw = ImGui::GetWindowDrawList();
+    draw->AddCircle(clock, radius, color, 16, 1.2f);
+    draw->AddLine(clock, ImVec2(clock.x, clock.y - radius * 0.6f), color, 1.2f);
+    draw->AddLine(clock, ImVec2(clock.x + radius * 0.55f, clock.y + radius * 0.2f), color, 1.2f);
+    ImGui::SetItemTooltip("GPU performance: frame timestamps, optional counters and plots");
     if (ImGui::BeginPopup("event-filters")) {
         filterDirty_ |= ImGui::Checkbox("Draw / dispatch only", &onlyDraws_);
         if (ImGui::Checkbox("Submitted executions", &submittedOnly_)) { filterDirty_ = true; selectedExecution_ = -1; }
@@ -87,7 +103,7 @@ void Workspace::DrawEvents() {
                                     if (ImGui::Selectable((std::to_string(event.block) + "  " + event.name).c_str(), selectedExecution_ == static_cast<int>(index))) SelectExecution(index, true);
                                     if(selectedExecution_==static_cast<int>(index)){
                                         const auto min=ImGui::GetItemRectMin(),max=ImGui::GetItemRectMax();
-                                        const ImU32 colors[]={IM_COL32(128,136,144,255),IM_COL32(244,192,65,255),IM_COL32(75,196,116,255),IM_COL32(237,90,90,255)};
+                                        const ImU32 colors[]={IM_COL32(128,136,144,255),IM_COL32(244,192,65,255),IM_COL32(75,196,116,255),IM_COL32(237,90,90,255),IM_COL32(238,163,58,255)};
                                         ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(max.x-10,(min.y+max.y)*.5f),3,colors[static_cast<int>(ExecutionState(index))],16);
                                         if(ImGui::IsMouseHoveringRect(ImVec2(max.x-18,min.y),max)){
                                             const auto status=executionStatuses_.find(index);ImGui::SetTooltip("%s",status==executionStatuses_.end()?"No fetch requested":status->second.detail.c_str());

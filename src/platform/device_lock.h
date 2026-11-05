@@ -1,5 +1,6 @@
 #pragma once
 #include <chrono>
+#include <atomic>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -12,13 +13,14 @@ public:
     std::string serial;
     DeviceBusy(const std::string& device, const std::string& detail) : std::runtime_error(detail), serial(device) {}
 };
-// Process-wide configuration: <settings>/locks and how long a contending operation waits.
+// Configure the compatibility lock directory and contention wait. A common
+// per-user temporary directory also coordinates different settings roots.
 void ConfigureDeviceLocks(const std::filesystem::path& directory, std::chrono::seconds wait = std::chrono::seconds(0));
 // Exclusive per-serial host lock held across processes (GUI and CLI) for device-mutating work.
 // Reentrant within one process so nested operations on the same device do not deadlock.
 class DeviceLock {
 public:
-    explicit DeviceLock(const std::string& serial);
+    explicit DeviceLock(const std::string& serial, const std::atomic_bool* cancel = nullptr);
     ~DeviceLock();
     DeviceLock(const DeviceLock&) = delete;
     DeviceLock& operator=(const DeviceLock&) = delete;

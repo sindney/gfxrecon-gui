@@ -83,6 +83,7 @@ class ReleasePackageTests(unittest.TestCase):
         names = ["gfxrecon-gui.exe", "gfxrecon-cli.exe", "README.md", "LICENSE", "msvcp140.dll",
                  *package.PUBLIC_DOCS,
                  "vcruntime140.dll", "licenses/MSVC-RUNTIME-NOTICE.txt", "licenses/astc-encoder.txt",
+                 "licenses/sqlite.txt", "dependencies.json",
                  "tools/astcenc/astcenc-avx2.exe", "tools/astcenc/astcenc-sse2.exe"]
         for name in names:
             path = root / name
@@ -112,9 +113,22 @@ class ReleasePackageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Missing release files"):
                 package.verify_manifest(root)
 
+    def test_android_counter_helper_is_allowed_only_at_its_bundle_path(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            self.make_release(root)
+            helper = root / "tools/android/gpu-counter-producer"
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.write_bytes(b"\x7fELF")
+            self.assertIn(helper, package.release_files(root))
+            unexpected = root / "tools/android/other-helper"
+            unexpected.write_bytes(b"\x7fELF")
+            with self.assertRaisesRegex(ValueError, "Unexpected release file"):
+                package.release_files(root)
+
     def test_release_requires_cli_and_astcenc_in_inventory(self):
         for name in ("gfxrecon-cli.exe", "tools/astcenc/astcenc-avx2.exe", "tools/astcenc/astcenc-sse2.exe",
-                     "licenses/astc-encoder.txt"):
+                     "licenses/astc-encoder.txt", "licenses/sqlite.txt", "dependencies.json", "docs/RELATIONS.md"):
             with tempfile.TemporaryDirectory() as folder:
                 root = Path(folder).resolve()
                 self.make_release(root)
@@ -124,6 +138,26 @@ class ReleasePackageTests(unittest.TestCase):
                 (root / name).unlink()
                 with self.assertRaisesRegex(ValueError, "Missing release files.*" + name.replace(".", r"\.")):
                     package.verify_manifest(root)
+
+    def test_macos_requires_sqlite_notice_dependency_manifest_and_relation_guide(self):
+        spec = importlib.util.spec_from_file_location("release_package_macos", ROOT / "scripts/package_macos.py")
+        macos = importlib.util.module_from_spec(spec)
+        with patch.dict("sys.modules", {"package_release": package}):
+            spec.loader.exec_module(macos)
+        names = ("dependencies.json", "docs/RELATIONS.md", f"{macos.APP}/Contents/Resources/licenses/sqlite.txt")
+        for missing in names:
+            with tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                for name in names:
+                    if name == missing:
+                        continue
+                    file = root / name
+                    file.parent.mkdir(parents=True, exist_ok=True)
+                    file.write_text(name, encoding="utf-8")
+                # Even a matching manifest must not legitimize an incomplete notice/doc package.
+                (root / "build-info.json").write_text(json.dumps({"files": macos.inventory(root)}), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "Missing release files.*" + missing.replace(".", r"\.")):
+                    macos.verify_manifest(root)
 
     def test_bundle_cli_stages_binaries_and_fails_clearly_when_missing(self):
         with tempfile.TemporaryDirectory() as folder:

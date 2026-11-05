@@ -115,5 +115,33 @@
       "archive_sha256": "e6d5aebde6915386e0215824235db9b918f89e26824f8b083e037841f64258ba"
     },
     "source": "https://github.com/KhronosGroup/Vulkan-ValidationLayers"
+  },
+  "implot": {
+    "project": "epezent/implot",
+    "version": "1.1",
+    "revision": "819f200639455a58b6b3d4156b70e4271aeb2d00",
+    "license": "MIT",
+    "license_file": "licenses/implot.txt",
+    "url": "https://github.com/epezent/implot",
+    "files": {
+      "implot.h": "d574cd991c12fde232021bd50f0b27fd02d18e6c89558732f37cee79df867c16",
+      "implot_internal.h": "e0fa01857502cb79464f92ba8e504700ced423f11abb652d20d71c19a5a2b609",
+      "implot.cpp": "d0dea31cdd6cee85ff2244abf32a9a0cbf3629d5d6460400e3a1dd3269dd8a57",
+      "implot_items.cpp": "522f65b09f507a8983a5c20494441138a5522e63b6bbdc2dfc649badf1dff739",
+      "LICENSE": "38bd30c2111fe7e3d8fb86d8607491239659eff1df1b1004b9a8349e20a91967"
+    },
+    "acquisition": "Pinned vendored source subset; no demos or moving-branch dependency"
+  },
+  "sqlite": {
+    "version": "3.54.1",
+    "source_id": "2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76",
+    "url": "https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip",
+    "archive_sha3_256": "92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30",
+    "archive_sha256": "0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9",
+    "files": {
+      "sqlite3.c": "0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52",
+      "sqlite3.h": "d6c84557261893439b341d2e6c35187ae3ea24fbfd843ad94616f72d89242b8c"
+    },
+    "notice": "licenses/sqlite.txt"
   }
 }

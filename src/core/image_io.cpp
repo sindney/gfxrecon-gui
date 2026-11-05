@@ -52,7 +52,7 @@ void WriteBmp(const std::filesystem::path& file,const Image& image){
     std::ofstream stream(file,std::ios::binary|std::ios::trunc);stream.write(reinterpret_cast<const char*>(out.data()),static_cast<std::streamsize>(out.size()));
     if(!stream)throw std::runtime_error("Cannot write BMP "+file.u8string());
 }
-Image ComposeDrawOutline(const Image& original,const Image& coverageA,const Image& coverageB,uint32_t thickness){
+Image ComposeDrawOutline(const Image& original,const Image& coverageA,const Image& coverageB,uint32_t thickness,ImageSourceEncoding sourceEncoding){
     const auto pixels=size_t(original.width)*original.height;
     if(!pixels||original.rgba.size()!=pixels*4||thickness<1||thickness>8)throw std::runtime_error("Invalid outline image or thickness");
     for(const auto* image:{&coverageA,&coverageB}){
@@ -62,11 +62,16 @@ Image ComposeDrawOutline(const Image& original,const Image& coverageA,const Imag
     std::vector<uint8_t> mask(pixels);
     for(size_t p=0;p<pixels;++p)mask[p]=coverageA.rgba[p*4]!=coverageB.rgba[p*4]||coverageA.rgba[p*4+1]!=coverageB.rgba[p*4+1]||coverageA.rgba[p*4+2]!=coverageB.rgba[p*4+2];
     auto result=original;
+    // Palette is authored in display-sRGB bytes. Store it in the same encoding
+    // as the original image so the viewer's display transform keeps its color.
+    uint8_t orange[3]{255,140,0};
+    if(sourceEncoding==ImageSourceEncoding::Linear)
+        for(auto& channel:orange)channel=static_cast<uint8_t>(std::lround(SrgbToLinear(channel/255.0f)*255.0f));
     auto covered=[&](int64_t x,int64_t y){return x>=0&&y>=0&&x<original.width&&y<original.height&&mask[size_t(y)*original.width+size_t(x)];};
     for(uint32_t y=0;y<original.height;++y)for(uint32_t x=0;x<original.width;++x)if(mask[size_t(y)*original.width+x]){
         bool boundary=false;
         for(int distance=1;distance<=static_cast<int>(thickness)&&!boundary;++distance)boundary=!covered(int64_t(x)-distance,y)||!covered(int64_t(x)+distance,y)||!covered(x,int64_t(y)-distance)||!covered(x,int64_t(y)+distance);
-        if(boundary){const auto p=(size_t(y)*original.width+x)*4;result.rgba[p]=255;result.rgba[p+1]=140;result.rgba[p+2]=0;result.rgba[p+3]=255;}
+        if(boundary){const auto p=(size_t(y)*original.width+x)*4;result.rgba[p]=orange[0];result.rgba[p+1]=orange[1];result.rgba[p+2]=orange[2];result.rgba[p+3]=255;}
     }
     return result;
 }

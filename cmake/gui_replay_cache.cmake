@@ -47,3 +47,4 @@ cmake_language(DEFER CALL gfx_gui_replay_cache)
 include("${CMAKE_CURRENT_LIST_DIR}/gui_dump_readback.cmake")
 
 include("${CMAKE_CURRENT_LIST_DIR}/gui_draw_visualization.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/gui_gpu_profiling.cmake")

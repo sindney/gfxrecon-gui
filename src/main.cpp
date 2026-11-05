@@ -6,6 +6,7 @@
 #include "platform/os_layer.h"
 #include "platform/platform.h"
 #include "platform/process.h"
+#include <implot.h>
 
 #include <cstdio>
 #include <cstring>
@@ -119,6 +120,7 @@ int main(int argc, char** argv) {
     }
 #endif
 
+    ImPlot::CreateContext();
     ImGui::GetIO().IniFilename = layoutPath.c_str();
     ImGui::StyleColorsDark();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable |
@@ -133,11 +135,6 @@ int main(int argc, char** argv) {
     ImGui::GetStyle().ScaleAllSizes(dpiScale);
     tpl::LoadUiFonts(dpiScale);
 
-#ifdef IMGUI_TEMPLATE_OSLAYER_SFML
-    // imgui-SFML owns the font texture on this layer; rebuild it after loading.
-    ImGui::SFML::UpdateFontTexture();
-#endif
-
     tpl::App app;
 #ifdef IMGUI_TEMPLATE_TESTS
     if (WantsTests(argc, argv)) {
@@ -149,6 +146,11 @@ int main(int argc, char** argv) {
     } else
 #endif
         app.Init(settingsPath);
+#ifdef IMGUI_TEMPLATE_OSLAYER_SFML
+    // Workspace initialization adds editor/CJK fonts too. The legacy SFML
+    // renderer needs the complete atlas uploaded after those additions.
+    if (!ImGui::SFML::UpdateFontTexture()) LOGE("font") << "Could not upload the complete SFML font atlas";
+#endif
     const bool quitWhenReady = std::find(nativeArgs.begin(), nativeArgs.end(), "--quit-when-ready") != nativeArgs.end();
     for (size_t i = 1; i + 1 < nativeArgs.size(); ++i)
         if (nativeArgs[i] == "--open") app.Workspace().Open(nativeArgs[++i]);
@@ -204,7 +206,7 @@ int main(int argc, char** argv) {
         if (recordingTest)
             ImGuiTestEngine_QueueTest(engine, recordingTest, ImGuiTestRunFlags_RunFromCommandLine);
         else
-            ImGuiTestEngine_QueueTests(engine, ImGuiTestGroup_Tests, nullptr,
+            ImGuiTestEngine_QueueTests(engine, ImGuiTestGroup_Tests, std::getenv("GFXRECON_GUI_TEST_FILTER"),
                                       ImGuiTestRunFlags_RunFromCommandLine);
     }
 #endif
@@ -270,6 +272,7 @@ int main(int argc, char** argv) {
 
     // Backend teardown while the imgui context is alive, then context, then
     // the test engine (which requires the imgui context already destroyed).
+    ImPlot::DestroyContext();
     os::ShutdownBackend();
     std::fprintf(stderr, "[shutdown] backend done\n");
     if (!os::BackendDestroyedImGuiContext())

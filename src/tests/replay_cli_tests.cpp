@@ -1,10 +1,13 @@
 // CLI replay/compare/shader/perf contracts. Desktop replays need local-tools.json and samples/; skipped with a note otherwise.
 #include "cli/cli.h"
 #include "core/image_io.h"
+#include "core/artifacts.h"
 #include "analysis/geometry_summary.h"
 #include <array>
+#include <exception>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 
 namespace gfx::tests {
@@ -143,7 +146,15 @@ bool HasFiles(const fs::path& directory, const std::string& name) {
 } // namespace
 
 void RunReplayCliTests(const fs::path& root) {
-    struct Cleanup { fs::path root; ~Cleanup() { std::error_code ignored; for (const auto* name : {"replay-cli-images", "replay-cli-settings", "replay-cli-work"}) fs::remove_all(root / name, ignored); } } cleanup{root};
+    struct Cleanup {
+        fs::path root;
+        int exceptions = std::uncaught_exceptions();
+        ~Cleanup() {
+            if (std::uncaught_exceptions() > exceptions) return; // Keep failed replay evidence for diagnosis.
+            std::error_code ignored;
+            for (const auto* name : {"replay-cli-images", "replay-cli-settings", "replay-cli-work"}) fs::remove_all(root / name, ignored);
+        }
+    } cleanup{root};
     using namespace gfx::cli;
     RegisterAll();
     const auto settings = (root / "replay-cli-settings").u8string();
@@ -154,10 +165,54 @@ void RunReplayCliTests(const fs::path& root) {
     GeometryTests(root);
     // Option contract errors need no tools.
     Require(Invoke(Join({"replay", "frame", "--capture", "x.gfxr"}, global)).exit == kUsage, "frame requires --frame");
+    Require(Invoke(Join({"replay", "frame", "--capture", "x.gfxr", "--frame", "1", "--swapchain", "headless"}, global)).exit == kUsage,
+        "invalid frame swapchain rejected before import/replay");
+    Require(Parse({"replay", "frame", "--capture", "x.gfxr", "--frame", "1"}).args.Get("swapchain") == "virtual",
+        "frame swapchain default remains virtual");
+    for (const auto* mode : {"virtual", "captured", "offscreen"})
+        Require(Parse({"replay", "frame", "--capture", "x.gfxr", "--frame", "1", "--swapchain", mode}).args.Get("swapchain") == mode,
+            "frame swapchain mode not accepted by the registry parser");
+    for (const auto* policy : {"default", "none", "remap", "realign", "rebind"}) {
+        Require(Parse({"replay", "frame", "--capture", "x.gfxr", "--frame", "1", "--memory-translation", policy}).args.Get("memory-translation") == policy, "frame memory policy parser");
+        Require(Parse({"replay", "draw", "--capture", "x.gfxr", "--block", "1", "--memory-translation", policy}).args.Get("memory-translation") == policy, "draw memory policy parser");
+        Require(Parse({"replay", "draws", "--capture", "x.gfxr", "--executions", "0", "--memory-translation", policy}).args.Get("memory-translation") == policy, "draws memory policy parser");
+        Require(Parse({"perf", "--capture", "x.gfxr", "--memory-translation", policy}).args.Get("memory-translation") == policy, "perf memory policy parser");
+        Require(Parse({"dump", "--capture", "x.gfxr", "--out", "unused", "--dynamic", "frame", "--memory-translation", policy}).args.Get("memory-translation") == policy, "dynamic dump memory policy parser");
+    }
+    Require(Invoke(Join({"replay", "frame", "--capture", "x.gfxr", "--frame", "1", "--memory-translation", "automatic"}, global)).exit == kUsage, "invalid memory policy rejected before import");
+    Require(Invoke(Join({"perf", "--capture", "x.gfxr", "--memory-translation", "automatic"}, global)).exit == kUsage, "invalid perf memory policy rejected before import");
+    const auto description = Describe();
+    const auto frameDescription = std::find_if(description.at("commands").begin(), description.at("commands").end(), [](const Json& command) { return command.at("name") == "replay frame"; });
+    Require(frameDescription != description.at("commands").end(), "frame command missing from describe");
+    const auto swapchainOption = std::find_if(frameDescription->at("options").begin(), frameDescription->at("options").end(), [](const Json& option) { return option.at("name") == "--swapchain"; });
+    Require(swapchainOption != frameDescription->at("options").end() && swapchainOption->at("value") == "virtual|captured|offscreen" && swapchainOption->at("default") == "virtual",
+        "frame help/describe does not expose supported swapchains and the default");
     Require(Invoke(Join({"replay", "draw", "--capture", "x.gfxr"}, global)).exit == kUsage, "draw requires a selector");
     Require(Invoke(Join({"replay", "draw", "--capture", "x.gfxr", "--block", "1", "--execution", "2"}, global)).exit == kUsage, "one selector only");
     Require(Code(Invoke(Join({"replay", "frame", "--capture", (root / "none.gfxr").u8string(), "--frame", "1"}, global))) == "capture_not_found", "missing capture");
     Require(Invoke(Join({"shader", "compile", "x.frag", "--stage", "bogus", "--output", "x.spv"}, global)).exit == kUsage, "bad stage is a usage error");
+    Require(Invoke(Join({"perf", "--capture", "x.gfxr", "--gpu-timing", "pass"}, global)).exit == kUsage, "unsupported GPU scope rejected before importing or launching replay");
+    Require(Invoke(Join({"perf", "--capture", "x.gfxr", "--swapchain", "headless"}, global)).exit == kUsage, "unsupported swapchain rejected before importing or launching replay");
+    for (const auto* obsolete : {"--sustained", "--fps", "--duration-ms", "--warmup-ms"}) {
+        auto options = std::vector<std::string>{"perf", "--capture", "x.gfxr", obsolete};
+        if (std::string(obsolete) != "--sustained") options.push_back("1000");
+        Require(Invoke(Join(options, global)).exit == kUsage, "removed inner-loop option must be unknown");
+    }
+    Require(Invoke(Join({"perf", "--capture", "x.gfxr", "--counter-profile", "busy"}, global)).exit == kUsage, "invalid counter profile");
+    Require(Invoke(Join({"perf", "--capture", "x.gfxr", "--counter-profile", "bandwidth"}, global)).exit == kUsage, "counter sampling needs one explicit frame");
+    Require(Invoke(Join({"perf", "--capture", "x.gfxr", "--counter-profile", "precision", "--frames", "1-2"}, global)).exit == kUsage, "counter frame range rejected");
+    Require(Invoke(Join({"perf", "--capture", "x.gfxr", "--counter-period-us", "1000"}, global)).exit == kUsage, "period requires an active profile");
+    Require(Invoke(Join({"perf", "--capture", "x.gfxr", "--counter-profile", "none", "--counter-period-us", "1000"}, global)).exit == kUsage, "none cannot request counters implicitly");
+    for (const auto* profile : {"none", "all", "precision", "bandwidth"})
+        Require(Code(Invoke(Join({"perf", "--capture", (root / "missing-profile-capture.gfxr").u8string(), "--frames", "1", "--counter-profile", profile}, global))) == "capture_not_found",
+            std::string("valid fresh-frame profile rejected before capture validation: ") + profile);
+    const auto perfDescription = std::find_if(description.at("commands").begin(), description.at("commands").end(), [](const Json& command) { return command.at("name") == "perf"; });
+    Require(perfDescription != description.at("commands").end(), "perf command missing from describe");
+    const auto profileOption = std::find_if(perfDescription->at("options").begin(), perfDescription->at("options").end(), [](const Json& option) { return option.at("name") == "--counter-profile"; });
+    Require(Invoke(Join({"perf","--capture","x.gfxr","--counters"},global)).exit==kUsage,"all counters require a single frame");
+    Require(Invoke(Join({"perf","--capture","x.gfxr","--frames","1","--counters","--counter-profile","none"},global)).exit==kUsage,"conflicting counter toggles accepted");
+    Require(profileOption != perfDescription->at("options").end() && profileOption->at("value") == "none|all|precision|bandwidth" &&
+        profileOption->at("help").get<std::string>().find("default none") != std::string::npos, "perf describe does not expose optional counter profiles");
 
     const auto toolsFile = FindUpwards(fs::current_path(), "local-tools.json");
     const auto capture = FindUpwards(fs::current_path(), "samples/windows-triangle.gfxr");
@@ -170,6 +225,18 @@ void RunReplayCliTests(const fs::path& root) {
     const auto tools = Join(global, {"--tools", toolsFile.u8string()});
     const auto work = root / "replay-cli-work"; fs::create_directories(work);
     const auto cap = capture.u8string();
+
+    // A request rejected before owning output must not advertise an artifact
+    // that does not exist, and stale session evidence must survive even when
+    // override preparation would otherwise attempt to populate that directory.
+    const auto priorSustainedOutput = work / "counter-existing-evidence"; fs::create_directories(priorSustainedOutput);
+    { std::ofstream saved(priorSustainedOutput / "result.json"); saved << "{\"status\":\"complete\",\"evidence\":\"retain\"}"; }
+    { std::ofstream saved(priorSustainedOutput / "failure.json"); saved << "{\"session_id\":\"prior-session\",\"message\":\"retain\"}"; }
+    const auto previousResult = Sha256File(priorSustainedOutput / "result.json"), previousFailure = Sha256File(priorSustainedOutput / "failure.json");
+    const auto staleSustained = Invoke(Join({"perf", "--capture", cap, "--frames", "1", "--counter-profile", "bandwidth", "--override", "999999=missing.spv", "--out", priorSustainedOutput.u8string()}, tools));
+    Require(Code(staleSustained) == "perf_output_not_fresh" && !staleSustained.document["error"]["detail"].contains("failure_report") &&
+        Sha256File(priorSustainedOutput / "result.json") == previousResult && Sha256File(priorSustainedOutput / "failure.json") == previousFailure &&
+        !fs::exists(priorSustainedOutput / "overrides"), "completed counter evidence was overwritten, reattributed, or staged into: " + staleSustained.text);
 
     // Static shader round trip: export, compile, check.
     const auto exportDir = work / "export";
@@ -219,9 +286,17 @@ void RunReplayCliTests(const fs::path& root) {
     const auto frame = Invoke(Join({"replay", "frame", "--capture", cap, "--frame", "1", "--out", frameOut.u8string()}, tools));
     Require(frame.exit == 0, "frame replay: " + frame.text);
     const auto& f = frame.document["result"];
+    Require(f["swapchain"]["requested"] == "virtual", "default frame swapchain provenance");
+    Require(f["memory_translation"]["requested"] == "default" && f["memory_translation"]["effective"] == ResolveMemoryTranslation("default", false) &&
+        f["memory_translation"]["source"] == "backend_arguments" && f["memory_translation"]["backend_confirmed"] == false, "default memory policy provenance must not claim native confirmation");
     Require(f["cache_hit"] == false && f["target"]["android"] == false && fs::is_regular_file(fs::u8path(f["image"].get<std::string>())) && fs::is_regular_file(fs::u8path(f["image_png"].get<std::string>())) &&
         fs::is_regular_file(fs::u8path(f["manifest"].get<std::string>())) && fs::is_regular_file(fs::u8path(f["replay_log"].get<std::string>())), "frame artifacts");
     const auto png = LoadImage(fs::u8path(f["image_png"].get<std::string>())); Require(png.width > 0 && png.height > 0, "frame png");
+    const auto remapped = Invoke(Join({"replay", "frame", "--capture", cap, "--frame", "1", "--memory-translation", "remap", "--out", (work / "frame-remap").u8string()}, tools));
+    Require(remapped.exit == 0, "explicit remap frame: " + remapped.text);
+    Require(remapped.document["result"]["cache_hit"] == false && remapped.document["result"]["memory_translation"]["effective"] == "remap", "remap must not restore default-policy artifacts");
+    { std::ifstream file(fs::u8path(remapped.document["result"]["manifest"].get<std::string>())); const auto provenance = Json::parse(file);
+      Require(provenance["request_identity"]["memory_translation"] == "remap" && provenance["request_identity"]["memory_translation_policy"]["requested"] == "remap", "memory policy missing from cache/request identity"); }
     Require(f["operation_timings"]["replay_calls"]==1 && f["operation_timings"]["total_seconds"].get<double>()>=f["operation_timings"]["replay_wall_seconds"].get<double>(),"frame wall time includes replay and frontend");
     const auto cached = Invoke(Join({"replay", "frame", "--capture", cap, "--frame", "1", "--out", (work / "frame2").u8string()}, tools));
     Require(cached.exit == 0 && cached.document["result"]["cache_hit"] == true, "second frame replay hits the shared result cache");
@@ -298,10 +373,24 @@ void RunReplayCliTests(const fs::path& root) {
     { std::ifstream in(exportDir / "module.glsl"); std::string text((std::istreambuf_iterator<char>(in)), {});
       const auto at = text.find("vec4(fragColor, 1.0)"); Require(at != std::string::npos, "exported glsl body");
       text.replace(at, 20, "vec4(fragColor.bgr, 1.0)"); std::ofstream out(work / "swap.frag"); out << text; }
-    const auto base = Invoke(Join({"replay", "frame", "--capture", cap, "--frame", "1", "--override", "21=" + (work / "swap.frag").u8string(), "--baseline", "--out", (work / "baseline").u8string()}, tools));
+    // Image-mode coverage must not prime only the baseline offscreen pipeline
+    // cache used by the later GPU comparison's independent cold/cold pair.
+    auto imagePairTools = tools;
+    const auto imageSettings = std::find(imagePairTools.begin(), imagePairTools.end(), "--settings-dir");
+    Require(imageSettings != imagePairTools.end() && std::next(imageSettings) != imagePairTools.end(), "Image comparison settings are missing");
+    *std::next(imageSettings) = (work / "offscreen-image-settings").u8string();
+    const auto base = Invoke(Join({"replay", "frame", "--capture", cap, "--frame", "1", "--swapchain", "offscreen", "--override", "21=" + (work / "swap.frag").u8string(), "--baseline", "--out", (work / "baseline").u8string()}, imagePairTools));
     Require(base.exit == 0, "baseline override replay: " + base.text);
     const auto& b = base.document["result"];
     Require(b["overrides"][0]["module"] == 21 && b["overrides"][0]["confirmed"] == true && b["runs"].contains("baseline") && b["runs"].contains("modified"), "baseline result");
+    for (const auto* variant : {"baseline", "modified"}) {
+        const auto& run = b["runs"][variant];
+        Require(run["swapchain"]["requested"] == "offscreen" && run["swapchain"]["effective"] == "offscreen",
+            "frame baseline/override did not use the matched requested/effective swapchain");
+        std::ifstream manifest(fs::u8path(run["manifest"].get<std::string>())); const auto evidence = Json::parse(manifest);
+        Require(evidence["request_identity"]["swapchain_mode"] == "offscreen" && evidence["swapchain"]["effective"] == "offscreen",
+            "frame mode missing from existing cache identity or manifest provenance");
+    }
     Require(b["comparison"]["identical"] == false && b["comparison"]["max_abs_diff"]["g"] == 0 && b["comparison"]["max_abs_diff"]["r"].get<int>() > 100 && fs::is_regular_file(fs::u8path(b["comparison"]["diff_image"].get<std::string>())), "baseline comparison: " + b["comparison"].dump());
     const auto outlinedPair=diagnostic("outline","outline-pair",{"--override","21="+(work/"swap.frag").u8string(),"--baseline"});
     Require(outlinedPair.exit==0,"outline baseline/modified: "+outlinedPair.text);
@@ -335,6 +424,64 @@ void RunReplayCliTests(const fs::path& root) {
     Require(p["summary"]["frame_time_ms"]["min"].get<double>() > 0 && p["summary"]["frame_time_ms"]["max"].get<double>() >= p["summary"]["frame_time_ms"]["median"].get<double>() &&
         p["summary"]["fps"]["median"].get<double>() > 0 && p["runs"][0]["load_seconds"].is_number() && p["runs"][0]["frames_measured"] == 2, "perf metrics");
     Require(fs::is_regular_file(fs::u8path(p["runs"][0]["measurement_file"].get<std::string>())) && p["runs"][0]["cache_hit"] == false, "perf measurement file, no result cache");
+    // Supported GPU backends must deliver device timestamps and retain per-frame
+    // comparisons separately from CPU metrics. Missing protocol is actionable.
+    const auto gpu = Invoke(Join({"perf", "--capture", cap, "--frames", "2-3", "--counter-profile", "none", "--override", "21=" + (work / "c.spv").u8string(), "--out", (work / "gpu-perf").u8string()}, tools));
+    if (gpu.exit == 0) {
+        const auto& result = gpu.document["result"];
+        // Baseline-only counter fallback runs must not warm just one variant
+        // of the independent offscreen comparison below.
+        auto counterTools = tools;
+        const auto counterSettings = std::find(counterTools.begin(), counterTools.end(), "--settings-dir");
+        Require(counterSettings != counterTools.end() && std::next(counterSettings) != counterTools.end(), "Counter test settings are missing");
+        *std::next(counterSettings) = (work / "optional-counter-settings").u8string();
+        const auto optionalCounters = Invoke(Join({"perf", "--capture", cap, "--frames", "1", "--counter-profile", "bandwidth", "--runs", "2", "--out", (work / "optional-local-counters").u8string()}, counterTools));
+        Require(optionalCounters.exit == 0 && optionalCounters.document["result"]["runs"].size() == 2, "Optional local counters must retain fresh GPU runs: " + optionalCounters.text);
+        for (const auto& run : optionalCounters.document["result"]["runs"])
+            Require(run["gpu"]["status"] == "complete" && run["gpu"]["samples"].size() == 1 && run["counters"]["status"] == "unavailable",
+                "Unsupported local counter provider invalidated valid GPU timing");
+        Require(result["runs_requested"] == 1 && result["runs"].size() == 2, "GPU defaults to one baseline/modified pair");
+        Require(result["runs"][0]["variant"] == "baseline" && result["runs"][1]["variant"] == "modified", "GPU alternating variant order");
+        for (const auto& run : result["runs"]) {
+            Require(run["gpu"]["status"] == "complete" && run["gpu"]["samples"].size() == 2 && run["optimized_replay"] == false && run["cache_hit"] == false, "fresh original-capture GPU frame samples");
+            for (const auto& sample : run["gpu"]["samples"])
+                Require(sample["valid"] == true && sample["timestamp_valid_bits"].get<int>() > 0 && sample["elapsed_ns"].get<double>() >= 0, "GPU timestamp evidence");
+        }
+        Require(result["gpu_frame_deltas"].size() == 2, "GPU compares corresponding frames without pooling them");
+        Require(result["runs"][1]["gpu"]["overrides"][0]["applied"] == true, "GPU structured shader application evidence");
+        Require(result["runs"][0]["gpu"]["swapchain"]["effective"] == "virtual", "Default effective GPU swapchain evidence");
+        const auto offscreen = Invoke(Join({"perf", "--capture", cap, "--frames", "2-3", "--gpu-timing", "isolated-frame", "--swapchain", "offscreen", "--override", "21=" + (work / "c.spv").u8string(), "--out", (work / "gpu-offscreen").u8string()}, tools));
+        Require(offscreen.exit == 0, "Offscreen GPU replay: " + offscreen.text);
+        const auto& os = offscreen.document["result"];
+        for (const auto& run : os["runs"]) {
+            Require(run["swapchain"]["requested"] == "offscreen" && run["swapchain"]["effective"] == "offscreen" &&
+                run["gpu"]["swapchain"]["effective"] == "offscreen", "Offscreen effective mode must be backend-confirmed");
+            const auto manifest = fs::u8path(run["manifest"].get<std::string>());
+            std::ifstream in(manifest); const auto provenance = Json::parse(in);
+            Require(provenance["request_identity"]["swapchain_mode"] == "offscreen", "Offscreen mode missing from cache identity");
+        }
+        Require(os["runs"][0]["gpu"]["provenance"]["cache_observations"]["pipeline_cache_identity"] !=
+            result["runs"][0]["gpu"]["provenance"]["cache_observations"]["pipeline_cache_identity"], "Virtual/offscreen baseline pipeline caches must be segregated");
+        Require(os["runs"][0]["pipeline_cache_loaded"] == false && os["runs"][1]["pipeline_cache_loaded"] == false,
+            "Independent offscreen comparison must start cold/cold; baseline=" + os["runs"][0]["pipeline_cache_loaded"].dump() +
+            ", modified=" + os["runs"][1]["pipeline_cache_loaded"].dump());
+        for (const auto& delta : os["gpu_frame_deltas"]) Require(delta["status"] == "comparable",
+            "Matching offscreen variants should be comparable: " + delta.dump() + "; baseline cache loaded=" +
+            os["runs"][0]["pipeline_cache_loaded"].dump() + ", modified cache loaded=" + os["runs"][1]["pipeline_cache_loaded"].dump());
+    } else {
+        Require(Code(gpu) == "gpu_measurement_failed" && gpu.document["error"]["detail"]["cpu_fallback"] == false,
+            "GPU errors cannot fall back to CPU timing: " + gpu.text);
+        const auto message = gpu.document["error"]["message"].get<std::string>();
+        bool unavailable = message.find("identity-matched capability file") != std::string::npos;
+        const auto report = fs::u8path(gpu.document["error"]["detail"]["gpu_report"].get<std::string>());
+        if (fs::is_regular_file(report)) {
+            std::ifstream in(report); const auto evidence = Json::parse(in);
+            const auto reason = evidence.value("error", Json::object()).value("code", "");
+            unavailable = reason == "gpu_timestamp_unsupported" || reason == "gpu_timestamp_domain_unsupported";
+        }
+        Require(unavailable, "Unexpected GPU regression must fail the integration test: " + gpu.text);
+        std::cout << "GPU backend unavailable on test device: " << gpu.document["error"]["message"] << '\n';
+    }
     std::cout << "Replay CLI checks passed\n";
 }
 } // namespace gfx::tests

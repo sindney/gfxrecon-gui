@@ -66,6 +66,10 @@ def main():
         config['adb'] = str(args.sdk_root.resolve() / 'platform-tools' / ('adb.exe' if os.name == 'nt' else 'adb'))
         config['replay_apk'] = str(android / 'tools/replay/build/outputs/apk/debug/replay-debug.apk')
         config['test_apk'] = str(android / 'test/test_apps/launcher/build/outputs/apk/debug/test_launcher-debug.apk')
+        from build_counter_producer import build_counter_producer
+        producer = ROOT / 'build-tools/android/gpu-counter-producer'
+        build_counter_producer(args.sdk_root / 'ndk/26.3.11579264', producer)
+        config['gpu_counter_producer'] = str(producer)
         from write_replay_capability import write_capability
         write_capability(config['replay_apk'])
     local_path.write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')

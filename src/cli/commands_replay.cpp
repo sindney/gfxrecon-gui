@@ -8,6 +8,9 @@
 #include "shaders/diagnostics.h"
 #include "analysis/dump_dynamic.h"
 #include "analysis/geometry_summary.h"
+#include "replay/gpu_measurement.h"
+#include "replay/perf_session.h"
+#include "platform/device_lock.h"
 
 #include <algorithm>
 #include <cmath>
@@ -130,6 +133,18 @@ Opened OpenReplayable(const Context& context, const fs::path& file) {
         throw CliError(kFailed, "not_replayable", "Only .gfxr captures can be replayed: " + U8(file), {{"capture", U8(file)}});
     return opened;
 }
+std::string ReplaySwapchainMode(const Args& args) {
+    const auto mode = args.Get("swapchain", "virtual");
+    if (mode != "virtual" && mode != "captured" && mode != "offscreen")
+        throw Usage("--swapchain expects virtual, captured or offscreen");
+    return mode;
+}
+std::string ReplayMemoryTranslation(const Args& args) {
+    const auto mode = args.Get("memory-translation", "default");
+    try { (void)ResolveMemoryTranslation(mode, false); }
+    catch (const std::exception&) { throw Usage("--memory-translation expects default, none, remap, realign or rebind"); }
+    return mode;
+}
 ReplayRequest BaseRequest(const Context& context, const Capture& capture, const ReplayTarget& target, const Args& args, bool validate) {
     ReplayRequest request;
     request.capture = capture.source;
@@ -139,6 +154,8 @@ ReplayRequest BaseRequest(const Context& context, const Capture& capture, const 
     request.reuseArtifacts = !args.Has("fresh");
     request.screenOff = args.Has("screen-off") && target.android;
     request.validation = validate;
+    request.swapchainMode = ReplaySwapchainMode(args);
+    request.memoryTranslation = ReplayMemoryTranslation(args);
     request.timeout = ReplayTimeout(context, target, validate);
     request.progress = [&context](const std::string& text) { context.Progress(text); };
     return request;
@@ -162,6 +179,9 @@ ReplayResult RunReplay(const Context& context, const ReplayRequest& request, con
         }
         if (request.validation && text.find("was not enabled") != std::string::npos)
             throw CliError(kMissingTool, "validation_unavailable", text, {{"validation", {{"status", "unavailable"}, {"report", U8(request.output / "validation.json")}}}});
+        if (request.measurement.gpu)
+            throw CliError(kFailed, "gpu_measurement_failed", text, {{"gpu_report", U8(request.output / "gpu-measurement.json")},
+                {"replay_log", U8(request.output / "replay.log")}, {"cpu_fallback", false}});
         throw;
     }
 }
@@ -198,6 +218,8 @@ Json RunJson(const ReplayRequest& request, const ReplayResult& result, const Rep
     Json run{{"run", request.prefix}, {"output_dir", U8(request.output)}, {"target", result.target}, {"serial", target.serial},
         {"replay_log", U8(request.output / "replay.log")}, {"manifest", U8(request.output / "manifest.json")}, {"timings", result.timings},
         {"cache_hit", result.timings.value("artifact_cache_hit", false)}, {"optimized_replay", result.timings.value("optimized_replay", false)}};
+    run["swapchain"] = result.timings.value("swapchain", Json{{"requested", request.swapchainMode}, {"effective", nullptr}, {"source", "unavailable"}});
+    run["memory_translation"] = result.timings.value("memory_translation", ReplayMemoryTranslationPolicy(request.memoryTranslation, target.android));
     if (!result.image.empty()) {
         std::string png; auto entry = WithPng(result.image, &png);
         run["image"] = U8(result.image); run["image_png"] = png; run["image_info"] = entry;
@@ -281,7 +303,7 @@ Json ExecuteReplay(const Context& context, const Args& args, const Opened& opene
     runs[modifiedRunResult->first.prefix] = RunJson(modifiedRunResult->first, modifiedRunResult->second, target);
     result["runs"] = runs;
     const auto& last = runs[modifiedRunResult->first.prefix];
-    for (const char* key : {"image", "image_png", "selected_output", "replay_log", "manifest", "timings", "cache_hit", "outputs", "inputs", "mesh", "validation"}) if (last.contains(key)) result[key] = last[key];
+    for (const char* key : {"image", "image_png", "selected_output", "replay_log", "manifest", "timings", "cache_hit", "swapchain", "memory_translation", "outputs", "inputs", "mesh", "validation"}) if (last.contains(key)) result[key] = last[key];
     if (base) result["comparison"] = CompareRuns(base->second, modifiedRunResult->second, root);
     if (!overrides.files.empty()) {
         result["overrides"] = overrides.report;
@@ -308,11 +330,13 @@ std::vector<Option> ReplayOptions(std::vector<Option> specific) {
         {"baseline", "", "Also replay without overrides (prefix baseline) and compare the images"},
         {"screen-off", "", "Turn the Android screen off during replay (restored afterwards)"},
         {"no-optimize", "", "Replay the original capture instead of the optimized copy"},
+        {"memory-translation", "default|none|remap|realign|rebind", "Memory portability policy; default preserves the platform default", false, false, "default"},
         {"fresh", "", "Bypass the shared result cache"}};
     options.insert(options.end(), specific.begin(), specific.end());
     return options;
 }
 fs::path RequireCapture(const Args& args) {
+    (void)ReplayMemoryTranslation(args); // Reject unsupported policy before import/device work.
     if (!args.Has("capture")) throw Usage("--capture FILE is required");
     return Path(args.Get("capture"));
 }
@@ -320,6 +344,7 @@ fs::path RequireCapture(const Args& args) {
 // ---- replay frame -------------------------------------------------------------------------------------------
 Json ReplayFrame(Context& context, const Args& args) {
     const auto started = std::chrono::steady_clock::now(); InspectionTiming timing;
+    (void)ReplaySwapchainMode(args); // Validate before importing or launching replay.
     const auto opened = OpenReplayable(context, RequireCapture(args));
     const auto& capture = *opened.import.capture;
     const auto frame = args.Number("frame", 0);
@@ -771,7 +796,8 @@ Json PerfRun(const Context& context, const ReplayRequest& base, const ReplayTarg
     Json run{{"variant", variant}, {"index", index}, {"output_dir", U8(dir)}, {"replay_log", U8(dir / "replay.log")}, {"measurement_file", U8(dir / "measurement.json")},
         {"cache_hit", result.timings.value("artifact_cache_hit", false)}, {"capture_upload_reused", result.timings.value("capture_upload_reused", false)},
         {"pipeline_cache_loaded", result.timings.value("pipeline_cache_loaded", false)}, {"screen_off", result.timings.value("screen_off", false)},
-        {"optimized_replay", result.timings.value("optimized_replay", false)}, {"timings", result.timings}};
+        {"optimized_replay", result.timings.value("optimized_replay", false)}, {"timings", result.timings},
+        {"swapchain", result.timings.at("swapchain")}, {"memory_translation", result.timings.at("memory_translation")}};
     const double load = LoadSeconds(result.log);
     run["load_seconds"] = std::isnan(load) ? Json(nullptr) : Json(load);
     const auto range = result.measurement.value("frame_range", Json::object());
@@ -785,21 +811,121 @@ Json PerfRun(const Context& context, const ReplayRequest& base, const ReplayTarg
         const auto s = Stats(ms);
         run["per_frame_ms"] = {{"min", s["min"]}, {"median", s["median"]}, {"max", s["max"]}};
     }
+    run["manifest"] = U8(dir / "manifest.json");
+    if (base.measurement.gpu) {
+        run["gpu_measurement_file"] = U8(dir / "gpu-measurement.json");
+        run["gpu"] = result.gpuMeasurement;
+    }
     return run;
 }
+
+// Compare corresponding frame samples only. The interval may include waits and
+// CPU submission gaps between endpoints; it never uses the upstream replay timer.
+Json GpuFrameDeltas(const Json& baseline, const Json& modified) {
+    const auto& b = baseline.at("gpu"); const auto& m = modified.at("gpu");
+    std::string incompatibility;
+    if (b.at("backend_sha256") != m.at("backend_sha256") || b.at("protocol") != m.at("protocol")) incompatibility = "Replay backend or GPU protocol differs";
+    else if (b.at("capture_sha256") != m.at("capture_sha256")) incompatibility = "Replayed capture bytes differ";
+    else if (b.at("device") != m.at("device")) incompatibility = "Replay device or driver differs";
+    else if (b.at("swapchain") != m.at("swapchain")) incompatibility = "Requested or effective swapchain modes differ";
+    else if (b.value("memory_translation", Json{}) != m.value("memory_translation", Json{})) incompatibility = "Memory translation policy differs";
+    else if (b.at("mode") != m.at("mode")) incompatibility = "GPU measurement modes differ";
+    else if (b.at("provenance").at("cache_policy") != m.at("provenance").at("cache_policy")) incompatibility = "Explicit cache policies differ";
+    else if (baseline.at("pipeline_cache_loaded") != modified.at("pipeline_cache_loaded")) incompatibility = "Pipeline cache load state differs";
+    Json deltas = Json::array();
+    for (const auto& before : b.at("samples")) {
+        const auto frame = before.at("frame");
+        const auto after = std::find_if(m.at("samples").begin(), m.at("samples").end(), [&](const Json& sample) { return sample.at("frame") == frame; });
+        Json row{{"frame", frame}, {"index", baseline.at("index")}, {"status", "incomparable"}};
+        std::string reason = incompatibility;
+        if (after == m.at("samples").end()) reason = "Modified frame sample is missing";
+        else if (!before.value("valid", false) || !after->value("valid", false)) reason = "A GPU sample is invalid";
+        else {
+            for (const char* key : {"queue_id", "first_submit", "last_submit", "submit_blocks", "start_stage", "end_stage", "clock_domain", "execution_mode", "timestamp_period_ns", "timestamp_valid_bits", "completion"})
+                if (before.at(key) != after->at(key)) { reason = "GPU sample scopes differ"; break; }
+        }
+        if (reason.empty()) {
+            const double previous = before.at("elapsed_ms").get<double>(), current = after->at("elapsed_ms").get<double>();
+            row["status"] = "comparable"; row["baseline_ms"] = previous; row["modified_ms"] = current;
+            row["delta_ms"] = current - previous;
+            row["delta_percent"] = previous > 0 ? Json((current - previous) / previous * 100.0) : Json(nullptr);
+        } else row["reason"] = reason;
+        deltas.push_back(std::move(row));
+    }
+    return deltas;
+}
+
 Json Perf(Context& context, const Args& args) {
+    auto counterProfile = args.Get("counter-profile", args.Has("counters") ? "all" : "none");
+    if(args.Has("counters") && counterProfile=="none")throw Usage("--counters conflicts with --counter-profile none");
+    if (counterProfile != "none" && counterProfile != "all" && counterProfile != "precision" && counterProfile != "bandwidth")
+        throw Usage("--counter-profile expects none or all (precision/bandwidth are compatibility aliases for all)");
+    if(counterProfile=="precision" || counterProfile=="bandwidth")counterProfile="all";
+    const bool counters = counterProfile != "none";
+    if (!counters && args.Has("counter-period-us")) throw Usage("--counter-period-us requires an active --counter-profile");
+    if (counters && (args.Get("frames").empty() || !std::regex_match(args.Get("frames"), std::regex("[0-9]+"))))
+        throw Usage("Counter sampling requires --frames N for one selected frame");
+    const auto periodUs = args.Number("counter-period-us", 1000);
+    if (counters && (!periodUs || periodUs > 1000000)) throw Usage("--counter-period-us must be 1..1000000 (and supported by the device)");
+    const auto gpuMode = args.Get("gpu-timing", args.Has("counter-profile") || args.Has("counters") ? "isolated-frame" : "");
+    const bool gpu = args.Has("gpu-timing") || args.Has("counter-profile") || args.Has("counters");
+    if (gpu && gpuMode != "isolated-frame") throw Usage("--gpu-timing expects isolated-frame");
+    const auto swapchain = args.Get("swapchain", counters ? "offscreen" : "virtual");
+    if (swapchain != "virtual" && swapchain != "captured" && swapchain != "offscreen")
+        throw Usage("--swapchain expects virtual, captured or offscreen");
+    const auto runsWanted = args.Number("runs", gpu ? 1 : 3);
+    if (runsWanted < 1 || runsWanted > 50) throw Usage("--runs must be 1..50");
     const auto opened = OpenReplayable(context, RequireCapture(args));
     const auto& capture = *opened.import.capture;
-    const auto runsWanted = args.Number("runs", 3);
-    if (runsWanted < 1 || runsWanted > 50) throw Usage("--runs must be 1..50");
     std::string upstream;
     const auto range = ParseRange(args.Get("frames"), capture.frames, upstream);
     const auto target = ResolveTarget(context, capture);
     const auto root = ResolveRoot(context, args, "perf");
+    if (counters && (fs::is_symlink(fs::symlink_status(root)) || !fs::is_empty(root)))
+        throw CliError(kFailed, "perf_output_not_fresh", "Use a new performance output directory; existing evidence will not be overwritten", {{"output_dir", U8(root)}});
     const auto overrides = PrepareOverrides(context, opened.import, args, root / "overrides");
+    if (counters) {
+        PerfSessionRequest session;
+        session.capture = opened.import.capture; session.target = target; session.tools = context.tools;
+        session.output = root; session.cacheDirectory = context.ReplayCache(); session.frame = range["first"].get<uint32_t>();
+        session.runs = static_cast<uint32_t>(runsWanted); session.overrides = overrides.files;
+        session.counterPeriodNs = periodUs * 1000; session.swapchainMode = swapchain;
+        session.counterProfile = counterProfile;
+        session.memoryTranslation = ReplayMemoryTranslation(args);
+        session.screenOff = args.Has("screen-off"); session.timeout = ReplayTimeout(context, target, false);
+        session.progress = [&context](const std::string& text) { context.Progress(text); };
+        session.sessionId = Sha256Text(U8(root) + ":" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        try {
+            auto result = RunPerfSession(session, context.cancel);
+            result["overrides"] = overrides.report;
+            AtomicJson(root / "result.json", result);
+            return result;
+        } catch (const DeviceBusy&) { throw; }
+        catch (const std::exception& error) {
+            Json detail{{"output_dir", U8(root)}, {"counter_requested", true}, {"gpu_timing_required", true}, {"cpu_fallback", false}};
+            try {
+                std::ifstream receiptFile(root / "failure.json"), ownerFile(root / ".perf-session-owner" / "session.json");
+                const auto receipt = Json::parse(receiptFile), owner = Json::parse(ownerFile);
+                if (receipt.value("session_id", std::string{}) == session.sessionId && owner.value("session_id", std::string{}) == session.sessionId)
+                    detail["failure_report"] = U8(root / "failure.json");
+            } catch (...) {}
+            const auto classified = ErrorJson(std::current_exception());
+            const auto causeDetail = classified.second.value("detail", Json::object());
+            if (causeDetail.is_object()) detail.update(causeDetail);
+            throw CliError(classified.first, classified.first == kFailed ? "perf_session_failed" :
+                classified.second.at("code").get<std::string>(), error.what(), detail);
+        }
+    }
     auto request = BaseRequest(context, capture, target, args, false);
+    request.swapchainMode = swapchain;
     request.frame = range["first"].get<uint32_t>();
     request.measurement = {true, upstream, true};
+    if (gpu) {
+        request.measurement.gpu = true;
+        request.optimize = false;
+        try { request.measurement.gpuPlan = BuildGpuMeasurementPlan(capture, range["first"].get<uint32_t>(), range["last"].get<uint32_t>(), context.cancel); }
+        catch (const std::exception& error) { throw CliError(kFailed, "gpu_profiling_unsupported", error.what(), {{"cpu_fallback", false}}); }
+    }
     request.reuseArtifacts = false;   // result caches are never used for measurements (pipeline caches are)
     const bool compare = !overrides.files.empty();
     std::vector<Json> runs; std::vector<double> loads[2], times[2], fps[2];
@@ -821,15 +947,33 @@ Json Perf(Context& context, const Args& args) {
     Json result{{"capture", {{"path", U8(capture.source)}, {"sha256", capture.fingerprint}}}, {"target", TargetJson(target)}, {"output_dir", U8(root)},
         {"frames", range}, {"runs_requested", runsWanted}, {"runs", runs}, {"result_cache_used", false},
         {"summary", compare ? Json{{"baseline", summary(0)}, {"modified", summary(1)}} : summary(0)},
-        {"screen_off", request.screenOff},
-        {"notes", Json::array({"Fresh replays: result caches are bypassed. Pipeline caches may be loaded; see pipeline_cache_loaded per run (the first run on a new cache is cold).",
-            "frame_time_ms is measured_seconds / frames in the measured range; load_seconds is the upstream 'Load time' (state load). Replay timing only, not a GPU profile."})}};
+        {"screen_off", request.screenOff}, {"swapchain_requested", request.swapchainMode}, {"memory_translation", ReplayMemoryTranslationPolicy(request.memoryTranslation, target.android)},
+        {"notes", Json::array({"Fresh replays: result caches are bypassed. Pipeline caches may be loaded; see pipeline_cache_loaded per run. Driver and hardware cache state is uncontrolled.",
+            "frame_time_ms is measured_seconds / frames in the measured range; load_seconds is the upstream 'Load time' (state load). These fields measure replay timing, not GPU execution."})}};
     if (compare) {
         result["overrides"] = overrides.report;
         const double b = Median(summary(0)["frame_time_ms"], "median"), m = Median(summary(1)["frame_time_ms"], "median");
         Json delta = Json::object();
-        if (!std::isnan(b) && !std::isnan(m)) { delta["baseline_median_ms"] = b; delta["modified_median_ms"] = m; delta["delta_ms"] = m - b; delta["delta_percent"] = b > 0 ? Json((m - b) / b * 100.0) : Json(nullptr); }
+        bool swapchainsMatch = true;
+        for (size_t i = 0; i + 1 < runs.size(); i += 2)
+            swapchainsMatch = swapchainsMatch && runs[i].at("swapchain") == runs[i + 1].at("swapchain") &&
+                runs[i].at("memory_translation") == runs[i + 1].at("memory_translation");
+        if (!swapchainsMatch) delta = {{"status", "incomparable"}, {"reason", "Requested/effective swapchain or memory translation policies differ"}};
+        else if (!std::isnan(b) && !std::isnan(m)) { delta["baseline_median_ms"] = b; delta["modified_median_ms"] = m; delta["delta_ms"] = m - b; delta["delta_percent"] = b > 0 ? Json((m - b) / b * 100.0) : Json(nullptr); }
         result["frame_time_delta"] = delta;
+    }
+    if (gpu) {
+        result["gpu_timing"] = {{"mode", gpuMode}, {"sampling", "fresh processes; no automatic warm-up or frame looping"},
+            {"scope", "Isolated full-frame GPU elapsed interval on one command queue; may include waits and CPU submission gaps between endpoints; waits gating the start marker are excluded"},
+            {"natural_frame_latency", false}, {"original_capture_replayed", true}};
+        if (compare) {
+            Json deltas = Json::array();
+            for (size_t i = 0; i + 1 < runs.size(); i += 2)
+                for (auto& row : GpuFrameDeltas(runs[i], runs[i + 1])) deltas.push_back(std::move(row));
+            result["gpu_frame_deltas"] = std::move(deltas);
+        }
+        result["notes"].push_back("GPU samples use device timestamps and are reported per frame. Isolation changes adjacent-frame overlap; these are not pure GPU busy time or natural game frame latency. CPU fields retain replay-elapsed meaning.");
+        result["notes"].push_back("Use --runs 1 and a new output directory for each manual sample pair. No sample is discarded and no steady-state or significance claim is made.");
     }
     AtomicJson(root / "result.json", result);
     return result;
@@ -848,8 +992,9 @@ void RegisterReplayCommands() {
     auto drawOptions = [&](std::vector<Option> options) {
         options.insert(options.end(), inspectionOptions.begin(), inspectionOptions.end()); return ReplayOptions(options);
     };
-    Register({"replay", "frame", "Replay a capture to a frame (optionally with shader overrides, baseline comparison and validation)", {},
-        ReplayOptions({{"frame", "N", "Frame number (1-based)", false, true}}), ReplayFrame});
+    Register({"replay", "frame", "Replay a capture to a frame with swapchain selection, optional shader overrides, baseline comparison and validation", {},
+        ReplayOptions({{"frame", "N", "Frame number (1-based)", false, true},
+            {"swapchain", "virtual|captured|offscreen", "Replay swapchain implementation; match perf mode for image comparisons", false, false, "virtual"}}), ReplayFrame});
     Register({"replay", "draw", "Replay the frame of one draw/dispatch with resource readback at that draw", {},
         drawOptions({{"block", "B", "Block number of the draw/dispatch call"}, {"occurrence", "K", "K-th submitted execution of that block (default 0)"},
                        {"draw", "DIR", "A dump draw directory (contains draw.json); the capture is taken from the dump manifest"}, {"execution", "I", "Global submitted execution index (0-based); --block selects an API call ID"},
@@ -868,8 +1013,14 @@ void RegisterReplayCommands() {
          {"output", "OUT.spv", "Output SPIR-V file", false, true}}, ShaderCompile});
     Register({"shader", "check", "Check that a candidate shader keeps module MOD's interface (compiles GLSL/assembly first)", {"MOD", "CANDIDATE"},
         {{"capture", "FILE", "Capture (.gfxr)", false, true}, {"allow-interface-change", "", "Skip the interface check"}}, ShaderCheck});
-    Register({"perf", "", "Fresh replays of a frame range with upstream measurement: load time, frame time, FPS, min/median/max; baseline-vs-override deltas", {},
-        {{"capture", "FILE", "Capture (.gfxr)", false, true}, {"frames", "N|A-B", "Inclusive frame range to measure (default: all frames)"}, {"runs", "N", "Fresh runs per variant", false, false, "3"},
+    Register({"perf", "", "Fresh replay wall timing; use --gpu-timing isolated-frame or --counter-profile for device GPU measurements", {},
+        {{"capture", "FILE", "Capture (.gfxr)", false, true}, {"frames", "N|A-B", "Inclusive frame range to measure (default: all frames)"}, {"runs", "N", "Fresh runs per variant (default: 3 for replay timing, 1 for GPU timing)"},
+         {"gpu-timing", "isolated-frame", "Measure GPU timestamps for isolated whole frames on one command queue; replays the original capture"},
+         {"counters", "", "Collect all provider counters for one frame, subject to hardware limits; enables GPU timing"},
+         {"counter-profile", "none|all|precision|bandwidth", "Counter capture (default none); precision/bandwidth are compatibility aliases for all"},
+         {"counter-period-us", "N", "Counter interval in microseconds; requires an active counter profile (default 1000)"},
+         {"swapchain", "virtual|captured|offscreen", "Replay swapchain implementation (default virtual; offscreen for counter profiles)"},
+         {"memory-translation", "default|none|remap|realign|rebind", "Memory portability policy; default is rebind for local macOS, none elsewhere", false, false, "default"},
          {"out", "DIR", "Output directory"}, {"override", "MOD=FILE", "Shader override; also measures the baseline", true},
          {"allow-interface-change", "", "Allow overrides whose interface differs"}, {"screen-off", "", "Turn the Android screen off during replay"},
          {"no-optimize", "", "Replay the original capture instead of the optimized copy"}}, Perf});

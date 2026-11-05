@@ -60,6 +60,7 @@ ToolMap ResolveTools(const std::filesystem::path& dir, const std::filesystem::pa
     tools["validation_layer"] = hasBundle ? (bundled / "validation").u8string() : "";
     tools["replay_apk"] = hasBundle ? (bundled / "android/replay-debug.apk").u8string() : "";
     tools["test_apk"] = hasBundle ? (bundled / "android/test_launcher-debug.apk").u8string() : "";
+    tools["gpu_counter_producer"] = hasBundle ? (bundled / "android/gpu-counter-producer").u8string() : "";
     auto localConfig = std::filesystem::current_path() / "local-tools.json";
     if (!std::filesystem::is_regular_file(localConfig)) {
         auto parent = dir;
@@ -86,7 +87,7 @@ std::map<std::string, bool> ToolAvailability(const ToolMap& tools) {
         const auto file = std::filesystem::u8path(path);
         if (name == "validation_layer") { ready[name] = std::filesystem::is_regular_file(file / "VkLayer_khronos_validation.json"); continue; }
         ready[name] = !path.empty() && (name == "layer" ? std::filesystem::is_regular_file(file / "VkLayer_gfxreconstruct.json") :
-            name == "replay_apk" || name == "test_apk" ? std::filesystem::is_regular_file(file) : !FindExecutablePath(path).empty());
+            name == "replay_apk" || name == "test_apk" || name == "gpu_counter_producer" ? std::filesystem::is_regular_file(file) : !FindExecutablePath(path).empty());
     }
     return ready;
 }
@@ -95,7 +96,7 @@ std::map<std::string, std::string> ProbeToolVersions(const ToolMap& tools, std::
     std::map<std::string, std::string> versions;
     for (const auto& [name, path] : tools) {
         if (cancel && cancel->load()) break;
-        if (name == "layer" || name == "validation_layer" || name == "replay_apk" || name == "test_apk") {
+        if (name == "layer" || name == "validation_layer" || name == "replay_apk" || name == "test_apk" || name == "gpu_counter_producer") {
             ready[name] = std::filesystem::is_regular_file(std::filesystem::u8path(path) / (name == "layer" ? "VkLayer_gfxreconstruct.json" : ""));
             if (name == "validation_layer") ready[name] = std::filesystem::is_regular_file(std::filesystem::u8path(path) / "VkLayer_khronos_validation.json");
             else if (name != "layer") ready[name] = std::filesystem::is_regular_file(std::filesystem::u8path(path));
@@ -104,6 +105,7 @@ std::map<std::string, std::string> ProbeToolVersions(const ToolMap& tools, std::
         ready[name] = false;
         if (path.empty()) { versions[name] = "Not configured"; continue; }
         ProcessRequest request{path, {name == "adb" ? "version" : name == "astcenc" ? "-version" : "--version"}};
+        request.allowChildServices = name == "adb";
         if (name == "astcenc") request.timeout = std::chrono::seconds(15);
         const auto result = RunProcess(request, cancel);
         if (result.Success()) { versions[name] = result.output; ready[name] = true; }

@@ -18,6 +18,10 @@ struct ProcessRequest {
     size_t outputLimit = 8 * 1024 * 1024;
     std::filesystem::path stdinFile;
     std::filesystem::path stdoutFile;
+    // Explicit Windows daemon policy: the requested client remains owned and
+    // cancellable, but its child services may outlive the client/job. Ordinary
+    // compiler/replay/test requests retain whole-tree cleanup by default.
+    bool allowChildServices = false;
 };
 struct ProcessResult {
     int exitCode = -1;

@@ -9,6 +9,44 @@ images, buffers and meshes; edit shaders and verify changes by replay.
 
 ![Wireframe draw inspection in GFXReconstruct Inspector](docs/images/inspector-wireframe.png)
 
+## Why use this for Android instead of RenderDoc?
+
+This project favors independent replay jobs and durable results for Android
+Vulkan investigations, especially when driven by scripts or agents. Each replay
+starts the backend, loads the capture, produces the requested outputs, and exits.
+Saved indexes, pipeline state, shaders and readbacks can then be queried without
+keeping a device replay context alive.
+
+The motivation is practical: in our Android workflow, RenderDoc remote sessions
+have sometimes dropped and required reconnecting and reopening the capture.
+Independent jobs reduce that dependence on a long-lived session: retry the
+failed job while keeping completed results available on disk. ADB and a ready
+device are needed when running a device job; offline inspection can continue
+afterward.
+
+| Trade-off | GFXReconstruct Inspector | RenderDoc remote replay |
+| --- | --- | --- |
+| Replay lifetime | Fresh backend process for each job | An open capture and replay controller serve interactive requests |
+| Recovery | Retry a job; completed outputs remain usable | A lost remote context can require reconnecting and reopening the capture |
+| Repeated inspection | More startup and capture-loading work; often slower | Keeps the capture loaded and amortizes setup across requests |
+| Script and agent interface | Packaged JSON CLI over the same core as the GUI | CLI commands and scripting APIs are available; custom analysis needs its own automation layer |
+
+Our CLI needs neither an open inspector GUI nor an MCP bridge. RenderDoc
+automation is possible too: it provides `renderdoccmd` and
+[standalone Python scripting](https://github.com/baldurk/renderdoc/blob/v1.x/docs/python_api/python_module.rst).
+Its standalone Python bindings are native modules (`.pyd` on Windows, `.so` on
+Linux) tied to a Python major/minor version and RenderDoc's core library; using a
+different interpreter can require a matching build. Packaging those bindings and
+managing the [remote replay context](https://github.com/baldurk/renderdoc/blob/v1.x/docs/how/how_network_capture_replay.rst)
+adds integration work compared with invoking our ready-to-use JSON commands.
+GUI-attached MCP integrations also inherit the GUI's open-capture and connection
+state; that requirement belongs to those integrations, not every RenderDoc API.
+
+Both our Windows and macOS GUI/CLI can drive replay on an Android phone through
+ADB. GPU execution happens on the phone, so Android device replay does not need
+a Vulkan runtime on the host Mac. See the
+[Android prerequisites](docs/BUILD.md#android-device-capture-and-replay).
+
 ## Start
 
 Extract the release for your platform:
