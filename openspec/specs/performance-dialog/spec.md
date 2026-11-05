@@ -2,15 +2,13 @@
 ## Purpose
 
 Inspect fresh-frame GPU timestamps and optional reference counters in a compact docked Perf panel, with shared asynchronous replay, selectable filtered graphs and honest measurement details.
-
 ## Requirements
-
 ### Requirement: Perf opens in the inspector dock
 
-Events SHALL provide a readable Perf action immediately right of its filter arrow, using a clock symbol or glyph-safe fallback with stable identity. View SHALL also expose Perf. Opening SHALL select a regular closable dockable Perf panel alongside the Pipeline/Image inspector tabs by default. Older floating Perf preferences SHALL join the inspector on reopening without resetting other panel layouts; existing valid docked custom placements SHALL remain usable. Automation SHALL exercise the normal docked layout rather than visibly detaching, resizing or repositioning Perf.
+Events SHALL provide an icon-only Perf clock immediately right of its filter arrow, followed by the shared replay-device phone button, with glyph-safe symbols and stable identities. View SHALL also expose Perf. Opening SHALL select a regular closable dockable Perf panel alongside the Pipeline/Image inspector tabs by default. Older floating Perf preferences SHALL join the inspector on reopening without resetting other panel layouts; existing valid docked custom placements SHALL remain usable. Automation SHALL exercise the normal docked layout rather than visibly detaching, resizing or repositioning Perf.
 
 #### Scenario: Open from Events
-- **WHEN** the user clicks Perf with a capture open
+- **WHEN** the user clicks the Events Perf clock with a capture open
 - **THEN** the inspector dock selects Perf and its frame derives from the selected execution/event/current frame without blocking the GUI thread
 
 #### Scenario: Legacy floating preference
@@ -93,9 +91,8 @@ Plots SHALL preserve actual valid zeros, missing-data gaps, isolated observation
 - **WHEN** only one counter sample or a gap is present
 - **THEN** the graph displays the actual observation/gap with its limitations instead of fabricating a detailed timeline
 
-### Requirement: Compact passive device and metric tooltips
-
-A passive phone symbol SHALL expose device/GPU/driver identity and concise timing/counter scope without a button-style info control. Tooltips SHALL have a readable bounded width, compact paragraphs and the relevant provider/availability details. Provider wording and unknown hardware normalization SHALL not be replaced by stronger unsupported claims.
+### Requirement: Compact metric tooltips and one shared target selector
+Perf SHALL not show its former passive phone/info symbol. Device selection SHALL be shared with the Events selector. Metric tooltips SHALL retain readable bounded width, compact paragraphs, provider/availability details and reference-data limitations without replacing unknown hardware normalization with stronger claims. Saved reports SHALL retain device/GPU/driver evidence.
 
 #### Scenario: Metric unavailable from a changed descriptor
 - **WHEN** the user hovers its row

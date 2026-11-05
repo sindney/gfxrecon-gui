@@ -152,6 +152,69 @@ void Workspace::Shutdown() {
     try { SaveConfiguration(); } catch (const std::exception& e) { LOGE("settings") << e.what(); }
 }
 bool Workspace::Busy() const { return job_.valid(); }
+std::string Workspace::InspectionCacheKey(size_t execution) const {
+    if (!capture_ || CachedSha256File(capture_->source) != capture_->fingerprint) return {};
+    Json overrides = Json::array();
+    for (const auto& [module, file] : activeOverrides_) overrides.push_back({module, CachedSha256File(file)});
+    Json backends = Json::array();
+    for (const auto* name : {"replay", "replay_apk"}) {
+        const auto found = tools_.find(name);
+        if (found != tools_.end() && std::filesystem::is_regular_file(std::filesystem::u8path(found->second)))
+            backends.push_back({name, CachedSha256File(std::filesystem::u8path(found->second))});
+    }
+    return Json{{"capture", capture_->fingerprint}, {"source", capture_->source.u8string()}, {"execution", execution},
+        {"subdraw", selectedSubdraw_}, {"mesh_instance", meshInstance_}, {"overrides", overrides}, {"tools", tools_}, {"backends", backends},
+        {"target", int(replayMode_)}, {"serial", androidSerial_}, {"memory", memoryTranslation_},
+        {"optimize", optimizeReplay_}, {"full", fullDrawReplay_}, {"screen_off", phoneScreenOff_}}.dump();
+}
+void Workspace::CacheInspection(const WorkspaceResult& result) {
+    if (result.inspectionCacheKey.empty() || result.failed || result.diagnosticResources.empty()) return;
+    uint64_t bytes = 0;
+    std::set<std::filesystem::path> files;
+    for (const auto& [mode, resources] : result.diagnosticResources)
+        for (const auto& resource : resources) files.insert(resource.file);
+    std::map<std::filesystem::path, std::string> hashes;
+    try { for (const auto& file : files) { bytes += std::filesystem::file_size(file); hashes[file] = CachedSha256File(file); } }
+    catch (const std::exception& error) { LOGW("cache") << "Cannot retain draw inspection: " << error.what(); return; }
+    // Bound the retained readback working set as well as the number of mesh/document snapshots.
+    constexpr uint64_t budget = 128ull * 1024 * 1024;
+    if (bytes > budget) return;
+    auto snapshot = result;
+    for (auto it = inspectionCache_.begin(); it != inspectionCache_.end(); ++it)
+        if (it->key == result.inspectionCacheKey) {
+            // An additional visualization reuses the original readbacks and
+            // does not rebuild geometry. Retain that geometry for revisits.
+            if (!snapshot.mesh && snapshot.meshError.empty()) snapshot.mesh = it->result.mesh;
+            inspectionCacheBytes_ -= it->bytes; inspectionCache_.erase(it); break;
+        }
+    inspectionCache_.push_front({result.inspectionCacheKey, std::move(snapshot), bytes, std::move(hashes)}); inspectionCacheBytes_ += bytes;
+    while (inspectionCache_.size() > 16 || inspectionCacheBytes_ > budget) {
+        inspectionCacheBytes_ -= inspectionCache_.back().bytes; inspectionCache_.pop_back();
+    }
+}
+bool Workspace::RestoreInspection(size_t execution) {
+    if (Busy() || validationReplay_) return false;
+    try {
+        const auto key = InspectionCacheKey(execution);
+        if (key.empty()) { inspectionCache_.clear(); inspectionCacheBytes_ = 0; return false; }
+        for (auto it = inspectionCache_.begin(); it != inspectionCache_.end(); ++it) {
+            if (it->key != key) continue;
+            if (!it->result.diagnosticResources.count(drawVisualization_) && !it->result.diagnosticErrors.count(drawVisualization_)) return false;
+            for (const auto& [file, hash] : it->hashes) if (CachedSha256File(file) != hash) return false;
+            auto result = it->result;
+            inspectionCache_.splice(inspectionCache_.begin(), inspectionCache_, it);
+            result.selectionGeneration = selectionGeneration_;
+            result.message = "Restored draw " + std::to_string(execution) + " from memory (" + result.replayTarget + ")";
+            pendingDraw_ = false;
+            Start("Restoring cached draw", [result = std::move(result)]() mutable { return std::move(result); }, JobKind::Dump,
+                  capture_->executions.at(execution).frame);
+            jobExecution_ = static_cast<int>(execution); autoReplayRunning_ = true;
+            Poll();
+            return true;
+        }
+    } catch (const std::exception& error) { LOGW("cache") << "Cannot restore draw inspection: " << error.what(); }
+    return false;
+}
 void Workspace::Start(const std::string& name, std::function<WorkspaceResult()> work, JobKind kind, uint32_t frame) {
     if (Busy() && autoReplayRunning_) {
         deferredJob_ = DeferredJob{name, std::move(work), kind, frame};
@@ -257,6 +320,7 @@ void Workspace::Poll() {
             if(validationReport_.is_object()&&validationReport_.value("status",std::string{})=="running")validationReport_={{"status","unavailable"},{"enabled",false},{"message",result.message}};
         }
         if(result.failed){if(!result.validationReport.is_null()){validationReport_=std::move(result.validationReport);resourceTab_=2;resourceTabRequest_=true;focusResources_=true;}status_=result.message;jobFailed_=true;CompleteOperation(PanelState::Failed,status_);LOGE("replay")<<status_;return;}
+        if (result.drawPreview && !validationReplay_) { CacheInspection(result); displayedInspectionKey_ = result.inspectionCacheKey; }
         if (result.capture) {
             mesh_.Release(); meshGeneration_ = meshRequestGeneration_ = 0; meshInstance_ = 0;
             focusFrames_ = !captureInProgress_;
@@ -459,6 +523,12 @@ void Workspace::SelectEvent(size_t index, bool preserveImages) {
 }
 void Workspace::SelectExecution(size_t index, bool preview) {
     if (!capture_ || index >= capture_->executions.size()) return;
+    if (preview && !Busy() && imageView_ == 1 && displayedDraw_ == static_cast<int>(index) && selectedExecution_ == static_cast<int>(index) &&
+        diagnosticExecution_ == static_cast<int>(index) && imageShownGeneration_ == selectionGeneration_ &&
+        ExecutionState(index) == PanelState::Success && !validationReplay_) {
+        try { const auto key = InspectionCacheKey(index); if (!key.empty() && key == displayedInspectionKey_ &&
+            (diagnosticResources_.count(drawVisualization_) || diagnosticErrors_.count(drawVisualization_))) return; } catch (...) {}
+    }
     if(preview&&selectedExecution_>=0&&ExecutionState(selectedExecution_)==PanelState::Running)executionStatuses_[selectedExecution_]={PanelState::Inactive,"Superseded by a new selection"};
     if(!shader_.stage.empty())autoShaderStage_=shader_.stage;
     SelectEvent(capture_->executions[index].event,preview);
@@ -467,6 +537,7 @@ void Workspace::SelectExecution(size_t index, bool preview) {
     revealPipeline_=true;
     if (preview && !CaptureSessionActive() && capture_->source.extension() == ".gfxr") {
         imageView_=1;
+        if (RestoreInspection(index)) return;
         pendingDraw_ = true; drawRequestedAt_ = std::chrono::steady_clock::now();
         executionStatuses_[index]={PanelState::Running,"Queued draw inspection"};
         status_ = "Selected block " + std::to_string(capture_->events[selectedEvent_].block) + "; inspecting draw outputs.";
@@ -611,7 +682,7 @@ void Workspace::ResetShader(){
     },JobKind::Dump,frame);
 }
 void Workspace::Draw() {
-    Poll(); PollLiveCapture(); DrawEvents(); DrawPipeline(); DrawShader(); DrawResources(); DrawMesh(); DrawFrames(); DrawTools();
+    Poll(); PollLiveCapture(); DrawEvents(); DrawPipeline(); DrawShader(); DrawResources(); DrawMesh(); DrawFrames(); DrawReplayDeviceDialog();
     DrawCapture();
     DrawImages();
     DrawReplayUnlock();
@@ -663,6 +734,9 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
     const auto subdraw=selectedSubdraw_;
     const auto fullDrawReplay=fullDrawReplay_;
     const auto requestedDrawMode=drawVisualization_;
+    if (drawPreview && execution >= 0 && !fresh && !revert && RestoreInspection(static_cast<size_t>(execution))) return;
+    std::string inspectionKey;
+    if (drawPreview && !validation && execution >= 0) try { inspectionKey = InspectionCacheKey(static_cast<size_t>(execution)); } catch (...) {}
     const bool reuseDraw=drawPreview&&!fresh&&!validation&&imageShownGeneration_==generation&&
         diagnosticExecution_==execution&&diagnosticSubdraw_==subdraw&&diagnosticResources_.count(0);
     const auto cachedDiagnostics=reuseDraw?diagnosticResources_:decltype(diagnosticResources_){};
@@ -672,9 +746,10 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
     const auto frame = requestedFrame ? requestedFrame : dump && execution >= 0 ? capture->executions[execution].frame :
         frame_ > 0 ? static_cast<uint32_t>(frame_) : execution >= 0 ? capture->executions[execution].frame : 1u;
     if (dump && execution < 0) { status_ = "Select a submitted draw/dispatch occurrence before requesting its resources."; return; }
-    Start(drawPreview ? "Fetching selected draw data" : dump ? "Replaying selected event resources" : "Rendering frame " + std::to_string(frame), [this, capture, tools, generation, execution, frame, dump, revert, mode, serial, optimize, validation, overrides, thumbnailOnly, meshInstance, shaderDirectory, meshPreview, drawPreview, descriptorImages,documents,screenOff,memoryTranslation,subdraw,fresh,fullDrawReplay,requestedDrawMode,reuseDraw,cachedDiagnostics,cachedErrors,cachedUvDetail,cachedIndirect] {
+    Start(drawPreview ? "Fetching selected draw data" : dump ? "Replaying selected event resources" : "Rendering frame " + std::to_string(frame), [this, capture, tools, generation, execution, frame, dump, revert, mode, serial, optimize, validation, overrides, thumbnailOnly, meshInstance, shaderDirectory, meshPreview, drawPreview, descriptorImages,documents,screenOff,memoryTranslation,subdraw,fresh,fullDrawReplay,requestedDrawMode,reuseDraw,cachedDiagnostics,cachedErrors,cachedUvDetail,cachedIndirect,inspectionKey] {
         const auto queryStarted=std::chrono::steady_clock::now();
         WorkspaceResult r; r.selectionGeneration = generation;
+        r.inspectionCacheKey = inspectionKey;
         r.replayResult = true;
         r.retryReplay=true;r.retryDump=dump;r.retryRevert=revert;
         r.replayFrame = frame;
@@ -1025,11 +1100,95 @@ void Workspace::RefreshDevices() {
         r.message = "Device discovery complete."; return r;
     });
 }
-void Workspace::DrawTools() {
-    if (showTools_) { ImGui::OpenPopup("Tools and devices"); showTools_ = false; }
-    ImGui::SetNextWindowSize(ImVec2(760, 0), ImGuiCond_Appearing);
-    ImGui::SetNextWindowSizeConstraints(ImVec2(760,0),ImVec2(760,ImGui::GetMainViewport()->WorkSize.y*.9f));
-    if (!ImGui::BeginPopupModal("Tools and devices", nullptr, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize)) return;
+std::string Workspace::ReplayDeviceLabel() const {
+    if(replayMode_==ReplayMode::Local)return LocalReplayLabel();
+    const bool android=replayMode_==ReplayMode::Android||(capture_&&capture_->android);
+    std::string selected=LocalReplayLabel();
+    if(android){
+        auto serial=androidSerial_;
+        if(serial.empty()){
+            for(const auto& device:devices_)if(device.state=="device"){
+                if(!serial.empty()){serial.clear();break;}serial=device.serial;
+            }
+        }
+        selected=serial.empty()?"Android (automatic phone)":"Android "+serial;
+    }
+    return replayMode_==ReplayMode::Automatic?"Automatic — "+selected:selected;
+}
+void Workspace::SetReplayDevice(ReplayMode mode,const std::string& serial){
+    if(Busy()||(mode==replayMode_&&serial==androidSerial_))return;
+    const bool serialChanged=androidSerial_!=serial;
+    SetReplayMode(mode);androidSerial_=serial;
+    if(serialChanged){InvalidateDrawResources();++selectionGeneration_;}
+    ClearReplayViews();
+    status_="Replay device: "+ReplayDeviceLabel();
+    try{SaveConfiguration();}catch(const std::exception& error){LOGE("settings")<<error.what();}
+}
+void Workspace::ClearReplayViews(){
+    mesh_.Release();meshGeneration_=meshRequestGeneration_=0;
+    image_.Release();modifiedImage_.Release();differenceImage_.Release();hasComparison_=false;
+    for(auto& [frame,preview]:frameImages_)preview.image.Release();
+    frameImages_.clear();frameStatuses_.clear();failedFrames_.clear();thumbnailQueue_.clear();
+    pendingDraw_=false;pendingFrame_=0;
+    perfCapabilities_=Json();perfResult_=Json();perfPlotCache_.clear();
+    validationReport_=Json();perfValidationError_.clear();
+}
+void Workspace::DrawReplaySettings(){
+    ImGui::BeginDisabled(Busy()||CaptureSessionActive());
+    bool changed=ImGui::Checkbox("Optimize replay copy",&optimizeReplay_);
+    ImGui::SetItemTooltip("Remove unused initialization and pipelines in a cached replay copy. Original capture and inspection data are preserved.");
+    changed|=ImGui::Checkbox("Vulkan validation",&validationReplay_);
+    ImGui::SetItemTooltip("Replay original API calls with VK_LAYER_KHRONOS_validation. Runs fresh, without optimized captures or result/pipeline caches.");
+    changed|=ImGui::Checkbox("Phone screen off while replaying",&phoneScreenOff_);
+    ImGui::SetItemTooltip("During Android replay, keep the physical panel off and restore its prior state afterward. Requires supported display-power controls.");
+    ImGui::EndDisabled();
+    if(changed){
+        ++selectionGeneration_;InvalidateDrawResources();ClearReplayViews();
+        status_="Replay options changed. Render again to apply them.";
+        try{SaveConfiguration();}catch(const std::exception& error){LOGE("settings")<<error.what();}
+    }
+}
+void Workspace::DrawReplayDeviceDialog(){
+    if(openReplayDevice_){
+        ImGui::OpenPopup("Replay device");openReplayDevice_=false;
+        if(!Busy()&&ToolAvailable("adb"))RefreshDevices();
+    }
+    const auto* viewport=ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->GetCenter(),ImGuiCond_Appearing,ImVec2(.5f,.5f));
+    const float width=std::min(ImGui::GetFontSize()*34,viewport->WorkSize.x*.94f);
+    ImGui::SetNextWindowSize(ImVec2(width,0),ImGuiCond_Appearing);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(width,0),ImVec2(width,viewport->WorkSize.y*.9f));
+    bool open=true;
+    if(!ImGui::BeginPopupModal("Replay device",&open,ImGuiWindowFlags_NoDocking|ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoSavedSettings))return;
+    ImGui::TextWrapped("Selected: %s",ReplayDeviceLabel().c_str());
+    ImGui::Separator();
+    ImGui::BeginDisabled(Busy()||CaptureSessionActive());
+    if(ImGui::Selectable("Automatic (based on capture)",replayMode_==ReplayMode::Automatic,ImGuiSelectableFlags_NoAutoClosePopups))SetReplayDevice(ReplayMode::Automatic,androidSerial_);
+    if(ImGui::Selectable(LocalReplayLabel(),replayMode_==ReplayMode::Local,ImGuiSelectableFlags_NoAutoClosePopups))SetReplayDevice(ReplayMode::Local,androidSerial_);
+    if(ImGui::Selectable("Android (single authorized phone)",replayMode_==ReplayMode::Android&&androidSerial_.empty(),ImGuiSelectableFlags_NoAutoClosePopups))SetReplayDevice(ReplayMode::Android,{});
+    ImGui::SeparatorText("Android devices");
+    bool selectedListed=androidSerial_.empty();
+    for(const auto& device:devices_){
+        selectedListed|=device.serial==androidSerial_;
+        const auto label=device.serial+" ("+device.state+")";
+        ImGui::BeginDisabled(device.state!="device");
+        if(ImGui::Selectable(label.c_str(),replayMode_!=ReplayMode::Local&&androidSerial_==device.serial,ImGuiSelectableFlags_NoAutoClosePopups))SetReplayDevice(ReplayMode::Android,device.serial);
+        ImGui::EndDisabled();ImGui::SetItemTooltip("%s",device.details.c_str());
+    }
+    if(!selectedListed)ImGui::TextDisabled("%s (not connected)",androidSerial_.c_str());
+    ImGui::EndDisabled();
+    if(devices_.empty())ImGui::TextWrapped("No Android devices listed. Connect and authorize a phone, then refresh.");
+    ImGui::BeginDisabled(Busy()||!ToolAvailable("adb"));
+    if(ImGui::Button("Refresh Android devices"))RefreshDevices();
+    ImGui::EndDisabled();
+    if(!ToolAvailable("adb"))ImGui::TextWrapped("Configure ADB in Settings > Tools and devices to discover phones.");
+    if(!deviceOutput_.empty())ImGui::TextWrapped("%s",deviceOutput_.c_str());
+    if(Busy())ImGui::TextDisabled("%s",jobName_.c_str());
+    ImGui::Separator();
+    if(ImGui::Button("Close")||ImGui::IsKeyPressed(ImGuiKey_Escape))ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+void Workspace::DrawToolSettings() {
 #ifdef __APPLE__
     ImGui::TextWrapped("Local replay on this Mac needs a Vulkan runtime. Install the LunarG Vulkan SDK (loader and MoltenVK), configure the host tools, and launch with the SDK environment. Offline inspection does not require the local Vulkan runtime.");
     ImGui::TextLinkOpenURL("Download Vulkan SDK for macOS", "https://vulkan.lunarg.com/sdk/home#mac");
@@ -1050,12 +1209,12 @@ void Workspace::DrawTools() {
         operation("Local replay", ToolAvailable("replay"), "gfxrecon-replay");
         operation("Android setup / replay", ToolAvailable("adb"), "ADB and a compatible installed replay APK");
         ImGui::TextWrapped("Android capture/replay requires SDK Platform-Tools (adb), an authorized Vulkan device, and our compatible debug replay/layer APK. NDK and JDK are only needed when building the APKs.");
-        ImGui::TextDisabled("SPIRV-Cross: built in (300681bb). Transport: CLI / ADB files.");
-        ImGui::TextDisabled("Experimental remote transport: probed separately; disabled in this release.");
     }
     if (ImGui::CollapsingHeader("Tool configuration")) {
         ImGui::BeginDisabled(Busy());
+        const float labels=ImGui::CalcTextSize("gpu_counter_producer").x+ImGui::CalcTextSize("Missing").x+ImGui::GetStyle().ItemSpacing.x*3;
         for (auto& [name, path] : tools_) {
+            ImGui::SetNextItemWidth(std::max(100.0f,ImGui::GetContentRegionAvail().x-labels));
             if (ImGui::InputText(name.c_str(), &path)) { RefreshToolAvailability(); versions_.erase(name); }
             ImGui::SameLine(); ImGui::TextDisabled("%s", ToolAvailable(name) ? "Found" : "Missing");
             auto it = versions_.find(name);
@@ -1071,30 +1230,6 @@ void Workspace::DrawTools() {
         if (ImGui::Button("Check versions")) ProbeTools();
         ImGui::EndDisabled();
     }
-    ImGui::BeginDisabled(Busy() || tools_["adb"].empty());
-    if (ImGui::Button("Refresh Android devices")) RefreshDevices();
-    ImGui::EndDisabled();
-    ImGui::BeginDisabled(Busy());
-    ImGui::TextUnformatted("Replay device");
-    ImGui::SetNextItemWidth(-1.0f);
-    if (ImGui::BeginCombo("##replay-device", androidSerial_.empty() ? "Automatic (single device)" : androidSerial_.c_str())) {
-        if (ImGui::Selectable("Automatic (single device)", androidSerial_.empty())) { androidSerial_.clear(); ++selectionGeneration_; }
-        for (const auto& device : devices_) {
-            const auto label = device.serial + " (" + device.state + ")";
-            ImGui::BeginDisabled(device.state != "device");
-            if (ImGui::Selectable(label.c_str(), androidSerial_ == device.serial)) { androidSerial_ = device.serial; ++selectionGeneration_; }
-            ImGui::EndDisabled();
-            ImGui::SetItemTooltip("%s", device.details.c_str());
-        }
-        ImGui::EndCombo();
-    }
-    ImGui::EndDisabled();
-    if (devices_.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-        ImGui::TextWrapped("Automatic selects the only authorized phone. Refresh to choose a specific device.");
-        ImGui::PopStyleColor();
-    }
-    if (!deviceOutput_.empty()) ImGui::TextUnformatted(deviceOutput_.c_str());
     for(const auto& path:displayRecoveries_){
         ImGui::PushID(path.u8string().c_str());ImGui::TextWrapped("Replay display needs recovery: %s",path.parent_path().filename().u8string().c_str());
         ImGui::BeginDisabled(Busy());
@@ -1122,9 +1257,5 @@ void Workspace::DrawTools() {
         }
         ImGui::EndDisabled(); ImGui::PopID();
     }
-    ImGui::Separator();
-    ImGui::TextWrapped("Open existing captures or standalone shader files from File > Open.");
-    if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
-    ImGui::EndPopup();
 }
 } // namespace gfx

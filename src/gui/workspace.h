@@ -17,12 +17,14 @@
 #include <optional>
 #include <mutex>
 #include <set>
+#include <list>
 
 namespace gfx {
 enum class PanelState { Inactive, Running, Success, Failed, Warning };
 enum class JobKind { Import, Shader, Compile, Replay, Dump, Resource, Capture, Tools, Perf };
 struct PanelStatus { PanelState state = PanelState::Inactive; std::string detail; };
 struct WorkspaceResult {
+    std::string inspectionCacheKey;
     bool perfOperation = false, perfProbe = false;
     Json perfData;
     std::shared_ptr<Capture> capture;
@@ -119,6 +121,10 @@ public:
     void ClearPerformanceFixture() { perfFixture_ = false; perfResult_ = Json(); perfCapabilities_ = Json(); }
     void ConfigurePerformanceCaptureForTests(std::shared_ptr<Capture> capture, uint32_t frame, const std::string& serial);
     void ConfigureReplayFixture(const std::string& path){tools_["replay"]=path;RefreshToolAvailability();}
+    void StartFrameReplayForTests(bool fresh=false){ReplayFrame(false,false,0,false,false,false,false,fresh);}
+    void SetReplayDevicesForTests(std::vector<AndroidDevice> devices){devices_=std::move(devices);}
+    void ConfigureArtifactTransportFixture(const std::string& path){tools_["artifact_transport"]=path;}
+    void ConfigureAdbFixture(const std::string& path){tools_["adb"]=path;RefreshToolAvailability();}
     void LoadMeshFixture(std::shared_ptr<MeshData> data){const auto generation=selectionGeneration_;Start("Loading mesh fixture",[data,generation]{WorkspaceResult r;r.mesh=data;r.meshPreview=true;r.selectionGeneration=generation;return r;});}
     void LoadDrawFixture(const std::filesystem::path& directory){const auto generation=selectionGeneration_;const auto execution=selectedExecution_;const auto block=capture_->events[selectedEvent_].block;Start("Loading draw fixture",[directory,generation,execution,block]{WorkspaceResult r;r.replayResult=true;r.drawPreview=true;r.descriptorImages=true;r.resources=CollectResources(directory);r.selectionGeneration=generation;r.dumpExecution=execution;r.dumpBlock=block;return r;});}
 #endif
@@ -135,7 +141,12 @@ public:
     const std::string& MemoryTranslation() const { return memoryTranslation_; }
     void SetMemoryTranslation(const std::string& mode);
     void RequestCapture();
-    void RequestTools() { showTools_ = true; }
+    void RequestTools() { showToolsSettings_ = true; }
+    bool TakeToolsSettingsRequest() { const bool requested=showToolsSettings_;showToolsSettings_=false;return requested; }
+    void DrawToolSettings();
+    void DrawReplaySettings();
+    void RequestReplayDevice() { openReplayDevice_ = true; }
+    std::string ReplayDeviceLabel() const;
     void SaveCapture(bool saveAs = false);
     bool CanSaveCapture() const { return capture_ && capture_->source.extension()==".gfxr" && (!Busy()||autoReplayRunning_); }
     void ProbeTools();
@@ -169,7 +180,9 @@ private:
     void DrawShader();
     void DrawResources();
     void DrawMesh();
-    void DrawTools();
+    void DrawReplayDeviceDialog();
+    void SetReplayDevice(ReplayMode mode, const std::string& serial);
+    void ClearReplayViews();
     void DrawFrames();
     void DrawFrameActions(uint32_t frame);
     void CompileShader();
@@ -185,6 +198,9 @@ private:
     void DrawStageImages(const std::string& stage,bool outputs);
     void DrawStageSamplers(const ShaderStage& stage,const Execution* execution);
     void ShowShaderDocument(const WorkspaceResult& document,bool focus);
+    std::string InspectionCacheKey(size_t execution) const;
+    void CacheInspection(const WorkspaceResult& result);
+    bool RestoreInspection(size_t execution);
     void ScheduleFrameReplay();
     void ApplyCandidate();
     void SaveConfiguration() const;
@@ -236,7 +252,7 @@ private:
     bool submittedOnly_ = true;
     uint64_t selectionGeneration_ = 1;
     bool onlyDraws_ = false;
-    bool showTools_ = false;
+    bool showToolsSettings_ = false, openReplayDevice_ = false;
     bool openPerf_ = false, perfPanelOpen_ = false, perfJob_ = false, perfFixture_ = false;
     bool perfCompare_ = true;
     bool perfCollectCounters_ = false;
@@ -343,6 +359,13 @@ private:
     std::map<int,std::string> diagnosticErrors_;
     std::string uvDetail_;
     int diagnosticExecution_=-1,diagnosticSubdraw_=-1;
+    struct CachedInspection {
+        std::string key; WorkspaceResult result; uint64_t bytes = 0;
+        std::map<std::filesystem::path, std::string> hashes;
+    };
+    std::list<CachedInspection> inspectionCache_;
+    std::string displayedInspectionKey_;
+    uint64_t inspectionCacheBytes_ = 0;
     std::vector<uint32_t> thumbnailQueue_;
     std::map<uint32_t, std::string> failedFrames_;
     struct FramePreview { ImageViewer image; std::string target; bool modified = false; };

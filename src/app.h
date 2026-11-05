@@ -28,11 +28,12 @@ public:
     gfx::Workspace& Workspace() { return workspace_; }
 
 private:
-    enum class Command { OpenFile, OpenWindowsSample, OpenAndroidSample, OpenMeshSample, OpenIndirectSample, Capture, SaveCapture, SaveCaptureAs, CancelJob, Tools, Performance, Settings, ToggleConsole, ResetLayout, About, Exit };
+    enum class Command { OpenFile, OpenWindowsSample, OpenAndroidSample, OpenMeshSample, OpenIndirectSample, Capture, SaveCapture, SaveCaptureAs, CancelJob, Performance, Settings, ToggleConsole, ResetLayout, About, Exit };
     void ExecuteCommand(Command command);
     void DrawMenuBar();
     void DrawDockspace();
     void DrawSettings();
+    void DrawGeneralSettings();
     std::string logFilePath() const;
 
     Settings settings_;
@@ -40,6 +41,8 @@ private:
     bool quitRequested_ = false;
     bool showConsole_ = true;
     bool showSettings_ = false;
+    int settingsTabRequest_ = -1;
+    int settingsActiveTab_ = 0;
     bool logToFile_ = false;
     bool resetLayout_ = false;
     bool activateFrames_ = true;

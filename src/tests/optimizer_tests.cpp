@@ -69,6 +69,40 @@ void RunOptimizerTests(const std::filesystem::path& root){
     for(const auto& file:std::filesystem::recursive_directory_iterator(request.cacheDirectory))
         Require(file.path().filename()!="manifest.json","Cancelled optimizer published a prepared copy");
     Require(Sha256File(source)==request.expectedCaptureHash,"Optimization modified original bytes");
+
+    // A verified Android result is historical output: it must work without a
+    // connected phone, while --fresh, policy changes and corruption must miss.
+    ReplayRequest offline; offline.capture=source; offline.optimize=false;
+    offline.cacheDirectory=folder/"offline-cache";
+    const ReplayTarget target{true,"offline-test-phone"};
+    const auto memory=ReplayMemoryTranslationPolicy(offline.memoryTranslation,true);
+    Json identity{{"schema",1},{"capture_sha256",Sha256File(source)},{"target",target.Label()},
+        {"device_build","recorded-device"},{"backend_sha256",Sha256File(helper)}, {"overrides",Json::array()},
+        {"swapchain_mode","virtual"},{"memory_translation","none"},{"memory_translation_policy",memory},
+        {"frame",1},{"dump",Json()},{"outputs_only",false},{"prefix","baseline"},
+        {"descriptor_images",false},{"validation",false},{"draw_inspection",false},{"screen_off",false},
+        {"visualization",{{"protocol",1},{"mode","original"},{"pipeline",0},{"subdraw",-1},{"draw_id_safe",false},
+                         {"uv_shader_sha256",""},{"outline_base_sha256",""},{"outline_coverage_sha256",""}}},
+        {"readback_options",Json()}};
+    const auto resultCache=offline.cacheDirectory/"results"/Sha256Text(identity.dump());
+    std::filesystem::create_directories(resultCache);
+    Save(resultCache/"baseline_frame_1.bmp",std::string(54,'b'));Save(resultCache/"replay.log","fixture replay\n");
+    Json artifacts=Json::array();
+    for(const auto* name:{"baseline_frame_1.bmp","replay.log"})artifacts.push_back({{"file",name},{"sha256",Sha256File(resultCache/name)}});
+    AtomicJson(resultCache/"manifest.json",{{"owner","gfxrecon_gui"},{"complete",true},{"request_identity",identity},{"artifacts",artifacts}});
+    const std::map<std::string,std::string> offlineTools{{"replay_apk",helper.u8string()},{"adb",(folder/"missing-adb").u8string()}};
+    offline.output=folder/"offline-hit";
+    Require(ReplayCapture(offline,target,offlineTools).timings.value("artifact_cache_hit",false),"Offline replay did not restore verified local output");
+    const auto provenance=Load(offline.output/"manifest.json");
+    Require(!provenance.value("current_device_verified",true)&&provenance.value("device_identity_source","")=="cached_result","Historical result was labeled as current-device verified");
+    for(int scenario=0;scenario<4;++scenario){
+        offline.output=folder/("offline-miss-"+std::to_string(scenario));offline.reuseArtifacts=scenario!=0;
+        offline.memoryTranslation=scenario==1?"remap":"default";
+        std::atomic_bool cancelled{scenario==2};
+        if(scenario==3)Save(resultCache/"baseline_frame_1.bmp",std::string(54,'c'));
+        bool failed=false;try{ReplayCapture(offline,target,offlineTools,&cancelled);}catch(...){failed=true;}
+        Require(failed,"Fresh, policy-changed, cancelled or corrupt replay accepted cached artifacts");
+    }
     Require(folder.parent_path()==std::filesystem::absolute(root)&&!std::filesystem::is_symlink(folder),"Unsafe optimizer test cleanup");
     std::filesystem::remove_all(folder);
 }

@@ -45,7 +45,7 @@ void RestoreAndroidReplayDisplay(const AdbConnection& adb,const std::filesystem:
     if(restored.off&&!state.value("initial_off",false)){
         const auto policy=adb.Shell({"dumpsys","window","policy"},true);
         if(policy.find("screenState=SCREEN_STATE_OFF")==std::string::npos)
-            throw std::runtime_error("The phone display did not return to its OS-managed state. Reconnect and restore the replay display from Tools and devices.");
+            throw std::runtime_error("The phone display did not return to its OS-managed state. Reconnect and restore the replay display from Settings > Tools and devices.");
     }
     state["restored"]=true;state["restored_panel_off"]=restored.off;
     state["phase"]="restored";AtomicJson(path,state);

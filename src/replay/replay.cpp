@@ -40,6 +40,14 @@ Json ReplayMemoryTranslationPolicy(const std::string& requested, bool android) {
 }
 namespace {
 constexpr const char* kPackage = "com.lunarg.gfxreconstruct.replay";
+std::vector<std::string> AndroidFields(const std::string& output, size_t count) {
+    std::vector<std::string> fields;
+    std::istringstream input(output); std::string field;
+    while (std::getline(input, field, '\0')) fields.push_back(field);
+    if (fields.size() != count || output.empty() || output.back() != '\0')
+        throw std::runtime_error("Incomplete Android replay setup response");
+    return fields;
+}
 std::string LocalDriverIdentity() {
 #ifdef _WIN32
     std::string data;
@@ -109,7 +117,7 @@ Json PrepareOptimized(ReplayRequest& replay, const std::string& sourceHash,
         return {{"status", "original"}};
     const auto executable=std::filesystem::u8path(tool->second);
     if(!std::filesystem::is_regular_file(executable))return {{"status","unavailable"}};
-    const auto optimizerHash=Sha256File(executable,cancel);
+    const auto optimizerHash=CachedSha256File(executable,cancel);
     // Full hashes are verified in the manifest; short directory names keep the
     // optimizer's native Windows file APIs usable from extracted portable paths.
     const auto root=replay.cacheDirectory/"optimized"/(sourceHash.substr(0,24)+"-"+optimizerHash.substr(0,16));
@@ -119,7 +127,7 @@ Json PrepareOptimized(ReplayRequest& replay, const std::string& sourceHash,
         if(metadata.value("owner","")=="gfxrecon_gui" && metadata.value("complete",false) &&
             metadata.at("source_sha256")==sourceHash && metadata.at("optimizer_sha256")==optimizerHash) {
             if(metadata.value("status","")=="unchanged")return metadata;
-            if(!std::filesystem::is_symlink(derived) && Sha256File(derived,cancel)==metadata.at("derived_sha256")) {
+            if(!std::filesystem::is_symlink(derived) && CachedSha256File(derived,cancel)==metadata.at("derived_sha256")) {
                 replay.capture=derived;metadata["cache_hit"]=true;return metadata;
             }
         }
@@ -132,12 +140,12 @@ Json PrepareOptimized(ReplayRequest& replay, const std::string& sourceHash,
     const auto result=RunProcess(process,cancel);Write(root/"optimizer.log",result.output);
     if(result.cancelled)throw std::runtime_error("Optimization cancelled");
     if(!result.Success())return {{"status","failed; using original"},{"log",(root/"optimizer.log").u8string()}};
-    if(Sha256File(replay.capture,cancel)!=sourceHash)throw std::runtime_error("Original capture changed during optimization");
+    if(CachedSha256File(replay.capture,cancel)!=sourceHash)throw std::runtime_error("Original capture changed during optimization");
     Json metadata{{"owner","gfxrecon_gui"},{"schema",1},{"complete",true},
         {"source",replay.capture.u8string()},{"source_sha256",sourceHash},
         {"optimizer_sha256",optimizerHash},{"log",(root/"optimizer.log").u8string()}};
     if(std::filesystem::is_regular_file(pending)) {
-        metadata["derived_sha256"]=Sha256File(pending,cancel);
+        metadata["derived_sha256"]=CachedSha256File(pending,cancel);
         metadata["original_bytes"]=std::filesystem::file_size(replay.capture);
         metadata["optimized_bytes"]=std::filesystem::file_size(pending);
         metadata["status"]="optimized";
@@ -148,8 +156,8 @@ Json PrepareOptimized(ReplayRequest& replay, const std::string& sourceHash,
     return metadata;
 }
 bool HasVisualization(const ReplayRequest& r){return r.visualization!="original"||r.indirectSubdraw>=0;}
-Json VisualizationConfig(const ReplayRequest& r){return {{"protocol",r.visualization=="silhouette"?3:r.visualization=="uv"?2:1},{"mode",r.visualization},{"pipeline",r.visualizationPipeline},{"subdraw",r.indirectSubdraw},{"draw_id_safe",r.indirectDrawIdSafe},{"uv_shader_sha256",r.uvShader.empty()?std::string{}:Sha256File(r.uvShader)},
-    {"outline_base_sha256",r.outlineBaseImage.empty()?std::string{}:Sha256File(r.outlineBaseImage)},{"outline_coverage_sha256",r.outlineCoverageImage.empty()?std::string{}:Sha256File(r.outlineCoverageImage)}};}
+Json VisualizationConfig(const ReplayRequest& r){return {{"protocol",r.visualization=="silhouette"?3:r.visualization=="uv"?2:1},{"mode",r.visualization},{"pipeline",r.visualizationPipeline},{"subdraw",r.indirectSubdraw},{"draw_id_safe",r.indirectDrawIdSafe},{"uv_shader_sha256",r.uvShader.empty()?std::string{}:CachedSha256File(r.uvShader)},
+    {"outline_base_sha256",r.outlineBaseImage.empty()?std::string{}:CachedSha256File(r.outlineBaseImage)},{"outline_coverage_sha256",r.outlineCoverageImage.empty()?std::string{}:CachedSha256File(r.outlineCoverageImage)}};}
 Json DumpOptions(const ReplayRequest& r, const std::string& output) {
     return {{"OutputDir", output}, {"ImageFormat", r.imageFormat},
         {"DumpAllDescriptors", !r.outputsOnly || r.descriptorImages || r.drawInspection}, {"DumpVertexIndexBuffer", !r.outputsOnly || r.drawInspection},
@@ -171,7 +179,7 @@ bool RestoreArtifacts(const std::filesystem::path& root, const ReplayRequest& r,
         if (!cached.value("complete", false) || cached.value("owner", "") != "gfxrecon_gui" || cached.at("request_identity") != identity) return false;
         for (const auto& artifact : cached.at("artifacts")) {
             const auto file = ArtifactPath(root, artifact.at("file"));
-            if (!std::filesystem::is_regular_file(file) || Sha256File(file, cancel) != artifact.at("sha256")) return false;
+            if (!std::filesystem::is_regular_file(file) || CachedSha256File(file, cancel) != artifact.at("sha256")) return false;
         }
         for (const auto& artifact : cached.at("artifacts")) {
             const auto destination = ArtifactPath(r.output, artifact.at("file"));
@@ -183,6 +191,51 @@ bool RestoreArtifacts(const std::filesystem::path& root, const ReplayRequest& r,
         return true;
     } catch (...) { if (cancel && cancel->load()) throw; return false; }
 }
+Json ResultIdentity(const ReplayRequest& r, const ReplayTarget& target, const std::string& captureHash,
+                    const std::string& backendHash, const Json& overrides, const Json& memoryPolicy,
+                    const std::string& deviceIdentity) {
+    Json identity{{"schema", 1}, {"capture_sha256", captureHash}, {"target", target.Label()},
+        {"device_build", deviceIdentity}, {"backend_sha256", backendHash}, {"overrides", overrides},
+        {"swapchain_mode", r.swapchainMode}, {"memory_translation", memoryPolicy.at("effective")}};
+    identity["memory_translation_policy"] = memoryPolicy;
+    identity["frame"] = r.frame; identity["dump"] = r.dump; identity["outputs_only"] = r.outputsOnly; identity["prefix"] = r.prefix;
+    identity["descriptor_images"]=r.descriptorImages;identity["validation"]=r.validation;
+    identity["draw_inspection"]=r.drawInspection;
+    if(r.drawInspection)identity["input_readback_protocol"]=2; // Exclude older image-only partial caches.
+    identity["visualization"]=VisualizationConfig(r);
+    if(r.visualization=="silhouette")identity["outline_composite_encoding_protocol"]=1;
+    identity["screen_off"]=r.screenOff;
+    if(r.measurement.enabled)identity["measurement"]={{"frame_range",r.measurement.frameRange},{"quit_after",r.measurement.quitAfter}};
+    identity["readback_options"] = r.dump.is_null() ? Json() : DumpOptions(r, "<session-output>");
+    return identity;
+}
+bool RestoreLocalArtifacts(const ReplayRequest& r, const Json& requestIdentity, const std::atomic_bool* cancel, Json& cached) {
+    if (!r.reuseArtifacts || r.validation || r.measurement.enabled || r.cacheDirectory.empty() || (!r.dump.is_null() && !r.outputsOnly)) return false;
+    std::error_code error;
+    const auto root = r.cacheDirectory / "results";
+    std::vector<std::filesystem::path> candidates;
+    for (const auto& entry : std::filesystem::directory_iterator(root, error)) {
+        const auto name = entry.path().filename().u8string();
+        if (name.size() == 64 && name.find_first_not_of("0123456789abcdef") == std::string::npos &&
+            !entry.is_symlink() && entry.is_directory() && std::filesystem::is_regular_file(entry.path() / "manifest.json"))
+            candidates.push_back(entry.path());
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
+        return std::filesystem::last_write_time(a / "manifest.json") > std::filesystem::last_write_time(b / "manifest.json");
+    });
+    auto expected = requestIdentity; expected.erase("device_build");
+    for (const auto& candidate : candidates) {
+        if (cancel && cancel->load()) throw std::runtime_error("Replay cancelled.");
+        try {
+            const auto manifest = ReadJson(candidate / "manifest.json");
+            auto identity = manifest.at("request_identity"); identity.erase("device_build");
+            if (identity == expected && RestoreArtifacts(candidate, r, manifest.at("request_identity"), cancel, cached)) return true;
+        } catch (...) { if (cancel && cancel->load()) throw; }
+    }
+    return false;
+}
+
+
 void CacheArtifacts(const std::filesystem::path& root, const ReplayRequest& r, const Json& manifest) {
     if (root.empty() || r.validation || r.measurement.enabled || (!r.dump.is_null() && !r.outputsOnly)) return;
     try {
@@ -232,7 +285,7 @@ ReplayResult RunLocal(const ReplayRequest& r, const std::map<std::string, std::s
     std::filesystem::path pendingCache, readyCache;
     bool cacheLoaded = false;
     const auto backend = tools.find("replay");
-    if (!r.validation && !r.cacheDirectory.empty() && backend != tools.end() && CacheCapable(std::filesystem::u8path(backend->second), Sha256File(std::filesystem::u8path(backend->second), cancel))) {
+    if (!r.validation && !r.cacheDirectory.empty() && backend != tools.end() && CacheCapable(std::filesystem::u8path(backend->second), CachedSha256File(std::filesystem::u8path(backend->second), cancel))) {
         const auto directory = r.cacheDirectory / "pipelines"; std::filesystem::create_directories(directory);
         readyCache = directory / (identity + ".bin");
         if (std::filesystem::is_regular_file(readyCache)) {
@@ -288,7 +341,7 @@ ReplayResult RunLocal(const ReplayRequest& r, const std::map<std::string, std::s
     if (r.measurement.gpu) {
         local.timings["pipeline_cache_identity"] = identity;
         local.timings["pipeline_cache_saved"] = !pendingCache.empty() && std::filesystem::is_regular_file(readyCache);
-        local.timings["pipeline_cache_sha256"] = !readyCache.empty() && std::filesystem::is_regular_file(readyCache) ? Json(Sha256File(readyCache, cancel)) : Json(nullptr);
+        local.timings["pipeline_cache_sha256"] = !readyCache.empty() && std::filesystem::is_regular_file(readyCache) ? Json(CachedSha256File(readyCache, cancel)) : Json(nullptr);
         local.timings["telemetry"] = {{"before", QueryMeasurementTelemetry({}, {}, cancel)}, {"after", QueryMeasurementTelemetry({}, {}, cancel)}};
     }
     return local;
@@ -300,36 +353,40 @@ ReplayResult RunAndroid(const ReplayRequest& r, const ReplayTarget& target, cons
     AdbConnection adb{tools.at("adb"), target.serial, cancel};
     EnsureAndroidReplayReady(adb);
     if(r.progress)r.progress("Preparing replay on Android "+target.serial);
-    const auto installed = adb.Shell({"pm", "path", kPackage});
-    if (installed.find("package:") == std::string::npos)
-        throw std::runtime_error("Install the compatible GFXReconstruct replay APK on " + target.serial + " before rendering.");
-    Checked(adb.Run({"shell", Command({"run-as", kPackage, "id"})}), "Replay APK access");
     const auto id = std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
     const auto relative = "files/gui_replay_" + id;
     const auto remote = std::string("/data/data/") + kPackage + "/" + relative;
-    adb.Shell({"run-as", kPackage, "mkdir", "-p", relative});
     Write(r.output / "device-session.json", Json{{"serial", target.serial}, {"remote", remote},
         {"capture", r.capture.u8string()}, {"frame", r.frame}}.dump(2));
     std::string captureFile = remote + "/capture.gfxr", pipelineFile, pendingPipeline;
     bool pipelineReady = false, captureReused = false;
+    std::string setup = "set -e; mkdir -p " + QuoteAndroidArgument(relative);
+    std::string base;
     if (!r.cacheDirectory.empty()) {
-        const std::string base = "files/gui_cache_v2/" + captureHash;
-        adb.Shell({"run-as", kPackage, "mkdir", "-p", base});
-        const auto checksum = adb.TryShell({"run-as", kPackage, "sha256sum", base + "/capture.gfxr"});
-        captureReused = checksum.Success() && checksum.output.rfind(captureHash, 0) == 0;
-        if (!checksum.Success() || checksum.output.rfind(captureHash, 0) != 0) {
-            adb.Put(kPackage, r.capture, base + "/capture.partial");
-            if (adb.Shell({"run-as", kPackage, "sha256sum", base + "/capture.partial"}).rfind(captureHash, 0) != 0)
-                throw std::runtime_error("Uploaded capture checksum did not match");
-            adb.Shell({"run-as", kPackage, "mv", base + "/capture.partial", base + "/capture.gfxr"});
-        }
+        base = "files/gui_cache_v2/" + captureHash;
+        setup += "; mkdir -p " + QuoteAndroidArgument(base) + "; checksum=$(sha256sum " + QuoteAndroidArgument(base + "/capture.gfxr") + " 2>/dev/null || true); printf '%s\\000' \"$checksum\"";
         captureFile = std::string("/data/data/") + kPackage + "/" + base + "/capture.gfxr";
         if (pipelineCapable) {
             pipelineFile = std::string("/data/data/") + kPackage + "/" + base + "/pipeline_" + identity + ".bin";
-            pipelineReady = adb.TryShell({"run-as", kPackage, "test", "-s", pipelineFile}).Success();
             pendingPipeline = remote + "/pipeline.partial";
         }
+    } else setup += "; printf '\\000'";
+    setup += pipelineFile.empty() ? "; printf '0\\000'" : "; if test -s " + QuoteAndroidArgument(pipelineFile) + "; then printf '1\\000'; else printf '0\\000'; fi";
+    const auto prepared = AndroidFields(adb.Shell({"run-as", kPackage, "sh", "-c", setup}), 2);
+    captureReused = !base.empty() && prepared[0].rfind(captureHash, 0) == 0;
+    pipelineReady = prepared[1] == "1";
+    if (!base.empty()) {
+        if (!captureReused) {
+            adb.Put(kPackage, r.capture, base + "/capture.partial");
+            // exec-in may return before the receiver finishes. Keep an explicit
+            // checksum acknowledgment before atomically publishing the upload.
+            adb.Shell({"run-as", kPackage, "sh", "-c", "set -e; checksum=$(sha256sum " + QuoteAndroidArgument(base + "/capture.partial") +
+                "); test \"${checksum%% *}\" = " + QuoteAndroidArgument(captureHash) + " || { echo 'Uploaded capture checksum did not match' >&2; exit 1; }; mv " +
+                QuoteAndroidArgument(base + "/capture.partial") + " " + QuoteAndroidArgument(base + "/capture.gfxr")});
+        }
     } else adb.Put(kPackage, r.capture, relative + "/capture.gfxr");
+    const auto transportTool=tools.find("artifact_transport");
+    const auto transport=transportTool==tools.end()?std::string{}:adb.PrepareArtifactTransport(std::filesystem::u8path(transportTool->second));
     const auto uploaded = std::chrono::steady_clock::now();
     std::string args = "--screenshots " + std::to_string(r.frame) + " --screenshot-format bmp --screenshot-dir " + remote +
         " --screenshot-prefix " + r.prefix + " --quit-after-frame " + std::to_string(r.frame) +
@@ -505,22 +562,9 @@ ReplayResult RunAndroid(const ReplayRequest& r, const ReplayTarget& target, cons
         if(r.validation)adb.Get(kPackage,relative+"/replay.log",r.output/"validation-full.log");
         if (!pipelineFile.empty() && !pipelineReady && adb.TryShell({"run-as", kPackage, "test", "-s", pendingPipeline}).Success())
             adb.Shell({"run-as", kPackage, "mv", pendingPipeline, pipelineFile});
-        const auto files = adb.Shell({"run-as", kPackage, "find", relative, "-type", "f"});
-        std::istringstream lines(files); std::string file;
-        size_t received=0;
         if(r.progress)r.progress("Android replay completed; retrieving images and resource data");
-        while (std::getline(lines, file)) {
-            if (!file.empty() && file.back() == '\r') file.pop_back();
-            if (file.rfind(relative + "/", 0) != 0 || file.find("..") != std::string::npos || file.find('\\') != std::string::npos)
-                throw std::runtime_error("Replay returned an unexpected artifact path");
-            const auto basename = std::filesystem::path(file).filename();
-            const auto extension = basename.extension().u8string();
-            // Full inspection requests descriptor images and the vertex/index/uniform bytes together.
-            if (extension == ".bmp" || extension == ".png" || (extension == ".bin"&&(!r.descriptorImages||r.drawInspection)) || (extension == ".json" && basename != "dump-request.json")){
-                adb.Get(kPackage, file, r.output / basename);
-                if(r.progress&&++received%8==0)r.progress("Received "+std::to_string(received)+" replay artifacts");
-            }
-        }
+        ArtifactTransferStats transfer;
+        const auto received = adb.GetReplayFiles(kPackage, relative, r.output, !r.descriptorImages || r.drawInspection, r.timeout,transport,&transfer);
         if(r.progress)r.progress("Replay artifact retrieval complete ("+std::to_string(received)+" files)");
         if(r.screenOff)display.Restore();
         running = false;
@@ -529,6 +573,7 @@ ReplayResult RunAndroid(const ReplayRequest& r, const ReplayTarget& target, cons
             {"prepare_seconds", std::chrono::duration<double>(uploaded - started).count()},
             {"replay_seconds", std::chrono::duration<double>(replayed - uploaded).count()},
             {"download_seconds", std::chrono::duration<double>(std::chrono::steady_clock::now() - replayed).count()}};
+        result.timings["artifact_transfer"]={{"codec",transfer.codec},{"integrity",transfer.integrity},{"wire_bytes",transfer.wireBytes},{"raw_bytes",transfer.rawBytes}};
         result.timings["swapchain"] = swapchain;
         result.timings["memory_translation"] = ReplayMemoryTranslationPolicy(r.memoryTranslation, true);
         if (r.measurement.gpu) {
@@ -587,7 +632,7 @@ std::vector<AndroidDevice> ParseAdbDevices(const std::string& text) {
     return devices;
 }
 std::vector<AndroidDevice> QueryAndroidDevices(const std::string& adb, const std::atomic_bool* cancel) {
-    if (adb.empty()) throw std::runtime_error("Configure ADB in Tools and devices to replay this Android capture on a phone.");
+    if (adb.empty()) throw std::runtime_error("Configure ADB in Settings > Tools and devices to replay this Android capture on a phone.");
     ProcessRequest request{adb, {"devices", "-l"}}; request.allowChildServices = true;
     return ParseAdbDevices(Checked(RunProcess(request, cancel), "Android device discovery"));
 }
@@ -597,18 +642,19 @@ ReplayTarget SelectReplayTarget(ReplayMode mode, bool androidCapture, const std:
     if (!serial.empty()) {
         const auto found = std::find_if(devices.begin(), devices.end(), [&](const auto& d) { return d.serial == serial; });
         if (found == devices.end() || found->state != "device")
-            throw std::runtime_error("Selected Android device " + serial + " is disconnected or unauthorized. Connect/authorize it, or select another device in Tools and devices.");
+            throw std::runtime_error("Selected Android device " + serial + " is disconnected or unauthorized. Connect/authorize it, or select another device with the Events replay-device button.");
         return {true, serial};
     }
     std::vector<std::string> online;
     for (const auto& device : devices) if (device.state == "device") online.push_back(device.serial);
-    if (online.empty()) throw std::runtime_error("This capture needs Android replay. Connect an authorized phone and refresh devices in Tools and devices; offline inspection remains available.");
-    if (online.size() > 1) throw std::runtime_error("Multiple Android devices are connected. Select the replay device in Tools and devices.");
+    if (online.empty()) throw std::runtime_error("This capture needs Android replay. Connect an authorized phone and refresh devices with the Events replay-device button; offline inspection remains available.");
+    if (online.size() > 1) throw std::runtime_error("Multiple Android devices are connected. Select the replay device with the Events replay-device button.");
     return {true, online.front()};
 }
 ReplayTarget ResolveReplayTarget(ReplayMode mode, bool androidCapture, const std::string& serial,
                                   const std::string& adb, const std::atomic_bool* cancel) {
     if (mode == ReplayMode::Local || (mode == ReplayMode::Automatic && !androidCapture)) return {};
+    if (!serial.empty()) return {true, serial}; // Cached inspection does not require a connected phone.
     return SelectReplayTarget(mode, androidCapture, serial, QueryAndroidDevices(adb, cancel));
 }
 ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& target,
@@ -637,7 +683,6 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
     const auto memoryPolicy = ReplayMemoryTranslationPolicy(r.memoryTranslation, target.android);
     const auto started = std::chrono::steady_clock::now();
     std::optional<DeviceLock> deviceLock;
-    if (target.android) deviceLock.emplace(target.serial, cancel);
     if(r.visualization!="original"&&r.visualization!="solid"&&r.visualization!="wireframe"&&r.visualization!="depth"&&r.visualization!="uv"&&r.visualization!="silhouette")throw std::runtime_error("Unknown draw visualization");
     if(r.visualization=="uv"&&r.uvShader.empty())throw std::runtime_error("UV visualization requires a reflected UV shader");
     if(r.visualization=="silhouette"&&(r.outlineBaseImage.empty()||r.outlineCoverageImage.empty()))throw std::runtime_error("Orange outline requires original color and solid coverage from this selection");
@@ -646,13 +691,13 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
     if (r.prefix != "baseline" && r.prefix != "modified") throw std::runtime_error("Invalid replay output prefix");
     if (r.imageFormat != "bmp" && r.imageFormat != "png") throw std::runtime_error("Invalid replay image format");
     if (!r.frame || !std::filesystem::is_regular_file(r.capture)) throw std::runtime_error("Replay requires a capture and a positive frame number");
-    const auto sourceHash = Sha256File(request.capture, cancel);
+    const auto sourceHash = CachedSha256File(request.capture, cancel);
     if (!r.expectedCaptureHash.empty() && sourceHash != r.expectedCaptureHash)
         throw std::runtime_error("Capture contents changed after import. Reopen the capture before replaying; previous results were retained.");
     if (std::filesystem::exists(r.output) && !std::filesystem::is_empty(r.output))
         throw std::runtime_error("Replay output must be a new, empty session directory");
     const auto optimization=PrepareOptimized(replay,sourceHash,tools,cancel);
-    const auto captureHash=r.capture==request.capture?sourceHash:Sha256File(r.capture,cancel);
+    const auto captureHash=r.capture==request.capture?sourceHash:CachedSha256File(r.capture,cancel);
     if (r.measurement.gpu) {
         const auto& plan = r.measurement.gpuPlan;
         if (!plan.is_object() || plan.value("mode", "") != "isolated-frame" || plan.value("capture_sha256", "") != sourceHash)
@@ -680,7 +725,7 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
     Json overrides = Json::array();
     for (const auto& [module, file] : r.overrides) {
         if (!module) throw std::runtime_error("Replacement module identity is unavailable");
-        overrides.push_back({{"module", module}, {"file", file.u8string()}, {"sha256", Sha256File(file, cancel)}});
+        overrides.push_back({{"module", module}, {"file", file.u8string()}, {"sha256", CachedSha256File(file, cancel)}});
     }
     std::filesystem::create_directories(r.output);
     Json manifest{{"owner", "gfxrecon_gui"}, {"schema", 3}, {"complete", false},
@@ -694,7 +739,7 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
     if (backend != tools.end()) {
         manifest["backend"] = backend->second;
         if (std::filesystem::is_regular_file(std::filesystem::u8path(backend->second)))
-            manifest["backend_sha256"] = Sha256File(std::filesystem::u8path(backend->second), cancel);
+            manifest["backend_sha256"] = CachedSha256File(std::filesystem::u8path(backend->second), cancel);
     }
     if (r.measurement.gpu && (backend == tools.end() || !GpuCapable(std::filesystem::u8path(backend->second), manifest.value("backend_sha256", ""))))
         throw std::runtime_error("GPU profiling requires the bundled replay backend/APK with frame GPU profiling protocol 1 and an identity-matched capability file. Rebuild/update the backend.");
@@ -703,7 +748,12 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
         if (capability.value("frame_counter_window_protocol", 0) != 1)
             throw std::runtime_error("Replay backend lacks frame counter window protocol 1; update the bundled backend/APK and matching capability file");
     }
-    std::string deviceIdentity = target.android ? "" : LocalDriverIdentity();
+    Json cached;
+    const bool localHit = target.android && RestoreLocalArtifacts(r,
+        ResultIdentity(r, target, captureHash, manifest.value("backend_sha256", ""), overrides, memoryPolicy, ""), cancel, cached);
+    if (target.android && !localHit) deviceLock.emplace(target.serial, cancel);
+    std::string deviceIdentity = localHit ? cached.at("request_identity").value("device_build", std::string{}) :
+        target.android ? "" : LocalDriverIdentity();
     Json deviceMetadata{{"target", target.Label()}, {"serial", target.serial}};
 #ifdef _WIN32
     deviceMetadata["os"] = "Windows";
@@ -713,26 +763,30 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
     deviceMetadata["os"] = "Linux";
 #endif
     bool pipelineCapable = false;
-    if (target.android && (!r.cacheDirectory.empty() || r.measurement.gpu)) {
+    if (!localHit && target.android && (!r.cacheDirectory.empty() || r.measurement.gpu)) {
         AdbConnection adb{tools.at("adb"), target.serial, cancel};
-        const auto build = adb.Shell({"getprop", "ro.build.fingerprint"}), vendorBuild = adb.Shell({"getprop", "ro.vendor.build.fingerprint"});
+        // Preserve each command's output (including newlines) in fixed NUL fields,
+        // while paying for a single host/device round trip.
+        const auto metadata = AndroidFields(adb.Shell({"sh", "-c",
+            "getprop ro.build.fingerprint; printf '\\000'; getprop ro.vendor.build.fingerprint; printf '\\000'; "
+            "driver=$(getprop ro.gfx.driver.0); printf '%s\\000' \"$driver\"; "
+            "if test -n \"$driver\"; then dumpsys package \"$driver\"; fi; printf '\\000'; "
+            "installed=$(pm path " + std::string(kPackage) + " | head -n 1); installed=${installed#package:}; printf '%s\\000' \"$installed\"; "
+            "if test -n \"$installed\"; then sha256sum \"$installed\" 2>/dev/null || true; fi; printf '\\000'; "
+            "getprop ro.product.model; printf '\\000'; getprop ro.build.version.release; printf '\\000'"}), 8);
+        const auto& build = metadata[0]; const auto& vendorBuild = metadata[1];
         deviceIdentity = build + vendorBuild;
         if (r.measurement.gpu) deviceMetadata = {{"os", "Android"}, {"serial", target.serial}, {"build_fingerprint", Trim(build)},
-            {"vendor_build_fingerprint", Trim(vendorBuild)}, {"model", Trim(adb.Shell({"getprop", "ro.product.model"}))},
-            {"os_version", Trim(adb.Shell({"getprop", "ro.build.version.release"}))}};
-        auto driverPackage = adb.Shell({"getprop", "ro.gfx.driver.0"});
+            {"vendor_build_fingerprint", Trim(vendorBuild)}, {"model", Trim(metadata[6])}, {"os_version", Trim(metadata[7])}};
+        auto driverPackage = metadata[2];
         while (!driverPackage.empty() && (driverPackage.back() == '\n' || driverPackage.back() == '\r' || driverPackage.back() == ' ')) driverPackage.pop_back();
         deviceIdentity += driverPackage;
         if (r.measurement.gpu) deviceMetadata["configured_driver_package"] = driverPackage;
-        if (!driverPackage.empty()) {
-            std::istringstream lines(adb.Shell({"dumpsys", "package", driverPackage})); std::string line;
-            while (std::getline(lines, line)) if (line.find("versionCode=") != std::string::npos || line.find("lastUpdateTime=") != std::string::npos) deviceIdentity += line;
-        }
-        auto installed = adb.Shell({"pm", "path", kPackage});
-        if (installed.rfind("package:", 0) == 0) {
-            installed = installed.substr(8, installed.find_first_of("\r\n") - 8);
-            const auto checksum = adb.TryShell({"sha256sum", installed});
-            const auto installedHash = checksum.Success() ? checksum.output.substr(0, 64) : installed;
+        std::istringstream lines(metadata[3]); std::string line;
+        while (std::getline(lines, line)) if (line.find("versionCode=") != std::string::npos || line.find("lastUpdateTime=") != std::string::npos) deviceIdentity += line;
+        const auto& installed = metadata[4];
+        if (!installed.empty()) {
+            const auto installedHash = metadata[5].size() >= 64 ? metadata[5].substr(0, 64) : installed;
             deviceIdentity += installedHash;
             pipelineCapable = backend != tools.end() && installedHash == manifest.value("backend_sha256", "") &&
                 CacheCapable(std::filesystem::u8path(backend->second), installedHash);
@@ -742,12 +796,12 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
                     throw std::runtime_error("Installed replay APK differs from the GPU-capable configured APK. Install the newly built bundled APK before GPU measurement.");
             }
         }
-        else if (r.measurement.gpu) throw std::runtime_error("Install the bundled GPU-capable replay APK before GPU measurement");
+        else throw std::runtime_error("Install the compatible GFXReconstruct replay APK before rendering");
     }
-    Json identity{{"schema", 1}, {"capture_sha256", captureHash}, {"target", target.Label()},
+    Json identity = ResultIdentity(r, target, captureHash, manifest.value("backend_sha256", ""), overrides, memoryPolicy, deviceIdentity);
+    Json pipelineRequest{{"schema", 1}, {"capture_sha256", captureHash}, {"target", target.Label()},
         {"device_build", deviceIdentity}, {"backend_sha256", manifest.value("backend_sha256", "")}, {"overrides", overrides},
         {"swapchain_mode", r.swapchainMode}, {"memory_translation", memoryPolicy.at("effective")}};
-    auto pipelineRequest = identity;
     if (r.measurement.gpu) {
         // Shader staging locations are unique per session; target cache reuse depends
         // on effective module bytes, not the temporary staging directory.
@@ -755,15 +809,6 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
         pipelineRequest["profiling_mode"] = "single-frame";
     }
     const auto pipelineIdentity = Sha256Text(pipelineRequest.dump());
-    identity["memory_translation_policy"] = memoryPolicy;
-    identity["frame"] = r.frame; identity["dump"] = r.dump; identity["outputs_only"] = r.outputsOnly; identity["prefix"] = r.prefix;
-    identity["descriptor_images"]=r.descriptorImages;identity["validation"]=r.validation;
-    identity["draw_inspection"]=r.drawInspection;
-    if(r.drawInspection)identity["input_readback_protocol"]=2; // Exclude older image-only partial caches.
-    identity["visualization"]=VisualizationConfig(r);
-    if(r.visualization=="silhouette")identity["outline_composite_encoding_protocol"]=1;
-    identity["screen_off"]=r.screenOff;
-    if(r.measurement.enabled)identity["measurement"]={{"frame_range",r.measurement.frameRange},{"quit_after",r.measurement.quitAfter}};
     Json gpuRequest;
     if (r.measurement.gpu) {
         const auto timeoutSeconds = std::max<int64_t>(1, std::min<int64_t>(30, r.timeout.count() - 10));
@@ -786,12 +831,13 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
         if (!r.measurement.counterWindow.is_null()) identity["measurement"]["counter_window"] = r.measurement.counterWindow;
     }
     identity["readback_options"]=r.dump.is_null()?Json():DumpOptions(r,"<session-output>");
+    manifest["device_identity_source"] = localHit ? "cached_result" : "current_target";
+    manifest["current_device_verified"] = !localHit;
     manifest["request_identity"] = identity;
     const auto cache = r.cacheDirectory.empty() ? std::filesystem::path{} : r.cacheDirectory / "results" / Sha256Text(identity.dump());
     AtomicJson(r.output / "request.json", manifest);
     try {
-    Json cached;
-    const bool hit = RestoreArtifacts(cache, r, identity, cancel, cached);
+    const bool hit = localHit || RestoreArtifacts(cache, r, identity, cancel, cached);
     ReplayResult result;
     if (hit) {
         std::ifstream in(r.output / "replay.log"); result.log.assign(std::istreambuf_iterator<char>(in), {}); result.target = target.Label();
@@ -867,8 +913,8 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
         }
         if(!composed)throw std::runtime_error("Orange outline requires a readable COLOR 0 attachment");
     }
-    if (Sha256File(r.capture, cancel) != captureHash) throw std::runtime_error("Capture changed during replay; artifacts were not published");
-    if(r.capture!=request.capture && Sha256File(request.capture,cancel)!=sourceHash)
+    if (CachedSha256File(r.capture, cancel) != captureHash) throw std::runtime_error("Capture changed during replay; artifacts were not published");
+    if(r.capture!=request.capture && CachedSha256File(request.capture,cancel)!=sourceHash)
         throw std::runtime_error("Original capture changed during optimized replay; artifacts were not published");
     for (const auto& replacement : overrides) {
         const auto file = r.output / "overrides" / ("sh" + std::to_string(replacement.at("module").get<uint64_t>()));
@@ -877,13 +923,13 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
             std::filesystem::create_directories(file.parent_path());
             std::filesystem::copy_file(std::filesystem::u8path(replacement.at("file").get<std::string>()), file);
         }
-        if (Sha256File(file, cancel) != replacement.at("sha256"))
+        if (CachedSha256File(file, cancel) != replacement.at("sha256"))
             throw std::runtime_error("Shader candidate changed during replay; artifacts were not published");
     }
     manifest["artifacts"] = Json::array();
     for (const auto& entry : std::filesystem::recursive_directory_iterator(r.output)) if (entry.is_regular_file() && entry.path().filename() != "request.json")
         manifest["artifacts"].push_back({{"file", entry.path().lexically_relative(r.output).generic_u8string()},
-            {"bytes", entry.file_size()}, {"sha256", Sha256File(entry.path(), cancel)}});
+            {"bytes", entry.file_size()}, {"sha256", CachedSha256File(entry.path(), cancel)}});
     manifest["complete"] = true; manifest["image"] = result.image.filename().u8string();
     manifest["artifact_cache_hit"] = hit;
     manifest["swapchain"] = result.timings.value("swapchain", Json{{"requested", r.swapchainMode}, {"effective", nullptr}, {"source", "unavailable"}});
@@ -899,7 +945,7 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
     result.timings["elapsed_seconds"] = manifest["elapsed_seconds"];
     result.timings["optimized_replay"]=optimization.value("status","")=="optimized";
     result.timings["optimizer_status"]=optimization.value("status","");
-    if (target.android && backend != tools.end() && !pipelineCapable &&
+    if (target.android && !localHit && backend != tools.end() && !pipelineCapable &&
         CacheCapable(std::filesystem::u8path(backend->second), manifest.value("backend_sha256", "")))
         result.timings["replay_update_required"] = true;
     return result;

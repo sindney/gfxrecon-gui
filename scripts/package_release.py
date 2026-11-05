@@ -88,7 +88,7 @@ def release_files(stage):
         tool_file = relative.parts[0] == "tools" and path.suffix.lower() in (".exe", ".dll", ".json", ".apk")
         sample_file = relative.parts[0] == "samples" and path.suffix.lower() in (".gfxr", ".md", ".spv")
         if not (relative.as_posix() in required or relative.parts[0] == "licenses" or tool_file or sample_file or
-                relative.as_posix() in ("dependencies.json", "tool-versions.json", "tools/android/gpu-counter-producer") or
+                relative.as_posix() in ("dependencies.json", "tool-versions.json", "tools/android/gpu-counter-producer", "tools/android/gfxrecon-artifact-transport") or
                 (len(relative.parts) == 1 and path.suffix.lower() == ".dll")):
             raise ValueError(f"Unexpected release file: {relative}")
         files.append(path)
@@ -145,6 +145,13 @@ def bundle_tools(stage, config, runtimes):
         raise ValueError("Build/configure the Android GPU counter producer with scripts/setup_backend.py android")
     shutil.copy2(producer, android / "gpu-counter-producer")
     shutil.copy2(producer_capability, android / "gpu-counter-producer.capabilities.json")
+    transport = Path(config.get("artifact_transport", ""))
+    if config.get("artifact_transport"):
+        capability=json.loads(Path(str(transport)+'.capabilities.json').read_text())
+        if capability.get('artifact_transport_protocol')!=1 or capability.get('binary_sha256')!=sha256(transport) or capability.get('abi')!='arm64-v8a':
+            raise ValueError("Artifact transport helper capability/hash mismatch")
+        shutil.copy2(transport, android / "gfxrecon-artifact-transport")
+        shutil.copy2(str(transport) + '.capabilities.json', android / 'gfxrecon-artifact-transport.capabilities.json')
     for key, name in [("replay_apk", "replay-debug.apk"), ("test_apk", "test_launcher-debug.apk")]:
         source = Path(config.get(key, ""))
         if not source.is_file(): raise ValueError(f"Configure the source-built debuggable {key}")

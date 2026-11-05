@@ -28,10 +28,15 @@ bool CpuSupportsAvx2() {
 }
 std::string ResolveAstcenc(const std::filesystem::path& bundled) {
     const auto dir = bundled / "astcenc";
+#ifdef _WIN32
     const auto avx2 = dir / "astcenc-avx2.exe", sse2 = dir / "astcenc-sse2.exe";
     if (CpuSupportsAvx2() && std::filesystem::is_regular_file(avx2)) return avx2.u8string();
     if (std::filesystem::is_regular_file(sse2)) return sse2.u8string();
-    return "";
+#else
+    const auto native = dir / "astcenc";
+    if (std::filesystem::is_regular_file(native)) return native.u8string();
+#endif
+    return FindExecutablePath("astcenc");
 }
 } // namespace
 ToolMap ResolveTools(const std::filesystem::path& dir, const std::filesystem::path& exeDir) {
@@ -61,6 +66,7 @@ ToolMap ResolveTools(const std::filesystem::path& dir, const std::filesystem::pa
     tools["replay_apk"] = hasBundle ? (bundled / "android/replay-debug.apk").u8string() : "";
     tools["test_apk"] = hasBundle ? (bundled / "android/test_launcher-debug.apk").u8string() : "";
     tools["gpu_counter_producer"] = hasBundle ? (bundled / "android/gpu-counter-producer").u8string() : "";
+    tools["artifact_transport"] = hasBundle ? (bundled / "android/gfxrecon-artifact-transport").u8string() : "";
     auto localConfig = std::filesystem::current_path() / "local-tools.json";
     if (!std::filesystem::is_regular_file(localConfig)) {
         auto parent = dir;
@@ -87,7 +93,7 @@ std::map<std::string, bool> ToolAvailability(const ToolMap& tools) {
         const auto file = std::filesystem::u8path(path);
         if (name == "validation_layer") { ready[name] = std::filesystem::is_regular_file(file / "VkLayer_khronos_validation.json"); continue; }
         ready[name] = !path.empty() && (name == "layer" ? std::filesystem::is_regular_file(file / "VkLayer_gfxreconstruct.json") :
-            name == "replay_apk" || name == "test_apk" || name == "gpu_counter_producer" ? std::filesystem::is_regular_file(file) : !FindExecutablePath(path).empty());
+            name == "replay_apk" || name == "test_apk" || name == "gpu_counter_producer" || name == "artifact_transport" ? std::filesystem::is_regular_file(file) : !FindExecutablePath(path).empty());
     }
     return ready;
 }
@@ -96,7 +102,7 @@ std::map<std::string, std::string> ProbeToolVersions(const ToolMap& tools, std::
     std::map<std::string, std::string> versions;
     for (const auto& [name, path] : tools) {
         if (cancel && cancel->load()) break;
-        if (name == "layer" || name == "validation_layer" || name == "replay_apk" || name == "test_apk" || name == "gpu_counter_producer") {
+        if (name == "layer" || name == "validation_layer" || name == "replay_apk" || name == "test_apk" || name == "gpu_counter_producer" || name == "artifact_transport") {
             ready[name] = std::filesystem::is_regular_file(std::filesystem::u8path(path) / (name == "layer" ? "VkLayer_gfxreconstruct.json" : ""));
             if (name == "validation_layer") ready[name] = std::filesystem::is_regular_file(std::filesystem::u8path(path) / "VkLayer_khronos_validation.json");
             else if (name != "layer") ready[name] = std::filesystem::is_regular_file(std::filesystem::u8path(path));

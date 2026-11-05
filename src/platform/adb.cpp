@@ -1,8 +1,17 @@
 #include "platform/adb.h"
+#include "core/artifacts.h"
+#include "core/log.h"
 
 #include <stdexcept>
 #include <sstream>
 #include <thread>
+#include <fstream>
+#include <set>
+#include <array>
+#include <charconv>
+#include <algorithm>
+#include <mutex>
+#include <map>
 
 namespace gfx {
 namespace {
@@ -25,12 +34,13 @@ std::string AndroidCommand(const std::vector<std::string>& words) {
     return command;
 }
 ProcessResult AdbConnection::Run(std::vector<std::string> args, const std::filesystem::path& input,
-                                const std::filesystem::path& output, bool cleanup) const {
+                                const std::filesystem::path& output, bool cleanup, std::chrono::milliseconds timeout) const {
     if (serial.empty()) throw std::runtime_error("Select an Android device first.");
     args.insert(args.begin(), {"-s", serial});
     ProcessRequest r{executable, std::move(args)};
     r.allowChildServices = true; // The shared host ADB server is not this client's child workload.
     r.timeout = std::chrono::seconds(cleanup ? 5 : 30);
+    if (!cleanup && timeout.count() > 0) r.timeout = timeout;
     r.stdinFile = input; r.stdoutFile = output;
     return transport ? transport(r, cleanup ? nullptr : cancel) : RunProcess(r, cleanup ? nullptr : cancel);
 }
@@ -53,6 +63,97 @@ void AdbConnection::Get(const std::string& package, const std::string& source, c
 }
 void AdbConnection::Stop(const std::string& package) const {
     Run({"shell", AndroidCommand({"am", "force-stop", package})}, {}, {}, true);
+}
+std::string AdbConnection::PrepareArtifactTransport(const std::filesystem::path& helper) const {
+    if(helper.empty()||!std::filesystem::is_regular_file(helper))return {};
+    std::string pending;
+    try{
+        const auto hash=CachedSha256File(helper,cancel);
+        std::ifstream metadata(std::filesystem::u8path(helper.u8string()+".capabilities.json"));
+        const auto capability=nlohmann::json::parse(metadata);
+        if(capability.value("artifact_transport_protocol",0)!=1||capability.value("binary_sha256","")!=hash||capability.value("abi","")!="arm64-v8a")return {};
+        const auto remote="/data/local/tmp/gfxrecon-artifacts-"+hash;
+        const auto key=executable+"\n"+serial+"\n"+hash;
+        static std::mutex mutex;static std::map<std::string,std::string> ready;
+        {std::lock_guard<std::mutex> lock(mutex);const auto found=ready.find(key);if(found!=ready.end())return found->second;}
+        const auto check=Shell({"sh","-c","if test \"$(getprop ro.product.cpu.abi)\" != arm64-v8a; then printf unsupported; elif test -x "+QuoteAndroidArgument(remote)+"; then if "+QuoteAndroidArgument(remote)+" --version >/dev/null 2>&1; then sha256sum "+QuoteAndroidArgument(remote)+"; else printf unsupported; fi; fi"});
+        if(check=="unsupported"){std::lock_guard<std::mutex> lock(mutex);ready[key]={};return {};}
+        if(check.rfind(hash,0)!=0){
+            pending=remote+".partial-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            Checked(Run({"push",helper.u8string(),pending}),"Artifact transport helper upload");
+            Shell({"sh","-c","set -e; checksum=$(sha256sum "+QuoteAndroidArgument(pending)+"); test \"${checksum%% *}\" = "+QuoteAndroidArgument(hash)+"; chmod 700 "+QuoteAndroidArgument(pending)+"; mv "+QuoteAndroidArgument(pending)+" "+QuoteAndroidArgument(remote)+"; "+QuoteAndroidArgument(remote)+" --version"});
+            pending.clear();
+        }
+        {std::lock_guard<std::mutex> lock(mutex);if(ready.size()>=64)ready.erase(ready.begin());ready[key]=remote;}
+        return remote;
+    }catch(const std::exception& error){
+        if(!pending.empty())try{TryShell({"rm","-f",pending},true);}catch(...){}
+        if(cancel&&cancel->load())throw;
+        LOGW("transfer")<<"Using raw artifact transfer: "<<error.what();return {};
+    }
+}
+size_t AdbConnection::GetReplayFiles(const std::string& package, const std::string& directory,
+                                    const std::filesystem::path& destination, bool buffers,
+                                    std::chrono::milliseconds timeout, const std::string& helper,
+                                    ArtifactTransferStats* stats) const {
+    const auto staging=destination/"replay-artifacts.staging";
+    if(!std::filesystem::create_directory(staging))throw std::runtime_error("Artifact staging directory already exists");
+    struct Remove { std::filesystem::path file; ~Remove() { std::error_code error; std::filesystem::remove_all(file, error); } } remove{staging};
+    const auto bundle=staging/"wire.partial",decoded=staging/"decoded.partial";
+    // NUL-delimited names and lengths frame the binary payloads. The receiver
+    // validates every basename and length before opening a destination file.
+    const auto script = std::string("set -e; set -o pipefail; printf 'GFXRECON_ARTIFACTS_1\\000'; find ") + QuoteAndroidArgument(directory) +
+        " -type f | while IFS= read -r file; do name=${file##*/}; case \"$name\" in dump-request.json) continue;; " +
+        "*.bmp|*.png|*.json" + (buffers ? "|*.bin" : "") + ") ;; *) continue;; esac; "
+        "size=$(stat -c %s \"$file\"); printf '%s\\000%s\\000' \"$name\" \"$size\"; cat \"$file\"; done; printf '\\000'";
+    const auto producer=AndroidCommand({"run-as",package,"sh","-c",script});
+    const auto command=helper.empty()?producer:AndroidCommand({"sh","-c","set -o pipefail; if test -x "+QuoteAndroidArgument(helper)+"; then "+producer+" | "+QuoteAndroidArgument(helper)+"; else "+producer+"; fi"});
+    Checked(Run({"exec-out",command},{},bundle,false,timeout),"Replay artifact retrieval from "+serial);
+    ArtifactTransferStats transfer;
+    const auto compressed=DecodeArtifactTransfer(bundle,decoded,transfer,cancel);
+    const auto content=compressed?decoded:bundle;
+    std::ifstream input(content, std::ios::binary);
+    const auto total = std::filesystem::file_size(content);
+    auto field = [&]() {
+        std::string value; char c;
+        while (input.get(c)) { if (!c) return value; if (value.size() >= 255) throw std::runtime_error("Android artifact header is too long"); value += c; }
+        throw std::runtime_error("Android artifact transfer was truncated");
+    };
+    if (field() != "GFXRECON_ARTIFACTS_1") throw std::runtime_error("Invalid Android artifact transfer header");
+    std::set<std::string> received;
+    std::array<char, 65536> bytes;
+    for (;;) {
+        if (cancel && cancel->load()) throw std::runtime_error("Artifact retrieval cancelled");
+        const auto name = field();
+        if (name.empty()) { if (input.peek() != std::char_traits<char>::eof()) throw std::runtime_error("Unexpected data after Android artifact transfer"); break; }
+        const auto file = std::filesystem::u8path(name); const auto extension = file.extension().u8string();
+        if (name == "." || name == ".." || name.find_first_of("/\\\r\n:") != std::string::npos || file.is_absolute() ||
+            (extension != ".bmp" && extension != ".png" && extension != ".json" && !(buffers && extension == ".bin")) || !received.insert(name).second)
+            throw std::runtime_error("Android returned an invalid or duplicate artifact name");
+        const auto count = field(); uint64_t size = 0;
+        const auto parsed = std::from_chars(count.data(), count.data() + count.size(), size);
+        if (parsed.ec != std::errc{} || parsed.ptr != count.data() + count.size() || !size ||
+            uint64_t(input.tellg()) > total || size > total - uint64_t(input.tellg()))
+            throw std::runtime_error("Invalid or truncated Android artifact payload");
+        const auto staged = staging / name;
+        std::ofstream output(staged, std::ios::binary);
+        for (uint64_t remaining = size; remaining;) {
+            if (cancel && cancel->load()) throw std::runtime_error("Artifact retrieval cancelled");
+            const auto chunk = static_cast<std::streamsize>(std::min<uint64_t>(remaining, bytes.size()));
+            if (!input.read(bytes.data(), chunk) || !output.write(bytes.data(), chunk)) throw std::runtime_error("Cannot read or save Android artifact");
+            remaining -= static_cast<uint64_t>(chunk);
+        }
+        output.close(); if (!output) throw std::runtime_error("Cannot save Android artifact");
+    }
+    // Publish only after the whole envelope and all artifact records validate.
+    for(const auto& name:received){
+        if(cancel&&cancel->load())throw std::runtime_error("Artifact retrieval cancelled");
+        const auto completed=destination/std::filesystem::u8path(name);
+        if(std::filesystem::exists(completed))std::filesystem::remove(completed);
+        std::filesystem::rename(staging/std::filesystem::u8path(name),completed);
+    }
+    if(stats)*stats=transfer;
+    return received.size();
 }
 AndroidUnlockRequired::AndroidUnlockRequired(AndroidLockState value,const std::string& detail)
     :std::runtime_error((value.known?"Android device "+value.serial+" is locked.":"Cannot determine the lock state of Android device "+value.serial+".")+" Unlock the phone, then retry replay."+(detail.empty()?"":"\n"+detail)),state(std::move(value)){}

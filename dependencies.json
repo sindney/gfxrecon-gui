@@ -89,7 +89,13 @@
       "tools/astcenc/astcenc-avx2.exe": "2c46c047d3ec53378641e252501b8faa872b6d384f8baec1ff259020a8941b83",
       "tools/astcenc/astcenc-sse2.exe": "ded446f477755af96875c7f4f8e85216a73c06367fdba3fda2744f6bb15b87aa"
     },
-    "acquisition": "vendored in thirdparty/astcenc/ from the release zip; hash-checked by cmake/astcenc.cmake"
+    "acquisition": "vendored in thirdparty/astcenc/ from the release zip; hash-checked by cmake/astcenc.cmake",
+    "macos": {
+      "url": "https://github.com/ARM-software/astc-encoder/releases/download/5.7.0/astcenc-5.7.0-macos-universal.zip",
+      "archive_sha256": "374b2f0aea1d3ab5f849784666d6ece6e27b4bc1f945e5c90d6eeabf00e955f8",
+      "file": "tools/astcenc/astcenc",
+      "acquisition": "Fetched and archive hash-checked by cmake/astcenc.cmake; GFXRECON_ASTCENC_MACOS_ZIP supports offline builds"
+    }
   },
   "gui_capture_extensions": {
     "replay_cache_protocol": 1,
@@ -143,5 +149,13 @@
       "sqlite3.h": "d6c84557261893439b341d2e6c35187ae3ea24fbfd843ad94616f72d89242b8c"
     },
     "notice": "licenses/sqlite.txt"
+  },
+  "artifact_transport": {
+    "protocol": 1,
+    "source": "src/platform/android_artifact_transport.cpp",
+    "codec": "LZ4 1.10.0",
+    "lz4_revision": "ebb370ca83af193212df4dcbadcc5d87bc0de2f0",
+    "integrity": "Leading uncompressed byte count, payload byte count, and XXH64 content checksum; LZ4 block/frame checksums",
+    "license_file": "licenses/LZ4.txt"
   }
 }

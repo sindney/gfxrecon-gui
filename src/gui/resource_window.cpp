@@ -123,7 +123,7 @@ void Workspace::DrawResources() {
             DrawBoundImages("resource-images");ImGui::EndTabItem();
         }
         if(ImGui::BeginTabItem("Validation",nullptr,resourceTabRequest_&&resourceTab_==2?ImGuiTabItemFlags_SetSelected:0)){
-            if(validationReport_.is_null())ImGui::TextWrapped("Enable Vulkan validation in the frame context menu to run a fresh validation replay.");
+            if(validationReport_.is_null())ImGui::TextWrapped("Enable Vulkan validation in Settings > General > Replay to run a fresh validation replay.");
             else {
                 ImGui::TextWrapped("Replay-wide validation: %s",validationReport_.value("status",std::string("unknown")).c_str());
                 if(validationReport_.contains("enabled"))ImGui::TextDisabled("Khronos layer: %s",validationReport_.value("enabled",false)?"enabled":"not enabled");

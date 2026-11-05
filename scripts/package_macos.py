@@ -20,6 +20,7 @@ TOOLS = {
     **{name: "gfxrecon-" + name for name in ("convert", "info", "extract", "optimize", "replay")},
     "compiler": "glslangValidator", "disassembler": "spirv-dis", "assembler": "spirv-as", "validator": "spirv-val",
 }
+ASTCENC = "astcenc/astcenc"
 
 
 def run(command, **kwargs):
@@ -58,7 +59,15 @@ def verify_manifest(directory):
     manifest = json.loads((directory / "build-info.json").read_text())
     if manifest["files"] != inventory(directory):
         raise ValueError("macOS distribution inventory or hashes changed")
-    required = {"dependencies.json", "docs/RELATIONS.md", f"{APP}/Contents/Resources/licenses/sqlite.txt"}
+    required = {"dependencies.json", "docs/RELATIONS.md", f"{APP}/Contents/Resources/licenses/sqlite.txt",
+                f"{APP}/Contents/Resources/tools/{ASTCENC}"}
+    if manifest.get("adb_included"):
+        required.add(f"{APP}/Contents/Resources/tools/adb")
+    if manifest.get("artifact_transport_protocol"):
+        helper=directory / APP / "Contents/Resources/tools/android/gfxrecon-artifact-transport"
+        capability=json.loads(Path(str(helper)+'.capabilities.json').read_text())
+        if capability.get('artifact_transport_protocol')!=1 or capability.get('binary_sha256')!=sha256(helper) or capability.get('abi')!='arm64-v8a':
+            raise ValueError("Artifact transport helper capability/hash mismatch")
     missing = sorted(name for name in required if not (directory / name).is_file())
     if missing:
         raise ValueError(f"Missing release files: {', '.join(missing)}")
@@ -102,9 +111,22 @@ def verify_extracted(directory, scratch, build):
     invoke(["describe"])
     tools = invoke(["doctor", "--no-versions"])["tools"]
     bundled = directory / APP / "Contents/Resources/tools"
-    for key, executable in TOOLS.items():
+    for key, executable in {**TOOLS, "astcenc": ASTCENC}.items():
         if not tools[key]["available"] or Path(tools[key]["path"]).resolve() != (bundled / executable).resolve():
             raise ValueError(f"Packaged tool is not available from the app bundle: {key}")
+    run([bundled / ASTCENC, "-version"], cwd=scratch, env=environment)
+    # Exercise the shipped codec under the same clean PATH, including PNG output.
+    tga = bytearray(18)
+    tga[2], tga[12], tga[14], tga[16], tga[17] = 2, 4, 4, 32, 0x28
+    (scratch / "astc-source.tga").write_bytes(tga + bytes((30, 100, 220, 255)) * 16)
+    run([bundled / ASTCENC, "-cl", scratch / "astc-source.tga", scratch / "texture.astc", "4x4", "-fast", "-silent"], cwd=scratch, env=environment)
+    run([bundled / ASTCENC, "-dl", scratch / "texture.astc", scratch / "texture.png", "-silent"], cwd=scratch, env=environment)
+    if (scratch / "texture.png").read_bytes()[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("Packaged astcenc did not decode to PNG")
+    if manifest.get("artifact_transport_protocol"):
+        helper=bundled / "android/gfxrecon-artifact-transport"
+        if not tools.get('artifact_transport',{}).get('available') or Path(tools['artifact_transport']['path']).resolve()!=helper.resolve():
+            raise ValueError("Bundled artifact transport helper was not resolved")
     samples = directory / APP / "Contents/Resources/samples"
     expected_samples = {"windows-triangle.gfxr", "android-triangle.gfxr", "indexed-cube.gfxr", "indirect-triangles.gfxr"}
     if not expected_samples.issubset({file.name for file in samples.glob("*.gfxr")}):
@@ -143,7 +165,7 @@ def verify_extracted(directory, scratch, build):
     verify_manifest(directory)  # launching GUI/CLI must not modify the signed app or distribution
     (build / "packaged-macos-workflow.log").write_text("\n".join(logs))
     return {"architecture": manifest["platform"], "hashes_and_signature": "passed", "icon": "passed",
-            "clean_path_tools": "passed", "samples_decoded": 4, "shader_roundtrip": "passed",
+            "clean_path_tools": "passed", "astc_roundtrip": "passed", "samples_decoded": 4, "shader_roundtrip": "passed",
             "gui_sample_and_launch_services": "passed", "package_unchanged_after_launch": True,
             "local_frame_and_full_draw_replays": 6 if runtime else "skipped; no explicit Vulkan loader configured",
             "device_access": "disabled", "vulkan_runtime": "external; local replay requires SDK environment"}
@@ -197,15 +219,21 @@ def package_runtime(args):
                 raise ValueError(f"Configure an existing {key} executable in --tools-config")
             shutil.copy2(source, tools / name)
             binaries.append(tools / name)
+        astcenc = Path(config.get("astcenc") or build / "tools" / ASTCENC)
+        if not astcenc.is_file():
+            raise ValueError("Build gfxrecon_astcenc or configure an existing native astcenc executable")
+        (tools / "astcenc").mkdir()
+        shutil.copy2(astcenc, tools / ASTCENC)
+        binaries.append(tools / ASTCENC)
         # Device tools/APKs are included only when explicitly configured. Never run ADB here.
         if config.get("adb"):
             shutil.copy2(config["adb"], tools / "adb")
             binaries.append(tools / "adb")
-        for key, name in (("replay_apk", "replay-debug.apk"), ("test_apk", "test_launcher-debug.apk"), ("gpu_counter_producer", "gpu-counter-producer")):
+        for key, name in (("replay_apk", "replay-debug.apk"), ("test_apk", "test_launcher-debug.apk"), ("gpu_counter_producer", "gpu-counter-producer"), ("artifact_transport", "gfxrecon-artifact-transport")):
             if config.get(key):
                 (tools / "android").mkdir(exist_ok=True)
                 shutil.copy2(config[key], tools / "android" / name)
-                if key == "gpu_counter_producer":
+                if key in ("gpu_counter_producer", "artifact_transport"):
                     shutil.copy2(str(config[key]) + '.capabilities.json', tools / 'android' / (name + '.capabilities.json'))
                 if key == "replay_apk":
                     from write_replay_capability import write_capability
@@ -219,6 +247,7 @@ def package_runtime(args):
         from write_replay_capability import write_capability
         write_capability(tools / "gfxrecon-replay")  # bind capability to the final signed bytes
         versions = {key: run([tools / name, "--version"]).stdout.strip() for key, name in TOOLS.items()}
+        versions["astcenc"] = run([tools / ASTCENC, "-version"]).stdout.strip()
         (stage / "tool-versions.json").write_text(json.dumps(versions, indent=2) + "\n")
         run(["/usr/bin/codesign", "--force", "--sign", "-", app])
         commit = run(["git", "rev-parse", "HEAD"], cwd=ROOT).stdout.strip()
@@ -228,7 +257,7 @@ def package_runtime(args):
                     "built_at_utc": datetime.now(timezone.utc).isoformat(), "signing": "ad-hoc; not notarized",
                     "icon_source_sha256": sha256(ROOT / "assets/app-icon.png"),
                     "external_vulkan_runtime": True, "android_apks_included": bool(config.get("replay_apk")),
-                    "adb_included": bool(config.get("adb")), "files": inventory(stage)}
+                    "adb_included": bool(config.get("adb")), "artifact_transport_protocol": 1 if config.get("artifact_transport") else 0, "files": inventory(stage)}
         (stage / "build-info.json").write_text(json.dumps(manifest, indent=2) + "\n")
         verify_manifest(stage)
         archive = temporary / archive_name

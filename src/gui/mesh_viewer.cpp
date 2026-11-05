@@ -1,4 +1,5 @@
 #include "gui/mesh_viewer.h"
+#include "gui/gl_texture.h"
 #include "platform/os_layer.h"
 #include <SDL3/SDL_opengl.h>
 #include <SDL3/SDL_opengl_glext.h>
@@ -94,7 +95,7 @@ void main(){vec3 n=cross(dFdx(viewPosition),dFdy(viewPosition));float l=length(n
 )");
         gl.GenVertexArrays(1,&vao);gl.GenBuffers(1,&vbo);gl.GenFramebuffers(1,&fbo);gl.GenRenderbuffers(1,&depth);glGenTextures(1,&color);
     }
-    ~Impl(){gl.DeleteProgram(program);gl.DeleteVertexArrays(1,&vao);gl.DeleteBuffers(1,&vbo);gl.DeleteFramebuffers(1,&fbo);gl.DeleteRenderbuffers(1,&depth);glDeleteTextures(1,&color);}
+    ~Impl(){gl.DeleteProgram(program);gl.DeleteVertexArrays(1,&vao);gl.DeleteBuffers(1,&vbo);gl.DeleteFramebuffers(1,&fbo);gl.DeleteRenderbuffers(1,&depth);RetireTexture(color);}
     void Evaluate(){
         if(data->vertexSource.empty()){diagnostic=data->postDiagnostic;return;}
         State state(gl,data->uniforms.size());GLuint vertexProgram=0,vertexArray=0,feedbackBuffer=0,query=0;std::vector<GLuint> buffers;

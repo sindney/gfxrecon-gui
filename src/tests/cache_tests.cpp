@@ -26,6 +26,18 @@ std::string Fixture(int vertices) {
 void RunCacheTests(const std::filesystem::path& root) {
     const auto abc = root / "sha.txt"; Text(abc, "abc");
     Require(Sha256File(abc) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "SHA-256 differs from the standard abc test vector");
+    const auto cachedHash = CachedSha256File(abc);
+    const auto modified = std::filesystem::last_write_time(abc);
+    Require(CachedSha256File(abc) == cachedHash, "Unchanged hash cache differs");
+    Text(abc, "xyz"); std::filesystem::last_write_time(abc, modified);
+    Require(CachedSha256File(abc) != cachedHash, "Same-size mutation with restored mtime reused a hash");
+    const auto replacement = root / "replacement.txt"; Text(replacement, "abc");
+    std::filesystem::last_write_time(replacement, modified);
+    std::filesystem::remove(abc); std::filesystem::rename(replacement, abc);
+    Require(CachedSha256File(abc) == cachedHash, "File replacement reused a hash for the old identity");
+    std::atomic_bool cancelledHash{true}; bool hashFailed = false;
+    try { CachedSha256File(abc, &cancelledHash); } catch (...) { hashFailed = true; }
+    Require(hashFailed, "Cached hash ignored cancellation");
     const auto source = root / "capture with spaces.jsonl", cache = root / "owned-cache";
     Text(source, Fixture(3));
     int builds = 0;

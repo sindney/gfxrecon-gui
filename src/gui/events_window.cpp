@@ -17,8 +17,8 @@ std::string Scope(const Execution& execution, const Event& event) {
 }
 void Workspace::DrawEvents() {
     ImGui::Begin("Events");
-    const float perfWidth = ImGui::CalcTextSize("Perf").x + ImGui::GetFrameHeight() + ImGui::GetStyle().FramePadding.x * 2;
-    ImGui::SetNextItemWidth(-ImGui::GetFrameHeight() - perfWidth - ImGui::GetStyle().ItemSpacing.x * 2);
+    const float buttonSize = ImGui::GetFrameHeight();
+    ImGui::SetNextItemWidth(-buttonSize * 3 - ImGui::GetStyle().ItemSpacing.x * 3);
     if (ImGui::InputTextWithHint("##event-filter", "Find API, block, label, object...", eventFilter_.InputBuf, IM_ARRAYSIZE(eventFilter_.InputBuf))) {
         eventFilter_.Build(); filterDirty_ = true;
     }
@@ -26,20 +26,26 @@ void Workspace::DrawEvents() {
     if (ImGui::ArrowButton("Filters", ImGuiDir_Down)) ImGui::OpenPopup("event-filters");
     ImGui::SetItemTooltip("Event filters");
     ImGui::SameLine();
-    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.15f, 0.5f));
-    if (ImGui::Button("Perf##event-perf", ImVec2(perfWidth, 0))) OpenPerformance();
-    ImGui::PopStyleVar();
-    // A vector clock is readable even when the UI font has no emoji glyphs.
+    if (ImGui::Button("##event-perf", ImVec2(buttonSize, buttonSize))) OpenPerformance();
+    // Draw the icons so they also work with fonts without emoji glyphs.
     const auto rect = ImGui::GetItemRectMin();
-    const float radius = ImGui::GetFrameHeight() * 0.23f;
-    const ImVec2 clock(rect.x + perfWidth - ImGui::GetFrameHeight() * 0.5f,
-                       rect.y + ImGui::GetFrameHeight() * 0.5f);
+    const float radius = buttonSize * 0.23f;
+    const ImVec2 clock(rect.x + buttonSize * 0.5f, rect.y + buttonSize * 0.5f);
     const auto color = ImGui::GetColorU32(ImGuiCol_Text);
     auto* draw = ImGui::GetWindowDrawList();
     draw->AddCircle(clock, radius, color, 16, 1.2f);
     draw->AddLine(clock, ImVec2(clock.x, clock.y - radius * 0.6f), color, 1.2f);
     draw->AddLine(clock, ImVec2(clock.x + radius * 0.55f, clock.y + radius * 0.2f), color, 1.2f);
     ImGui::SetItemTooltip("GPU performance: frame timestamps, optional counters and plots");
+    ImGui::SameLine();
+    if (ImGui::Button("##event-replay-device", ImVec2(buttonSize, buttonSize))) RequestReplayDevice();
+    const auto phone = ImGui::GetItemRectMin();
+    const ImVec2 a(phone.x + buttonSize * .28f, phone.y + buttonSize * .13f),
+                 b(phone.x + buttonSize * .72f, phone.y + buttonSize * .87f);
+    draw->AddRect(a, b, color, 2, 0, 1.5f);
+    draw->AddLine(ImVec2(a.x + 2, b.y - buttonSize * .15f), ImVec2(b.x - 2, b.y - buttonSize * .15f), color);
+    draw->AddCircleFilled(ImVec2(phone.x + buttonSize * .5f, b.y - buttonSize * .075f), 1, color);
+    ImGui::SetItemTooltip("Replay device: %s\nClick to select a replay device.", ReplayDeviceLabel().c_str());
     if (ImGui::BeginPopup("event-filters")) {
         filterDirty_ |= ImGui::Checkbox("Draw / dispatch only", &onlyDraws_);
         if (ImGui::Checkbox("Submitted executions", &submittedOnly_)) { filterDirty_ = true; selectedExecution_ = -1; }

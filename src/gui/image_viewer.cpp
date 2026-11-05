@@ -1,4 +1,5 @@
 #include "gui/image_viewer.h"
+#include "gui/gl_texture.h"
 #include "analysis/depth_sample.h"
 #include "core/image_io.h"
 #include <cstdio>
@@ -59,7 +60,7 @@ void ImageViewer::AbsoluteDifference(const ImageViewer& baseline, const ImageVie
     Upload();
 }
 void ImageViewer::Release() {
-    if (texture_) glDeleteTextures(1, &texture_);
+    RetireTexture(texture_);
     texture_ = 0;
     width_ = height_ = 0; rgba_.clear(); depthValues_.clear(); name_.clear();sourceFormat_.clear();
     sourceEncoding_=ImageSourceEncoding::Srgb;scalar_=false;range_={};rangeDomainMaximum_=1;

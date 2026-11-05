@@ -1,4 +1,5 @@
 #include "app.h"
+#include "gui/gl_texture.h"
 #include "core/log.h"
 #include "core/settings.h"
 #include "gui/fonts.h"
@@ -214,7 +215,7 @@ int main(int argc, char** argv) {
     bool running = true;
     int frameCount = 0;
 #ifdef IMGUI_TEMPLATE_TESTS
-    unsigned imguiErrorReports=0,idConflictFrames=0;
+    unsigned imguiErrorReports=0,idConflictFrames=0,openGlErrorFrames=0;
 #endif
     while (running) {
         ++frameCount;
@@ -231,7 +232,12 @@ int main(int argc, char** argv) {
         if (!app.Draw())
             running = false;
         os::Render(ImVec4(0.10f, 0.10f, 0.12f, 1.0f));
+        gfx::FlushRetiredTextures();
 #ifdef IMGUI_TEMPLATE_TESTS
+        if (const auto error = glGetError()) {
+            ++openGlErrorFrames;
+            std::fprintf(stderr, "[gui-diagnostics] OpenGL error 0x%x at frame %d\n", error, frameCount);
+        }
         imguiErrorReports+=static_cast<unsigned>(GImGui->ErrorCountCurrentFrame);
         if(GImGui->DebugDrawIdConflictsId!=0)++idConflictFrames;
 #endif
@@ -254,6 +260,7 @@ int main(int argc, char** argv) {
     }
 
     app.Shutdown();
+    gfx::FlushRetiredTextures();
     LOGI("app") << "GFXReconstruct Inspector exiting";
 
     int exitCode = 0;
@@ -264,8 +271,8 @@ int main(int argc, char** argv) {
         ImGuiTestEngine_GetResult(engine, tested, succeeded);
         exitCode = (tested > 0 && tested == succeeded) ? 0 : 1;
         const bool loggedErrors=std::strstr(GImGui->DebugLogBuf.c_str(),"[imgui-error]")!=nullptr;
-        std::fprintf(stderr,"[gui-diagnostics] %u ImGui error reports; %u frames with ID conflicts; error log %s\n",imguiErrorReports,idConflictFrames,loggedErrors?"present":"clean");
-        if(imguiErrorReports||idConflictFrames||loggedErrors)exitCode=1;
+        std::fprintf(stderr,"[gui-diagnostics] %u ImGui error reports; %u frames with ID conflicts; %u frames with OpenGL errors; error log %s\n",imguiErrorReports,idConflictFrames,openGlErrorFrames,loggedErrors?"present":"clean");
+        if(imguiErrorReports||idConflictFrames||openGlErrorFrames||loggedErrors)exitCode=1;
         ImGuiTestEngine_Stop(engine);
     }
 #endif

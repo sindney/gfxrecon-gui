@@ -30,6 +30,33 @@ if(WIN32)
         COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/$<CONFIG>/tools/astcenc"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_astc_binaries} "${CMAKE_BINARY_DIR}/$<CONFIG>/tools/astcenc/"
         COMMENT "Copying astcenc ${GFXRECON_ASTCENC_VERSION} to tools/astcenc")
+elseif(APPLE)
+    set(GFXRECON_ASTCENC_MACOS_ZIP "" CACHE FILEPATH "Offline astcenc 5.7.0 macOS universal release archive")
+    set(_archive "${GFXRECON_ASTCENC_MACOS_ZIP}")
+    set(_astc_dir "${CMAKE_BINARY_DIR}/_deps/astcenc-${GFXRECON_ASTCENC_VERSION}")
+    file(MAKE_DIRECTORY "${_astc_dir}")
+    set(_macos_hash 374b2f0aea1d3ab5f849784666d6ece6e27b4bc1f945e5c90d6eeabf00e955f8)
+    if(NOT _archive)
+        set(_archive "${_astc_dir}/macos-universal.zip")
+        if(NOT EXISTS "${_archive}")
+            file(DOWNLOAD "https://github.com/ARM-software/astc-encoder/releases/download/${GFXRECON_ASTCENC_VERSION}/astcenc-${GFXRECON_ASTCENC_VERSION}-macos-universal.zip"
+                "${_archive}" EXPECTED_HASH "SHA256=${_macos_hash}" TLS_VERIFY ON TIMEOUT 120)
+        endif()
+    endif()
+    file(SHA256 "${_archive}" _hash)
+    if(NOT _hash STREQUAL _macos_hash)
+        message(FATAL_ERROR "astcenc macOS archive hash mismatch: ${_hash}")
+    endif()
+    file(ARCHIVE_EXTRACT INPUT "${_archive}" DESTINATION "${_astc_dir}")
+    file(CHMOD "${_astc_dir}/bin/astcenc" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+    add_custom_target(gfxrecon_astcenc ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/tools/astcenc"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_astc_dir}/bin/astcenc" "${CMAKE_BINARY_DIR}/tools/astcenc/astcenc"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/gfxrecon-gui.app/Contents/Resources/tools/astcenc"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_astc_dir}/bin/astcenc" "${CMAKE_BINARY_DIR}/gfxrecon-gui.app/Contents/Resources/tools/astcenc/astcenc"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/gfxrecon_gui_tests.app/Contents/Resources/tools/astcenc"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_astc_dir}/bin/astcenc" "${CMAKE_BINARY_DIR}/gfxrecon_gui_tests.app/Contents/Resources/tools/astcenc/astcenc"
+        COMMENT "Copying astcenc ${GFXRECON_ASTCENC_VERSION} macOS universal binary")
 else()
     add_custom_target(gfxrecon_astcenc)
 endif()

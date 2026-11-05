@@ -49,30 +49,7 @@ void Workspace::ScheduleFrameReplay() {
     autoReplayRunning_ = Busy(); currentReplayFrame_ = frame;
 }
 void Workspace::DrawFrameActions(uint32_t frame) {
-    if (ImGui::BeginMenu("Replay target", !Busy() || autoReplayRunning_)) {
-        const char* labels[] = {"Automatic", LocalReplayLabel(), "Android device"};
-        for (int i = 0; i < 3; ++i) if (ImGui::MenuItem(labels[i], nullptr, static_cast<int>(replayMode_) == i)) {
-            SetReplayMode(static_cast<ReplayMode>(i));
-            for (auto& [number, preview] : frameImages_) preview.image.Release();
-            frameImages_.clear(); failedFrames_.clear(); thumbnailQueue_.clear(); SelectFrame(frame);
-            frameStatuses_.clear();
-        }
-        ImGui::EndMenu();
-    }
-    ImGui::Separator();
-    if(ImGui::MenuItem("Optimize replay copy",nullptr,optimizeReplay_,!Busy()||autoReplayRunning_)) {
-        optimizeReplay_=!optimizeReplay_;InvalidateDrawResources();++selectionGeneration_;SelectFrame(frame);
-    }
-    ImGui::SetItemTooltip("Remove unused initialization and pipelines in a cached replay copy. Original capture and inspection data are preserved.");
-    if(ImGui::MenuItem("Vulkan validation",nullptr,validationReplay_,!Busy()||autoReplayRunning_)) {
-        validationReplay_=!validationReplay_;InvalidateDrawResources();++selectionGeneration_;SelectFrame(frame);
-    }
-    ImGui::SetItemTooltip("Replay original API calls with VK_LAYER_KHRONOS_validation. Runs fresh, without optimized captures or result/pipeline caches.");
     const bool android = replayMode_ == ReplayMode::Android || (replayMode_ == ReplayMode::Automatic && capture_->android);
-    if(ImGui::MenuItem("Phone screen off while replaying",nullptr,phoneScreenOff_,android&&(!Busy()||autoReplayRunning_))){
-        phoneScreenOff_=!phoneScreenOff_;InvalidateDrawResources();++selectionGeneration_;SelectFrame(frame);
-    }
-    ImGui::SetItemTooltip("Keep the physical panel off during Android replay. Requires supported display-power controls; prior display state is restored afterward.");
     ImGui::BeginDisabled((Busy() && !autoReplayRunning_) || capture_->source.extension() != ".gfxr" || !ToolAvailable(android ? "adb" : "replay"));
     if (ImGui::MenuItem("Render frame")) { SelectFrame(frame, false); pendingFrame_ = 0; ReplayFrame(false, false, frame); }
     if (ImGui::MenuItem("Dump selected resources")) { SelectFrame(frame, false); pendingFrame_ = 0; ReplayFrame(true, false, frame); }

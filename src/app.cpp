@@ -71,7 +71,6 @@ bool App::Draw() {
         {static_cast<int>(Command::SaveCapture), "Save capture"},
         {static_cast<int>(Command::SaveCaptureAs), "Save capture as..."},
         {static_cast<int>(Command::CancelJob), "Cancel current operation"},
-        {static_cast<int>(Command::Tools), "Tools and devices..."},
         {static_cast<int>(Command::Performance), "Perf"},
         {static_cast<int>(Command::OpenWindowsSample), "Open Windows triangle sample"},
         {static_cast<int>(Command::OpenAndroidSample), "Open Android triangle sample"},
@@ -148,7 +147,6 @@ void App::DrawMenuBar() {
     }
 
     if (ImGui::BeginMenu("View")) {
-        if (ImGui::MenuItem("Tools and devices...")) pendingCommand_ = Command::Tools;
         if (ImGui::MenuItem("Perf", nullptr, workspace_.PerformanceOpen())) {
             if (workspace_.PerformanceOpen()) workspace_.ClosePerformance();
             else pendingCommand_ = Command::Performance;
@@ -178,12 +176,11 @@ void App::ExecuteCommand(Command command) {
             LOGI("app") << "Open picked: " << *path;
         }
         break;
-    case Command::Settings: showSettings_ = true; break;
+    case Command::Settings: showSettings_ = true; settingsTabRequest_ = 0; break;
     case Command::Capture: workspace_.RequestCapture(); break;
     case Command::SaveCapture: workspace_.SaveCapture(false); break;
     case Command::SaveCaptureAs: workspace_.SaveCapture(true); break;
     case Command::CancelJob: workspace_.CancelJob(); break;
-    case Command::Tools: workspace_.RequestTools(); break;
     case Command::Performance: workspace_.OpenPerformance(); break;
     case Command::OpenWindowsSample:
     case Command::OpenAndroidSample:
@@ -200,13 +197,51 @@ void App::ExecuteCommand(Command command) {
 }
 
 void App::DrawSettings() {
+    if(workspace_.TakeToolsSettingsRequest()){showSettings_=true;settingsTabRequest_=1;}
     if(showSettings_){ImGui::OpenPopup("Settings");showSettings_=false;}
     const auto* viewport=ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(viewport->GetCenter(),ImGuiCond_Appearing,ImVec2(.5f,.5f));
-    ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize()*24,0),ImGuiCond_Appearing);
+    const auto available=viewport->WorkSize;
+    const float font=ImGui::GetFontSize();
+    ImGui::SetNextWindowPos(viewport->GetCenter(),ImGuiCond_FirstUseEver,ImVec2(.5f,.5f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(font*52,available.x*.94f),std::min(font*40,available.y*.85f)),ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(std::min(font*34,available.x*.94f),std::min(font*20,available.y*.9f)),
+                                       ImVec2(available.x*.94f,available.y*.9f));
     bool open=true;
-    if(!ImGui::BeginPopupModal("Settings",&open,ImGuiWindowFlags_NoDocking|ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoSavedSettings))return;
+    if(!ImGui::BeginPopupModal("Settings",&open,ImGuiWindowFlags_NoDocking|ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse))return;
 
+    int activeTab=settingsActiveTab_;
+    if(ImGui::BeginTabBar("settings-tabs")){
+        if(ImGui::BeginTabItem("General",nullptr,ImGuiTabItemFlags_NoPushId|(settingsTabRequest_==0?ImGuiTabItemFlags_SetSelected:ImGuiTabItemFlags_None))){
+            activeTab=0;
+            ImGui::EndTabItem();
+        }
+        if(ImGui::BeginTabItem("Tools and devices",nullptr,ImGuiTabItemFlags_NoPushId|(settingsTabRequest_==1?ImGuiTabItemFlags_SetSelected:ImGuiTabItemFlags_None))){
+            activeTab=1;
+            ImGui::EndTabItem();
+        }
+        settingsTabRequest_=-1;
+        ImGui::EndTabBar();
+    }
+
+    // Keep the tab bar and Close button visible while longer content scrolls.
+    const float footer=ImGui::GetFrameHeight()+ImGui::GetStyle().ItemSpacing.y*3+1;
+    if(activeTab!=settingsActiveTab_)ImGui::SetNextWindowScroll(ImVec2(0,0));
+    settingsActiveTab_=activeTab;
+    if(ImGui::BeginChild("settings-content",ImVec2(0,-footer))){
+        if(activeTab==0)DrawGeneralSettings();
+        else workspace_.DrawToolSettings();
+    }
+    ImGui::EndChild();
+
+    ImGui::Separator();
+    if (ImGui::Button("Close", ImVec2(120, 0)))
+        ImGui::CloseCurrentPopup();
+    if(ImGui::IsKeyPressed(ImGuiKey_Escape))ImGui::CloseCurrentPopup();
+
+    ImGui::EndPopup();
+}
+
+void App::DrawGeneralSettings(){
     ImGui::SeparatorText("Editor");
     // Theme picker.
     if (ImGui::BeginCombo("Theme", kThemes[CurrentThemeIndex()].displayName)) {
@@ -231,6 +266,8 @@ void App::DrawSettings() {
     ImGui::EndDisabled();
     ImGui::SetItemTooltip("Cross-device memory compatibility. Remap chooses compatible memory types; Realign/Rebind adapt allocations further.\nDefault preserves platform behavior (local macOS: Rebind; Windows/Android: None).\nChanging mode clears replay-derived views and separates caches. No silent fallback.");
 
+    workspace_.DrawReplaySettings();
+
     ImGui::SeparatorText("Logging");
     // Logger minimum level.
     const char* levelNames[] = {"Error", "Warn", "Info", "Debug"};
@@ -241,9 +278,9 @@ void App::DrawSettings() {
     if (ImGui::Checkbox("Log to file", &logToFile_)) {
         if (logToFile_) {
             std::string path = logFilePath();
-            if (Log::Instance().SetFileOutput(path, true))
+            if (Log::Instance().SetFileOutput(path, true)) {
                 LOGI("app") << "logging to " << path;
-            else {
+            } else {
                 LOGE("app") << "cannot open log file " << path;
                 logToFile_ = false;
             }
@@ -255,12 +292,6 @@ void App::DrawSettings() {
     if (logToFile_)
         ImGui::TextDisabled("%s", logFilePath().c_str());
 
-    ImGui::Separator();
-    if (ImGui::Button("Close", ImVec2(120, 0)))
-        ImGui::CloseCurrentPopup();
-    if(ImGui::IsKeyPressed(ImGuiKey_Escape))ImGui::CloseCurrentPopup();
-
-    ImGui::EndPopup();
 }
 
 void App::DrawDockspace() {

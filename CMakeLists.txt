@@ -41,6 +41,7 @@ set(BUILD_SHARED_LIBS OFF)
 find_package(OpenGL REQUIRED)
 find_package(Threads REQUIRED)
 include(cmake/sqlite.cmake)
+include(thirdparty/gfxreconstruct/cmake/FindLZ4.cmake)
 
 # --- Submodule presence checks ----------------------------------------------
 # imgui and imgui_test_engine have no upstream CMakeLists; check for a marker file.
@@ -237,6 +238,7 @@ set(CORE_SOURCES
     src/core/image_decode.cpp
     src/platform/process.cpp
     src/platform/adb.cpp
+    src/platform/artifact_transfer.cpp
     src/platform/android_display.cpp
     src/platform/device_lock.cpp
 )
@@ -305,6 +307,11 @@ target_include_directories(gfxrecon_core PUBLIC src thirdparty/json/include)
 target_include_directories(gfxrecon_core PRIVATE thirdparty/gfxreconstruct/external/stb thirdparty/SDL/src/video)
 target_link_libraries(gfxrecon_core PUBLIC Threads::Threads spirv-cross-glsl)
 target_link_libraries(gfxrecon_core PRIVATE gfxrecon_sqlite)
+target_link_libraries(gfxrecon_core PUBLIC LZ4::LZ4)
+
+# Native host build exercises exactly the codec shipped in the Android helper.
+add_executable(gfxrecon_artifact_transport_host src/platform/android_artifact_transport.cpp)
+target_link_libraries(gfxrecon_artifact_transport_host PRIVATE LZ4::LZ4)
 if(WIN32)
     target_link_libraries(gfxrecon_core PUBLIC shell32 bcrypt)
 endif()
@@ -435,7 +442,8 @@ if(MSVC)
     target_compile_definitions(gfxrecon_core_tests PRIVATE NOMINMAX)
     target_link_libraries(gfxrecon_core_tests PRIVATE shell32 bcrypt psapi)
 endif()
-add_dependencies(gfxrecon_core_tests gfxrecon_astcenc gfxrecon_samples)
+add_dependencies(gfxrecon_core_tests gfxrecon_astcenc gfxrecon_samples gfxrecon_artifact_transport_host)
+target_compile_definitions(gfxrecon_core_tests PRIVATE GFXRECON_ARTIFACT_TRANSPORT_TEST="$<TARGET_FILE:gfxrecon_artifact_transport_host>")
 add_test(NAME core COMMAND gfxrecon_core_tests)
 add_executable(gfxrecon_precision_counter_validation EXCLUDE_FROM_ALL src/tests/precision_counter_driver.cpp)
 set_target_properties(gfxrecon_precision_counter_validation PROPERTIES OUTPUT_NAME gfxrecon-precision-counter-validation)

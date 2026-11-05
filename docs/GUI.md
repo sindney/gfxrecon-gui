@@ -32,7 +32,7 @@ Event/frame dots show progress; **Console** contains diagnostics.
 
 ## GPU performance
 
-Click the Events clock/**Perf** button or **View > Perf** to open Perf alongside
+Click the Events clock button or **View > Perf** to open Perf alongside
 the Pipeline/Image inspector tabs. It remains dockable; existing docked layouts
 are retained, and older floating Perf windows join the inspector on reopening.
 **Settings** contains **Frame**, **Counters**, **Runs**, and **Swapchain**.
@@ -70,7 +70,8 @@ The GPU timing graph's horizontal-axis tooltip explains milliseconds from frame
 start. Wheel zoom changes only the shared time axis; vertical ranges stay fitted
 to each metric's full data.
 
-Hover the phone label for device/GPU/driver information and measurement scope. Progress,
+Hover the phone button in Events to see the selected replay target. Saved reports
+retain device/GPU/driver information. Progress,
 errors, and artifact paths go to **Console** and the panel status dot.
 **Open...** reopens a saved `result.json`; new results appear automatically.
 Saved older reports remain inspectable. See [CLI measurement usage](CLI.md#gpu-frame-measurements).
@@ -143,6 +144,11 @@ Modes: **Original**, **Solid coverage**, **Wireframe**, **Depth pass & fail**,
 **Light (on demand)**: fetch the selected view and its required passes only.
 **Full (all views)** preloads all six views. Both keep fetched views cached for
 instant switching; selecting an unfetched view in Light starts a new query.
+Completed draw inspections retain geometry, shaders and fetched views in an LRU
+cache (up to 16 selections and 128 MiB of resource files). Revisiting a retained
+draw restores it locally; reselecting the displayed draw starts no work. Capture,
+shader, target and replay-policy changes invalidate reuse. Changed or missing
+resource files fall back to the regular replay path.
 Indirect calls also offer All or one argument record.
 
 Depth uses green for passing coverage and red for failing coverage. UVs are
@@ -189,7 +195,15 @@ For Android, connect an authorized device and install the bundled sample/replay
 APKs from the setup controls. The target must support capture; restart it when
 enabling its capture layer.
 
-Right-click a frame to choose replay target, validation, optimization or screen-off
-replay. Select a serial in **Tools and devices** when several phones are connected.
-Unlock secure locks on the phone, then choose **Retry replay**. **Settings** is a
-dialog for theme, draw replay and logging preferences.
+Use the Events phone button, immediately after the clock button, to select the
+replay device. Its tooltip shows the selected target. Choose Automatic, the local
+GPU, or an authorized Android phone; opening the dialog refreshes connected phones.
+Device selection is shared by normal replay and Perf.
+
+**File > Settings > General** holds theme, replay options (draw views, memory
+translation, optimization, validation and screen-off replay), and logging.
+**Settings > Tools and devices** holds tool paths, version checks and device
+recovery. The dialog keeps its size when switching tabs or expanding sections;
+resize it by dragging its edges. Long content scrolls while the tabs and Close
+button stay visible. The chosen dialog size and position are saved. Saved preferences apply to future replays. Right-click a frame for replay
+actions. Unlock secure locks on the phone, then choose **Retry replay**.

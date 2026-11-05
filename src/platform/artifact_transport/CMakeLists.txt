@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.24)
+project(gfxrecon_artifact_transport LANGUAGES C CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(BUILD_SHARED_LIBS OFF)
+include(${CMAKE_CURRENT_LIST_DIR}/../../../thirdparty/gfxreconstruct/cmake/FindLZ4.cmake)
+add_executable(gfxrecon-artifact-transport ../android_artifact_transport.cpp)
+target_link_libraries(gfxrecon-artifact-transport PRIVATE LZ4::LZ4)

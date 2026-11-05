@@ -81,6 +81,112 @@ struct Phone {
 };
 }
 void RunDeviceTests(const std::filesystem::path& root) {
+    // Exercise the real framing/parser with an injected transport: binary data,
+    // malformed headers, path traversal, duplicate files and cancellation.
+    const auto downloads = root / "batched-downloads";
+    std::filesystem::create_directories(downloads);
+    auto field = [](const std::string& value) { return value + '\0'; };
+    const auto header = field("GFXRECON_ARTIFACTS_1");
+    const std::string payload("a\0b\n", 4);
+    for (int scenario = 0; scenario < 9; ++scenario) {
+        std::atomic_bool cancelled{false}; unsigned requests = 0;
+        auto bundle = header + field("image.png") + field("4") + payload + field("");
+        if (scenario == 1) bundle.pop_back();
+        if (scenario == 2) bundle = header + field("../escape.png") + field("4") + payload + field("");
+        if (scenario == 3) bundle = header + field("image.png") + field("99") + payload + field("");
+        if (scenario == 4) bundle = header + field("image.png") + field("4") + payload + field("image.png") + field("4") + payload + field("");
+        if (scenario == 5) bundle = header + field("image.png") + field("-1") + payload + field("");
+        if (scenario == 6) bundle += "trailing";
+        if (scenario == 7) bundle = header + field("image.bin") + field("4") + payload + field("");
+        AdbConnection adb{"fake-adb", "phone-a", &cancelled, [&](const ProcessRequest& request, const std::atomic_bool*) {
+            ++requests;
+            Require(request.arguments[2] == "exec-out" && request.timeout == std::chrono::seconds(91), "Batch retrieval lost its timeout or transport");
+            { std::ofstream output(request.stdoutFile, std::ios::binary); output.write(bundle.data(), bundle.size()); }
+            if (scenario == 8) cancelled = true;
+            return ProcessResult{0};
+        }};
+        bool failed = false;
+        try {
+            Require(adb.GetReplayFiles("test.pkg", "files/replay", downloads, false, std::chrono::seconds(91)) == 1, "Binary batch lost an artifact");
+            std::ifstream input(downloads / "image.png", std::ios::binary);
+            Require(std::string(std::istreambuf_iterator<char>(input), {}) == payload, "Binary batch changed payload bytes");
+        } catch (...) { failed = true; }
+        Require(failed == (scenario != 0) && requests == 1, "Malformed batch was accepted or used multiple ADB calls");
+        Require(!std::filesystem::exists(downloads / "replay-artifacts.staging"), "Failed batch left partial files");
+        if(scenario)Require(!std::filesystem::exists(downloads/"image.png"),"Invalid batch published an earlier file");
+        std::filesystem::remove_all(downloads); std::filesystem::create_directories(downloads);
+    }
+
+    const auto source=root/"codec-input.bin",encoded=root/"codec-wire.bin";
+    std::string binary(300000,'\0');for(size_t i=0;i<binary.size();++i)binary[i]=char((i*47+(i>>3))%256);
+    const auto raw=header+field("image.bin")+field(std::to_string(binary.size()))+binary+field("meta.json")+field("2")+"{}"+field("");
+    auto encode=[&](const std::string& data){
+        {std::ofstream file(source,std::ios::binary);file.write(data.data(),data.size());}
+        ProcessRequest request{GFXRECON_ARTIFACT_TRANSPORT_TEST,{}};request.stdinFile=source;request.stdoutFile=encoded;
+        Require(RunProcess(request).Success(),"Native artifact encoder failed");
+        std::ifstream input(encoded,std::ios::binary);return std::string(std::istreambuf_iterator<char>(input),{});
+    };
+    const auto envelope=encode(raw);
+    std::vector<std::string> fields;size_t offset=0;
+    for(int i=0;i<5;++i){const auto end=envelope.find('\0',offset);Require(end!=std::string::npos,"Encoder omitted its checksum header");fields.push_back(envelope.substr(offset,end-offset));offset=end+1;}
+    Require(fields[0]=="GFXRECON_TRANSFER_1"&&fields[1]=="lz4"&&fields[2]==std::to_string(raw.size())&&fields[4].size()==16,"Encoder header is not checksum-first");
+    const auto body=envelope.substr(offset);
+    auto wrap=[&](std::vector<std::string> f,const std::string& payload){std::string result;for(const auto& value:f)result+=field(value);return result+payload;};
+    std::vector<std::string> corrupt;
+    auto changed=fields;changed[4][0]=changed[4][0]=='0'?'1':'0';corrupt.push_back(wrap(changed,body));
+    changed=fields;changed[2]=std::to_string(raw.size()+1);corrupt.push_back(wrap(changed,body));
+    changed=fields;changed[3]=std::to_string(body.size()+1);corrupt.push_back(wrap(changed,body));
+    auto damage=body;damage[damage.size()/2]^=0x55;corrupt.push_back(wrap(fields,damage));
+    corrupt.push_back(envelope.substr(0,envelope.size()-1));corrupt.push_back(envelope+"trailing");
+    changed=fields;changed[3]=std::to_string(body.size()-1);corrupt.push_back(wrap(changed,body.substr(0,body.size()-1)));
+    changed=fields;changed[3]=std::to_string(body.size()*2);corrupt.push_back(wrap(changed,body+body));
+    changed=fields;changed[4]="not-a-content-hash";corrupt.push_back(wrap(changed,body));
+    changed=fields;changed[2]="9999999999999";corrupt.push_back(wrap(changed,body));
+    changed=fields;changed[2]="-1";corrupt.push_back(wrap(changed,body));
+    changed=fields;changed[1]="unknown";corrupt.push_back(wrap(changed,body));
+    corrupt.push_back(envelope.substr(0,12));
+    // A checksum-valid envelope with an invalid later record must not publish
+    // the earlier valid file, either.
+    corrupt.push_back(encode(raw.substr(0,raw.size()-1)+field("../escape.png")+field("1")+"x"+field("")));
+    corrupt.insert(corrupt.begin(),envelope);corrupt.push_back(envelope); // last case cancels after download
+    for(size_t scenario=0;scenario<corrupt.size();++scenario){
+        std::filesystem::remove_all(downloads);std::filesystem::create_directory(downloads);
+        {std::ofstream(downloads/"image.bin",std::ios::binary)<<"previous";}
+        std::atomic_bool cancel{false};
+        AdbConnection adb{"fake-adb","phone-a",&cancel,[&](const ProcessRequest& request,const std::atomic_bool*){
+            {std::ofstream file(request.stdoutFile,std::ios::binary);file.write(corrupt[scenario].data(),corrupt[scenario].size());}
+            if(scenario+1==corrupt.size())cancel=true;return ProcessResult{0};
+        }};
+        bool failed=false;ArtifactTransferStats stats;
+        try{Require(adb.GetReplayFiles("pkg","files/replay",downloads,true,std::chrono::seconds(30),"/helper",&stats)==2,"Compressed batch lost files");}catch(...){failed=true;}
+        Require(failed==(scenario!=0),"Corrupt, truncated or cancelled compressed data was accepted");
+        std::ifstream image(downloads/"image.bin",std::ios::binary);const std::string saved(std::istreambuf_iterator<char>(image),{});
+        Require(saved==(scenario==0?binary:"previous"),"Invalid transfer replaced a completed artifact");
+        Require(!std::filesystem::exists(downloads/"replay-artifacts.staging"),"Transfer left its private staging data");
+        if(!scenario)Require(stats.codec=="lz4"&&stats.integrity=="xxh64"&&stats.rawBytes==raw.size()&&stats.wireBytes==envelope.size(),"Verified transfer metrics are wrong");
+    }
+    for(int scenario=0;scenario<5;++scenario){
+        const auto helper=root/("helper-"+std::to_string(scenario));{std::ofstream(helper)<<"fixture";}
+        const auto hash=Sha256File(helper);
+        AtomicJson(std::filesystem::u8path(helper.u8string()+".capabilities.json"),{{"artifact_transport_protocol",1},{"binary_sha256",scenario==3?"wrong":hash},{"abi","arm64-v8a"}});
+        unsigned requests=0,pushes=0;std::atomic_bool cancelled{false};
+        AdbConnection adb{"fake-adb","transfer-phone-"+std::to_string(scenario),&cancelled,[&](const ProcessRequest& request,const std::atomic_bool*){
+            ++requests;if(request.arguments[2]=="push"){++pushes;return ProcessResult{0};}
+            const auto& command=request.arguments[3];
+            if(command.find("getprop")!=std::string::npos){if(scenario==4){cancelled=true;return ProcessResult{-1,"cancelled",true};}return ProcessResult{0,scenario==2?"unsupported":""};}
+            if(scenario==1&&command.find("checksum=")!=std::string::npos)return ProcessResult{1,"checksum mismatch"};
+            return ProcessResult{0};
+        }};
+        bool threw=false;std::string remote;try{remote=adb.PrepareArtifactTransport(helper);}catch(...){threw=true;}
+        Require(threw==(scenario==4)&&(!remote.empty())==(scenario==0),"Helper setup did not honor fallback or cancellation");
+        if(scenario==0){const auto previous=requests;Require(adb.PrepareArtifactTransport(helper)==remote&&requests==previous&&pushes==1,"Warm helper setup performed another ADB round trip");}
+        if(scenario==2)Require(pushes==0,"Unsupported ABI received a native helper");
+        if(scenario==3)Require(requests==0,"Unverified helper bytes were uploaded");
+        std::filesystem::remove(helper);std::filesystem::remove(std::filesystem::u8path(helper.u8string()+".capabilities.json"));
+    }
+    std::filesystem::remove(source);std::filesystem::remove(encoded);
+    std::filesystem::remove_all(downloads);
+
 #ifdef _WIN32
     {
         const auto directory=root/"atomic-json-replacement";std::filesystem::create_directory(directory);

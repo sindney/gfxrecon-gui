@@ -99,3 +99,7 @@ Every replay result SHALL include the replay manifest path with capture hash, ba
 #### Scenario: No explicit pipeline cache loaded
 - **WHEN** the replay loads no target pipeline-cache file
 - **THEN** provenance records that fact and does not imply that driver or hardware caches were cold
+
+#### Scenario: Historical Android result cache hit
+- **WHEN** ordinary replay restores a validated result without contacting the explicitly selected phone
+- **THEN** recorded device identity is identified as historical through device_identity_source=cached_result and current_device_verified=false, while fresh/validation/measurement requests retain their live replay requirements

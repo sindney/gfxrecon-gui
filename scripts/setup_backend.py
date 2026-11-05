@@ -70,6 +70,10 @@ def main():
         producer = ROOT / 'build-tools/android/gpu-counter-producer'
         build_counter_producer(args.sdk_root / 'ndk/26.3.11579264', producer)
         config['gpu_counter_producer'] = str(producer)
+        from build_artifact_transport import build_artifact_transport
+        artifact_transport = ROOT / 'build-tools/android/gfxrecon-artifact-transport'
+        build_artifact_transport(args.sdk_root / 'ndk/26.3.11579264', artifact_transport)
+        config['artifact_transport'] = str(artifact_transport)
         from write_replay_capability import write_capability
         write_capability(config['replay_apk'])
     local_path.write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')

@@ -47,6 +47,7 @@ void Workspace::DrawBoundImages(const char* id,bool compact){
     }ImGui::PopID();
 }
 void Workspace::InvalidateDrawResources(){
+    inspectionCache_.clear();inspectionCacheBytes_=0;displayedInspectionKey_.clear();
     resources_.clear();dumpExecution_=-1;dumpBlock_=0;drawHasInputs_=false;
     executionStatuses_.clear();
     ResetImageDocuments();resourceMode_=0;imageShownGeneration_=0;

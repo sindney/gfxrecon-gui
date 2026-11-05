@@ -74,21 +74,6 @@ void BeginPerfTooltip(){
     ImGui::BeginTooltip();ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+width-ImGui::GetStyle().WindowPadding.x*2);
 }
 void EndPerfTooltip(){ImGui::PopTextWrapPos();ImGui::EndTooltip();}
-void DeviceInfoLabel(){
-    ImGuiContext& g=*GImGui;
-    const float size=ImGui::GetFrameHeight();const auto origin=ImGui::GetCursorScreenPos();
-    const ImRect bounds(origin,ImVec2(origin.x+size,origin.y+size));const auto id=ImGui::GetID("##perf-device-info");
-    ImGui::ItemSize(bounds);
-    if(ImGui::ItemAdd(bounds,id)){
-        // A passive phone symbol, independent of platform emoji font support.
-        auto* draw=ImGui::GetWindowDrawList();const auto color=ImGui::GetColorU32(ImGuiCol_TextDisabled);
-        const ImVec2 a(origin.x+size*.28f,origin.y+size*.13f),b(origin.x+size*.72f,origin.y+size*.87f);
-        draw->AddRect(a,b,color,2,0,1.5f);
-        draw->AddLine(ImVec2(a.x+2,b.y-size*.15f),ImVec2(b.x-2,b.y-size*.15f),color);
-        draw->AddCircleFilled(ImVec2(origin.x+size*.5f,b.y-size*.075f),1,color);
-    }
-    IMGUI_TEST_ENGINE_ITEM_INFO(id,"##perf-device-info",g.LastItemData.StatusFlags);
-}
 struct PlotWindow { uint64_t start = 0, end = 0; bool Valid() const { return start && end > start; } };
 PlotWindow CounterWindow(const Json& run) {
     const auto& gpu = Object(run, "gpu");
@@ -432,27 +417,7 @@ void Workspace::DrawPerformance() {
     if (ImGui::Button("Open..."))
         if (const auto path = tpl::OpenFileDialog("Perf report", "json")) LoadPerformanceReport(fs::u8path(*path));
     ImGui::SetItemTooltip("Open a saved result.json. New runs are displayed automatically.");
-    ImGui::EndDisabled(); ImGui::SameLine();
-    DeviceInfoLabel();
-    if (ImGui::IsItemHovered()) {
-        BeginPerfTooltip();
-        const auto& target = Object(perfResult_, "target");
-        ImGui::TextWrapped("Device: %s", target.value("label", androidSerial_.empty() ? "Automatic" : androidSerial_).c_str());
-        for (const auto& run : Array(perfResult_, "runs")) {
-            const auto& device = Object(Object(run, "gpu"), "device");
-            ImGui::TextWrapped("GPU: %s", device.value("device_name", "unavailable").c_str());
-            ImGui::TextWrapped("Driver: %s (%s)", device.value("driver_name", Json{}).is_string() ?
-                device.at("driver_name").get_ref<const std::string&>().c_str() : "unavailable", Number(device.value("driver_version", Json{})).c_str());
-            break;
-        }
-        ImGui::TextWrapped("GPU timing: device timestamps. Counters: device-wide frame-window samples; approximate alignment, with few samples in short frames.");
-        const Json* counterStatus = &Object(perfCapabilities_, "counters");
-        if (!Array(perfResult_, "runs").empty()) counterStatus = &Object(Array(perfResult_, "runs").front(), "counters");
-        if ((counterStatus->value("status", "") == "unavailable" || counterStatus->value("status", "") == "sparse") &&
-            counterStatus->contains("reason") && counterStatus->at("reason").is_string())
-            ImGui::TextWrapped("%s", CompactText(counterStatus->at("reason").get_ref<const std::string&>()).c_str());
-        EndPerfTooltip();
-    }
+    ImGui::EndDisabled();
     ImGui::Separator();
     if (perfResult_.is_object()) try {
         const auto& metrics = perfResult_.at("metrics");

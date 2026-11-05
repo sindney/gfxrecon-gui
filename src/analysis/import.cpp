@@ -23,10 +23,10 @@ ImportResult ImportCapture(const std::filesystem::path& file, const std::filesys
     std::string identity = "jsonl";
     const auto convert = Tool(tools, "convert"), extract = Tool(tools, "extract");
     if (file.extension() == ".gfxr") {
-        if (convert.empty()) throw std::runtime_error("Configure gfxrecon-convert in View > Tools and devices to open .gfxr files.");
-        identity = Sha256File(std::filesystem::u8path(FindExecutablePath(convert)), cancel).substr(0, 16);
+        if (convert.empty()) throw std::runtime_error("Configure gfxrecon-convert in Settings > Tools and devices to open .gfxr files.");
+        identity = CachedSha256File(std::filesystem::u8path(FindExecutablePath(convert)), cancel).substr(0, 16);
         identity += "-" + (std::filesystem::is_regular_file(std::filesystem::u8path(extract)) ?
-            Sha256File(std::filesystem::u8path(extract), cancel).substr(0, 16) : std::string("noextract"));
+            CachedSha256File(std::filesystem::u8path(extract), cancel).substr(0, 16) : std::string("noextract"));
     }
     const auto cached = OpenCachedCapture(file, cacheRoot, identity, [&](const std::filesystem::path& staging) {
         const auto jsonl = staging / "capture.jsonl";

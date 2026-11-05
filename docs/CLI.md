@@ -146,6 +146,15 @@ Replace `MOD` with a module ID from the draw/pipeline output:
 validation. `perf --help` explains repeatable timing. Omitting overrides uses the
 captured shaders.
 
+Ordinary replay commands reuse hash-verified local results. With an explicit
+Android `--serial`, a matching result can be restored before contacting the
+phone. This is previously rendered output: its manifest retains the recorded
+device identity and sets `device_identity_source` to `cached_result` and
+`current_device_verified` to `false`. Use `--fresh` to require a new device
+replay. Validation and performance measurements bypass this reuse. File hashes
+are memoized within a process while file identity, size, modification and change
+times remain unchanged; later CLI processes verify the files again.
+
 `replay frame --swapchain virtual|captured|offscreen` selects the same backend
 mode exposed by `perf` (default: `virtual`). Use a matching mode for image checks,
 for example `replay frame --capture C --frame 3 --swapchain offscreen --baseline
@@ -381,3 +390,18 @@ unquoted cell, while an empty string is `""`. Structured values use compact JSON
 inside the quoted cell. Output is staged privately and published only on success;
 cancellation/failure preserves an existing destination. Export destinations cannot
 replace the index or recorded source/decoded evidence.
+
+### Android artifact transfer integrity
+
+When the bundled `artifact_transport` helper is available, Android replay sends
+artifact bundles with LZ4. The header precedes the compressed payload and records
+protocol, codec, uncompressed length, payload length and the XXH64 checksum of the
+entire uncompressed bundle. The receiver verifies frame completion, both lengths,
+the content checksum and artifact records before publishing files. Invalid data
+fails the replay; it is never silently retried as successful raw data. Cancellation
+removes private staging files. Raw transfer remains available when the optional
+helper cannot be used (or its configured path is empty).
+
+`backend_timing.artifact_transfer` in the replay manifest records `codec`,
+`integrity`, `raw_bytes` and `wire_bytes`. Cached result restores transfer nothing;
+their stored backend timings describe the original render.

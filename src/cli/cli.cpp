@@ -46,6 +46,7 @@ ReplayTarget ResolveTarget(const Context& context, const Capture& capture) {
         return {};
     }
     if (ToolPath(context, "adb").empty()) throw MissingTool("adb", "Configure ADB to replay on an Android device.");
+    if (!context.serial.empty()) return {true, context.serial}; // Actual replay checks the device after local cache lookup.
     const auto devices = QueryAndroidDevices(ToolPath(context, "adb"), context.cancel);
     for (const auto& device : devices) if ((context.serial.empty() || device.serial == context.serial) && device.state == "unauthorized")
         throw CliError(kHumanAction, "authorize_device", "Authorize USB debugging on " + device.serial, {{"human_action", "authorize_device"}, {"serial", device.serial}});

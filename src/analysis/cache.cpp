@@ -13,8 +13,8 @@ bool Valid(const std::filesystem::path& directory, const std::string& source, co
         std::ifstream input(marker); const auto metadata = Json::parse(input);
         if (metadata.at("schema") != kIndexSchema || metadata.at("owner") != "gfxrecon_gui" || !metadata.at("complete").get<bool>() ||
             metadata.at("capture_sha256") != source || metadata.at("tools") != tools) return false;
-        return metadata.at("index_sha256") == Sha256File(directory / "index.bin", cancel) &&
-            metadata.at("jsonl_sha256") == Sha256File(directory / "capture.jsonl", cancel);
+        return metadata.at("index_sha256") == CachedSha256File(directory / "index.bin", cancel) &&
+            metadata.at("jsonl_sha256") == CachedSha256File(directory / "capture.jsonl", cancel);
     } catch (...) {
         if (cancel && cancel->load()) throw std::runtime_error("Cache validation cancelled");
         return false;
@@ -26,7 +26,7 @@ CachedCapture OpenCachedCapture(const std::filesystem::path& source, const std::
                                  const std::function<std::shared_ptr<Capture>(const std::filesystem::path&)>& build,
                                  const std::atomic_bool* cancel) {
     if (cancel && cancel->load()) throw std::runtime_error("Import cancelled");
-    const auto fingerprint = Sha256File(source, cancel);
+    const auto fingerprint = CachedSha256File(source, cancel);
     if (tools.find_first_not_of("0123456789abcdef-jsonlnoextract") != std::string::npos || tools.size() > 150)
         throw std::runtime_error("Invalid tool cache identity");
     std::filesystem::create_directories(cacheRoot);
@@ -45,11 +45,11 @@ CachedCapture OpenCachedCapture(const std::filesystem::path& source, const std::
     auto capture = build(staging);
     if (!capture || capture->events.empty() || capture->jsonl != staging / "capture.jsonl") throw std::runtime_error("Import did not produce a complete indexed capture");
     WriteCaptureIndex(*capture, staging / "index.bin", cancel);
-    if (Sha256File(source, cancel) != fingerprint) throw std::runtime_error("Capture changed during import; reopen the stable file");
+    if (CachedSha256File(source, cancel) != fingerprint) throw std::runtime_error("Capture changed during import; reopen the stable file");
     if (cancel && cancel->load()) throw std::runtime_error("Import cancelled before cache publication");
     AtomicJson(staging / "cache.json", Json{{"owner", "gfxrecon_gui"}, {"schema", kIndexSchema}, {"complete", true},
-        {"capture_sha256", fingerprint}, {"tools", tools}, {"index_sha256", Sha256File(staging / "index.bin", cancel)},
-        {"jsonl_sha256", Sha256File(staging / "capture.jsonl", cancel)}});
+        {"capture_sha256", fingerprint}, {"tools", tools}, {"index_sha256", CachedSha256File(staging / "index.bin", cancel)},
+        {"jsonl_sha256", CachedSha256File(staging / "capture.jsonl", cancel)}});
     // No deletion: preserve failed/stale derived data and all authored revisions.
     // Every renamed path is a direct, generated child of the owned cache root.
     const auto parent = std::filesystem::weakly_canonical(cacheRoot);

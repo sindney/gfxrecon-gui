@@ -35,6 +35,13 @@ GUI and CLI settings, sessions and caches share
 `~/Library/Application Support/GFXReconstruct Inspector`; `--settings-dir DIR`
 overrides that location. They do not modify the signed app bundle.
 
+macOS builds fetch the pinned astcenc 5.7.0 universal release, verify its archive
+SHA-256, and copy the native executable into the app and `build/tools/astcenc`.
+For offline builds, configure `-DGFXRECON_ASTCENC_MACOS_ZIP=/path/to/astcenc-5.7.0-macos-universal.zip`.
+The distribution includes ASTC decoding and includes ADB when its path is
+configured in `local-tools.json`. Saved GUI tool paths override bundled defaults;
+an empty saved path disables that tool until changed in **Settings > Tools and devices**.
+
 For sample decoding, shader compilation and local GPU replay, install the
 [LunarG Vulkan SDK for macOS](https://vulkan.lunarg.com/sdk/home#mac)
 with MoltenVK and build the pinned host tools. Local replay requires the Vulkan
@@ -104,7 +111,7 @@ Using compatible prebuilt APKs requires:
 - Host `gfxrecon-convert`/`gfxrecon-extract` for inspection, plus shader tools when
   editing shaders. A local macOS Vulkan runtime is unnecessary for device replay.
 
-Configure `adb` and `replay_apk` in **Tools and devices** or `local-tools.json`.
+Configure `adb` and `replay_apk` in **Settings > Tools and devices** or `local-tools.json`.
 Use **File > Capture application > Android** to select a device, check setup
 and install the replay APK. The sample APK (`test_apk`) is only needed for the
 bundled Android test workload. Validation layers are only needed when enabling
@@ -202,7 +209,7 @@ environment described in [macOS setup](#macos), then launch:
 ```
 
 Offline inspection and shader tools work without the Vulkan runtime. Host tools
-resolve from the bundle; **Tools and devices** and CLI `--tools FILE` allow manual
+resolve from the bundle; **Settings > Tools and devices** and CLI `--tools FILE` allow manual
 overrides. GUI and CLI share settings, sessions and caches in
 `~/Library/Application Support/GFXReconstruct Inspector`; `--settings-dir DIR`
 selects another location. Keep the signed app bundle intact.
@@ -236,3 +243,13 @@ python scripts/build.py package --output-dir .sessions/release-stage/gfxrecon-gu
 
 Keep submodules pinned. Backend changes are applied to generated copies through
 CMake; do not edit vendored replay sources in place.
+
+### Android artifact compression helper
+
+`python scripts/build_artifact_transport.py --ndk-root /path/to/ndk --output build-tools/android/gfxrecon-artifact-transport`
+builds the ARM64 helper and its hash-bound capability file. The helper and host
+use the same pinned LZ4 source. `--lz4-source DIR` supports an existing source
+checkout for offline builds. `scripts/setup_backend.py android` also builds it.
+Configure `artifact_transport` in `local-tools.json` to include it in a release;
+the GUI and CLI resolve the bundled copy automatically. Devices do not need a new
+replay APK. A missing, unsupported or unavailable helper uses raw transfers.
