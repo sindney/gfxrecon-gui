@@ -57,6 +57,19 @@ void RunAnalysisTests(const std::filesystem::path& root) {
     Require(capture->executions[1].generation == 2, "Recording generations must survive pool reset");
     Require(!capture->limitations.empty(), "Submitting freed command buffers must be diagnosed");
 
+    const uint64_t snapshotBuffer = UINT64_MAX - 3;
+    Save(file, {
+        Call(1, "vkBeginCommandBuffer", {{"commandBuffer", snapshotBuffer}}),
+        Call(2, "vkCmdDispatch", {{"commandBuffer", snapshotBuffer}}),
+        Call(3, "vkEndCommandBuffer", {{"commandBuffer", snapshotBuffer}}),
+        Call(4, "vkQueueSubmit", {{"submitCount", 1}, {"pSubmits", {{"commandBufferCount", 1}, {"pCommandBuffers", {snapshotBuffer}}}}})
+    });
+    capture = ReadCapture(file);
+    Require(capture->executions.size() == 1 && capture->executions[0].submit == 4,
+            "State snapshot singleton submit lost its execution");
+    Require(capture->events[capture->executions[0].event].block == 2,
+            "State snapshot singleton submit resolved the wrong command");
+
     // Indices and expected selector come from upstream vulkan_dump_resources.md.
     std::vector<Json> secondary{
         Call(736, "vkBeginCommandBuffer", {{"commandBuffer", 226}}),

@@ -293,7 +293,9 @@ std::shared_ptr<Capture> ReadCapture(const std::filesystem::path& file, const st
                         }
                     }
                 };
-                for (const auto& submit : args.value("pSubmits", Json::array())) {
+                auto submits = args.value("pSubmits", Json::array());
+                if (submits.is_object()) submits = Json::array({submits});
+                if (submits.is_array()) for (const auto& submit : submits) {
                     const auto buffers = submit.value("pCommandBuffers", Json::array());
                     uint32_t ordinal = 0;
                     if (buffers.is_array()) for (const auto& cb : buffers) if (cb.is_number()) execute(cb.get<uint64_t>(), {}, 0, ordinal++);
