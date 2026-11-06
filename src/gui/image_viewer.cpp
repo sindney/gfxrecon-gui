@@ -1,15 +1,11 @@
 #include "gui/image_viewer.h"
-#include "gui/gl_texture.h"
 #include "analysis/depth_sample.h"
 #include "core/image_io.h"
+#include "gui/gl_texture.h"
 #include <cstdio>
 
 #include <imgui.h>
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#undef LoadImage // windows.h macro; gfx::LoadImage is used below
-#endif
+#undef LoadImage // SDL's Windows GL headers may define this Win32 macro.
 #ifdef __APPLE__
 #include <OpenGL/gl.h>
 #else
@@ -157,7 +153,7 @@ void ImageViewer::LoadBmp(const std::filesystem::path& path,const std::string& a
     Upload();
 }
 void ImageViewer::LoadPng(const std::filesystem::path& path,const std::string& format) {
-    auto image = LoadImage(path);  // decoded host-side (e.g. from raw ASTC blocks); opaque/straight alpha as written by astcenc
+    auto image = gfx::LoadImage(path);  // decoded host-side (e.g. from raw ASTC blocks); opaque/straight alpha as written by astcenc
     width_ = static_cast<int>(image.width); height_ = static_cast<int>(image.height); rgba_ = std::move(image.rgba);
     fitToView_ = true;
     name_ = path.filename().u8string();scalar_=false;range_={};rangeDomainMaximum_=1;depthValues_.clear();

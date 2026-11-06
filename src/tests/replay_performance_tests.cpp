@@ -45,14 +45,14 @@ void ProfileReplay(const std::filesystem::path& source, const std::filesystem::p
         std::cout<<label<<": "<<data["elapsed_seconds"]<<" seconds, cached="<<data["artifact_cache_hit"]<<'\n'<<std::flush;
         return data;
     };
-    const auto cold=run("frame-cold",Json(),false), warm=run("frame-warm",Json(),false), cached=run("frame-cached",Json(),true);
-    if(cold["image_sha256"]!=warm["image_sha256"]||cold["image_sha256"]!=cached["image_sha256"]||!cached["artifact_cache_hit"].get<bool>())
-        throw std::runtime_error("Frame cache changed rendered output or failed to reuse it");
+    const auto cold=run("frame-cold",Json(),false), warm=run("frame-warm",Json(),false), fresh=run("frame-fresh",Json(),true);
+    if(cold["image_sha256"]!=warm["image_sha256"]||cold["image_sha256"]!=fresh["image_sha256"]||fresh["artifact_cache_hit"].get<bool>())
+        throw std::runtime_error("Fresh frame replays changed output or restored a cross-session result");
     size_t index=0;
     for(size_t i=0;i<capture->executions.size();++i)if(capture->events[capture->executions[i].event].block==47145){index=i;break;}
     const auto first=run("draw-a",capture->DumpRequest(index),true,capture->executions[index].frame);
-    const auto again=run("draw-a-cached",capture->DumpRequest(index),true,capture->executions[index].frame);
-    if(first["image_sha256"]!=again["image_sha256"]||!again["artifact_cache_hit"].get<bool>())throw std::runtime_error("Draw cache did not preserve selected output");
+    const auto again=run("draw-a-fresh",capture->DumpRequest(index),true,capture->executions[index].frame);
+    if(first["image_sha256"]!=again["image_sha256"]||again["artifact_cache_hit"].get<bool>())throw std::runtime_error("Repeated draw changed output or skipped the replay");
     if(capture->executions.size()>index+1)run("draw-b",capture->DumpRequest(index+1),true,capture->executions[index+1].frame);
     for(size_t i=capture->executions.size();i>0;--i) {
         const auto& execution=capture->executions[i-1];
@@ -75,12 +75,5 @@ void ProfileReplay(const std::filesystem::path& source, const std::filesystem::p
             break;
         }
     }
-    // Damage a cached result and ensure it is rejected and regenerated.
-    const auto key=Sha256Text(first.at("request_identity").dump());
-    if(!std::filesystem::is_regular_file(root/"draw-a-repaired/manifest.json")) {
-        std::ofstream damage(root/"cache/results"/key/first.at("image").get<std::string>(),std::ios::binary|std::ios::app);damage<<'x';
-    }
-    const auto repaired=run("draw-a-repaired",capture->DumpRequest(index),true,capture->executions[index].frame);
-    if(repaired["artifact_cache_hit"].get<bool>()||repaired["image_sha256"]!=first["image_sha256"])throw std::runtime_error("Corrupt cached output was accepted or repair changed the image");
 }
 }

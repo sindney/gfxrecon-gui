@@ -22,58 +22,11 @@
 #endif
 
 namespace gfx {
-namespace {
-using FileStamp = std::array<uint64_t, 7>;
-FileStamp Stamp(const std::filesystem::path& file) {
-#ifdef _WIN32
-    struct Handle { HANDLE h; ~Handle() { if (h != INVALID_HANDLE_VALUE) CloseHandle(h); } } handle{
-        CreateFileW(file.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
-    BY_HANDLE_FILE_INFORMATION info{}; FILE_BASIC_INFO basic{};
-    if (handle.h == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(handle.h, &info) ||
-        !GetFileInformationByHandleEx(handle.h, FileBasicInfo, &basic, sizeof(basic)))
-        throw std::runtime_error("Cannot stat " + file.u8string());
-    return {info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow,
-        (uint64_t(info.nFileSizeHigh) << 32) | info.nFileSizeLow,
-        uint64_t(basic.LastWriteTime.QuadPart), uint64_t(basic.ChangeTime.QuadPart), uint64_t(basic.CreationTime.QuadPart)};
-#else
-    struct stat info{};
-    if (stat(file.c_str(), &info) || !S_ISREG(info.st_mode)) throw std::runtime_error("Cannot stat " + file.u8string());
-#ifdef __APPLE__
-    const auto modified = info.st_mtimespec, changed = info.st_ctimespec;
-#else
-    const auto modified = info.st_mtim, changed = info.st_ctim;
-#endif
-    return {uint64_t(info.st_dev), uint64_t(info.st_ino), uint64_t(info.st_size),
-        uint64_t(modified.tv_sec), uint64_t(modified.tv_nsec), uint64_t(changed.tv_sec), uint64_t(changed.tv_nsec)};
-#endif
-}
-}
 std::string CachedSha256File(const std::filesystem::path& file, const std::atomic_bool* cancel) {
-    if (cancel && cancel->load()) throw std::runtime_error("Fingerprint cancelled");
-    struct Entry { FileStamp stamp; std::string hash; uint64_t used; };
-    static std::mutex mutex;
-    static std::map<std::filesystem::path, Entry> entries;
-    static uint64_t sequence = 0;
-    const auto path = std::filesystem::weakly_canonical(file);
-    const auto before = Stamp(path);
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        const auto found = entries.find(path);
-        if (found != entries.end() && found->second.stamp == before) {
-            found->second.used = ++sequence;
-            return found->second.hash;
-        }
-    }
-    const auto hash = Sha256File(path, cancel);
-    if (Stamp(path) != before) throw std::runtime_error("File changed during fingerprinting: " + file.u8string());
-    std::lock_guard<std::mutex> lock(mutex);
-    entries[path] = {before, hash, ++sequence};
-    if (entries.size() > 512) {
-        const auto oldest = std::min_element(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.second.used < b.second.used; });
-        entries.erase(oldest);
-    }
-    return hash;
+    // Windows can retain the same file identity and timestamps across a
+    // same-size rewrite. Always validate current content instead of trusting
+    // a timestamp-keyed memoized digest for replay/artifact correctness.
+    return Sha256File(file, cancel);
 }
 std::string Sha256Text(std::string_view value) {
 #ifdef _WIN32

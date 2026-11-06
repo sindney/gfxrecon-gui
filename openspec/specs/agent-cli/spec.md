@@ -6,7 +6,9 @@ The shared services SHALL be built once as a UI-independent core library for
 capture import, tool resolution, capture analysis, replay, capture and shaders, linked by the
 desktop GUI and gfxrecon-cli on Windows and macOS. Both front ends SHALL resolve
 tools from the same sources in the same precedence and SHALL use the same capture
-index cache, replay result cache and session directory root. Windows SHALL retain
+index cache, target-generated pipeline cache and session directory root. Rendered
+results SHALL NOT be reused across frontend sessions; static indexes and PSO
+caches are separate from rendered output. Windows SHALL retain
 its executable-directory default; macOS SHALL default to per-user Application
 Support. An explicit --settings-dir SHALL override that root.
 

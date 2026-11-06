@@ -1048,6 +1048,8 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             } else if (ctx->Test->ArgVariant == 3) {
                 ctx->MenuClick("//##MainMenuBar/File/Capture application...");
                 ctx->SetRef("//Capture application");
+                // A previous platform's completed capture reopens at Save / inspect.
+                if (ctx->ItemExists("New capture")) ctx->ItemClick("New capture");
                 ctx->ItemClick("Local Windows");
                 ctx->ItemInputValue("Executable", std::getenv("GFXRECON_GUI_CAPTURE_WINDOWS"));
                 ctx->ItemClick("Next"); ctx->ItemClick("Next");
@@ -1181,7 +1183,10 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             IM_CHECK_EQ(workspace.Editor().GetText(), beforeJump);
             IM_CHECK_EQ(workspace.InspectedPipeline(), event.pipeline);
             ImGui::SetWindowFocus("Shader"); ctx->Yield(2);
-            ctx->SetRef("//Shader"); ctx->ComboClick("##representation/SPIR-V assembly");
+            ctx->SetRef("//Shader");
+            wait();
+            IM_CHECK(workspace.Editor().GetText().find("#version")!=std::string::npos);
+            ctx->ComboClick("##representation/SPIR-V assembly");
             IM_CHECK(workspace.Editor().GetText().find("OpEntryPoint") != std::string::npos);
             ctx->ComboClick("##representation/Debug metadata");
             IM_CHECK(workspace.Editor().GetText().find("binary_sha256") != std::string::npos);
@@ -1309,8 +1314,8 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             const auto settings=std::filesystem::u8path(ExeDirectory())/"test-state";
             auto readPreference=[&](){std::ifstream file(settings/"gfxrecon_preferences.json");return gfx::Json::parse(file).at("full_draw_replay").get<bool>();};
             auto replayCount=[&](){size_t n=0;for(const auto& f:std::filesystem::recursive_directory_iterator(settings/"sessions"))if(f.is_regular_file()&&f.path().filename()=="manifest.json"){
-                std::ifstream in(f.path());const auto j=gfx::Json::parse(in);const auto identity=j.value("request_identity",gfx::Json::object());
-                if(!identity.value("dump",gfx::Json{}).is_null())++n;
+                std::ifstream in(f.path());const auto j=gfx::Json::parse(in);
+                if(j.value("complete",false)&&!j.value("dump_request",gfx::Json{}).is_null())++n;
             }return n;};
             IM_CHECK(!readPreference());const auto before=replayCount();
             w.SelectExecution(0,true);WaitForWorkspace(ctx,w);
@@ -1389,6 +1394,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             ctx->Yield(30);IM_CHECK(!w.Busy());IM_CHECK(!w.HasPendingWork());
 #ifdef _WIN32
             const auto replay=w.ConfiguredTools().at("replay");
+            struct RestoreReplay {gfx::Workspace& w;std::string path;~RestoreReplay(){w.ConfigureReplayFixture(path);}} restoreReplay{w,replay};
             const auto helper=std::filesystem::u8path(gfx::NativeArguments()[0]).parent_path()/"gfxrecon_core_tests.exe";
             IM_CHECK(std::filesystem::is_regular_file(helper));
             _putenv_s("GFXRECON_GUI_TEST_SLOW_REPLAY","1");
@@ -1542,6 +1548,28 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             IM_CHECK(!w.Busy());IM_CHECK(!w.HasPendingWork());IM_CHECK_EQ(w.ThumbnailCount(),0u);
         };
     }
+    t = IM_REGISTER_TEST(engine, "inspection", "read-only shader representation switches preserve clean state");
+    t->UserData = app;
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        auto& workspace = static_cast<App*>(ctx->Test->UserData)->Workspace();
+        const auto file = std::filesystem::temp_directory_path() / "gfxrecon-ui-representations.frag";
+        { std::ofstream out(file); out << "#version 450\nvoid main() {}\n"; }
+        workspace.Open(file.u8string()); WaitForWorkspace(ctx, workspace);
+        IM_CHECK(!workspace.HasUnsavedEdits());
+        const auto original = workspace.Editor().GetText();
+        ctx->SetRef("//Shader");
+        for (const auto* view : {"SPIR-V assembly", "Debug metadata", "Reconstructed GLSL"}) {
+            ctx->ComboClick((std::string("##representation/") + view).c_str());
+            IM_CHECK(workspace.Editor().IsReadOnly());
+            IM_CHECK(!workspace.HasUnsavedEdits());
+        }
+        IM_CHECK_EQ(workspace.Editor().GetText(), original);
+        // A representation change must not block opening the next document.
+        workspace.Open(file.u8string()); WaitForWorkspace(ctx, workspace);
+        IM_CHECK(workspace.Status().find("Opened shader document.") != std::string::npos);
+        std::filesystem::remove(file);
+    };
+
     t = IM_REGISTER_TEST(engine, "inspection", "large GLSL editor uses custom tokenizer and read-only default");
     t->UserData = app;
     t->TestFunc = [](ImGuiTestContext* ctx) {
@@ -1692,7 +1720,9 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             IM_CHECK(ctx->CaptureScreenshot());
         }
         workspace.RequestTools(); ctx->Yield(2); ctx->SetRef("//Settings");
+        ctx->ItemOpen(SettingsItem(ctx,"Tool configuration"));
         for (const auto* name : {"replay", "compiler", "validator", "extract", "disassembler"}) ctx->ItemInputValue(SettingsItem(ctx,name), tools.at(name).c_str());
+        ctx->ItemClick(SettingsItem(ctx,"Save tool paths"));
         ctx->ItemClick("Close"); std::filesystem::remove(file);
     };
 

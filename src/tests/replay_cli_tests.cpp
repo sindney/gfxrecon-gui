@@ -299,9 +299,26 @@ void RunReplayCliTests(const fs::path& root) {
       Require(provenance["request_identity"]["memory_translation"] == "remap" && provenance["request_identity"]["memory_translation_policy"]["requested"] == "remap", "memory policy missing from cache/request identity"); }
     Require(f["operation_timings"]["replay_calls"]==1 && f["operation_timings"]["total_seconds"].get<double>()>=f["operation_timings"]["replay_wall_seconds"].get<double>(),"frame wall time includes replay and frontend");
     const auto cached = Invoke(Join({"replay", "frame", "--capture", cap, "--frame", "1", "--out", (work / "frame2").u8string()}, tools));
-    Require(cached.exit == 0 && cached.document["result"]["cache_hit"] == true, "second frame replay hits the shared result cache");
+    Require(cached.exit == 0 && cached.document["result"]["cache_hit"] == false, "every CLI invocation replays instead of restoring another session's result");
+    Require(cached.document["result"]["timings"]["pipeline_cache_loaded"] == true, "the fresh replay still uses its compatible warm PSO cache");
+    const auto sessionCache = work / "session-cache" / "results";
+    Require(!fs::exists(sessionCache), "rendered output was duplicated into a persistent result cache");
+    const auto stale = sessionCache / "previous-session"; fs::create_directories(stale);
+    { std::ofstream(stale / "baseline_frame_1.bmp", std::ios::binary) << std::string(54, 'b');
+      std::ofstream(stale / "replay.log") << "stale replay\n";
+      AtomicJson(stale / "manifest.json", {{"owner", "gfxrecon_gui"}, {"complete", true}, {"request_identity", Json::object()}, {"artifacts", Json::array()}}); }
+    const auto fresh = Invoke(Join({"replay", "frame", "--capture", cap, "--frame", "1", "--out", (work / "fresh-after-old-cache").u8string()}, tools));
+    Require(fresh.exit == 0 && fresh.document["result"]["cache_hit"] == false && fresh.document["result"]["timings"]["pipeline_cache_loaded"] == true,
+            "an old result cache must not suppress a real replay");
+    Require(!fs::exists(sessionCache / "current-session"), "fresh replay published another persistent result cache");
+    { std::ifstream file(fs::u8path(cached.document["result"]["manifest"].get<std::string>())); const auto manifest = Json::parse(file);
+      Require(manifest["artifact_cache_hit"] == false && manifest["device_identity_source"] == "current_target" && manifest["current_device_verified"] == true,
+              "a real replay was labeled as restored historical output"); }
+    // Close the cached index before testing another import of this capture;
+    // Windows cannot publish a directory while an open index pins it.
+    fs::remove_all(work / "session-cache" / "results");
     const auto cmp = Invoke(Join({"compare", f["image_png"].get<std::string>(), cached.document["result"]["image_png"].get<std::string>()}, tools));
-    Require(cmp.exit == 0 && cmp.document["result"]["identical"] == true, "cached replay identical");
+    Require(cmp.exit == 0 && cmp.document["result"]["identical"] == true, "fresh replay preserves the rendered image");
 
     const auto draw = Invoke(Join({"replay", "draw", "--capture", cap, "--block", "82", "--out", (work / "draw").u8string()}, tools));
     Require(draw.exit == 0, "draw replay: " + draw.text);
@@ -309,7 +326,7 @@ void RunReplayCliTests(const fs::path& root) {
     Require(r["draw"]["block"] == 82 && r["outputs"].size() >= 1 && fs::is_regular_file(fs::u8path(r["outputs"][0]["png"].get<std::string>())) && r["outputs"][0]["metadata"]["category"] == "output", "draw outputs");
     Require(r["selected_output"]["aspect"] == "COLOR" && r["selected_output"]["location"] == 0 && r["geometry"]["submitted_triangles"] == 1, "default selected output and triangle evidence: " + r.dump());
     const auto selected = Invoke(Join({"replay","draw","--capture",cap,"--execution","0","--image",r["selected_output"]["imageId"].dump(),"--mip","0","--layer","0","--out",(work/"selected").u8string()},tools));
-    Require(selected.exit==0 && selected.document["result"]["selected_output"]==r["selected_output"],"explicit image and base subresource: "+selected.text);
+    Require(selected.exit==0 && selected.document["result"]["selected_output"]==r["selected_output"] && selected.document["result"]["selected_output"]["imageId"]==r["selected_output"]["imageId"],"explicit image and base subresource: "+selected.text);
     const auto missing=Invoke(Join({"replay","draw","--capture",cap,"--execution","0","--attachment","depth","--out",(work/"missing-output").u8string()},tools));
     Require(Code(missing)=="output_unavailable" && !missing.document["error"]["detail"]["available_outputs"].empty(),"unavailable selection has alternatives");
     const auto missingMip=Invoke(Join({"replay","draw","--capture",cap,"--execution","0","--mip","9","--out",(work/"missing-mip").u8string()},tools));
@@ -367,7 +384,7 @@ void RunReplayCliTests(const fs::path& root) {
     { std::ofstream(dumpDir / "manifest.json") << Json{{"schema", kDumpSchema}, {"capture", {{"path", cap}, {"sha256", f["capture"]["sha256"]}}}}.dump();
       std::ofstream(drawDir / "draw.json") << Json{{"execution", 0}, {"block", 82}, {"occurrence", 0}}.dump(); }
     const auto fromDump = Invoke(Join({"replay", "draw", "--draw", drawDir.u8string(), "--out", (work / "draw-dump").u8string()}, tools));
-    Require(fromDump.exit == 0 && fromDump.document["result"]["draw"]["block"] == 82 && fromDump.document["result"]["cache_hit"] == true, "replay draw from dump path: " + fromDump.text);
+    Require(fromDump.exit == 0 && fromDump.document["result"]["draw"]["block"] == 82 && fromDump.document["result"]["cache_hit"] == false, "replay draw from dump path: " + fromDump.text);
 
     // Override with baseline comparison: the swapped colors differ in red/blue only; the backend confirmed the replacement.
     { std::ifstream in(exportDir / "module.glsl"); std::string text((std::istreambuf_iterator<char>(in)), {});

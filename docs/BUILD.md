@@ -231,6 +231,9 @@ sessions/settings, package to a separate staging destination first:
 python scripts/build.py package --output-dir .sessions/release-stage/gfxrecon-gui
 ```
 
+Keep the staging destination short on Windows: bundled SPIR-V tools can reject
+shader paths longer than 259 characters inside the extracted verification copy.
+
 ## Source map
 
 | Directory | Responsibility |

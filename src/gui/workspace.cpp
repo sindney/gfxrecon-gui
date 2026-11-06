@@ -952,7 +952,8 @@ void Workspace::DrawShader() {
     int next = representation_;
     ImGui::SetNextItemWidth(-1);
     if (ImGui::Combo("##representation", &next, formats, 4)) {
-        if (representation_ < 2) (representation_ ? assembly_ : glsl_) = editor_.GetText();
+        // Edits are saved after Render below. GetText adds a final newline,
+        // so serializing an untouched view here would create unsaved edits.
         representation_ = next;
         editor_.SetLanguageDefinition(next ? SpirvLanguage() : GlslLanguage());
         editor_.SetText(next == 0 ? glsl_ : next == 1 ? assembly_ : next == 2 ? capturedSource_ : shaderMetadata_);
@@ -1126,9 +1127,9 @@ void Workspace::SetReplayDevice(ReplayMode mode,const std::string& serial){
 }
 void Workspace::ClearReplayViews(){
     mesh_.Release();meshGeneration_=meshRequestGeneration_=0;
-    image_.Release();modifiedImage_.Release();differenceImage_.Release();hasComparison_=false;
-    for(auto& [frame,preview]:frameImages_)preview.image.Release();
-    frameImages_.clear();frameStatuses_.clear();failedFrames_.clear();thumbnailQueue_.clear();
+    // Keep displayed pixels until a replay on the new target succeeds. They are
+    // historical images; cached resource/draw identities were already invalidated.
+    frameStatuses_.clear();failedFrames_.clear();thumbnailQueue_.clear();
     pendingDraw_=false;pendingFrame_=0;
     perfCapabilities_=Json();perfResult_=Json();perfPlotCache_.clear();
     validationReport_=Json();perfValidationError_.clear();

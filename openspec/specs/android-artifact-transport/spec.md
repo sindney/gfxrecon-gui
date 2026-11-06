@@ -33,5 +33,5 @@ The receiver SHALL reject malformed headers, unsupported codecs, bad hashes, inv
 Actual replay manifests SHALL record artifact codec, integrity mode, raw bytes and wire bytes. Performance acceptance SHALL measure complete normal GUI draw-selection round trips against raw transfer with matching capture/settings, cache policy and readback hashes; a transfer-only microbenchmark SHALL not establish an overall replay gain.
 
 #### Scenario: Large draw A/B measurement
-- **WHEN** raw and LZ4 selections are compared with warm target pipelines and cold result caches
+- **WHEN** raw and LZ4 selections are compared with warm target pipelines and fresh process-local draw inspections
 - **THEN** the recorded results include complete selection latency and verify identical image/buffer content

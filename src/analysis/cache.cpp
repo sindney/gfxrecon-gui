@@ -2,6 +2,11 @@
 #include "core/artifacts.h"
 #include <chrono>
 #include <fstream>
+#include <thread>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 namespace gfx {
 namespace {
@@ -56,7 +61,24 @@ CachedCapture OpenCachedCapture(const std::filesystem::path& source, const std::
     if (std::filesystem::weakly_canonical(staging.parent_path()) != parent || std::filesystem::weakly_canonical(destination.parent_path()) != parent)
         throw std::runtime_error("Cache publication escaped its owner directory");
     if (std::filesystem::exists(destination)) std::filesystem::rename(destination, cacheRoot / (".previous-" + token));
+    // Windows scanners/readers can briefly deny a directory replacement even
+    // after the writer has closed. Retry transient sharing/access failures;
+    // never remove the destination or lose the already published cache.
+#ifdef _WIN32
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    for (;;) {
+        std::error_code error;
+        std::filesystem::rename(staging, destination, error);
+        if (!error) break;
+        if (cancel && cancel->load()) throw std::runtime_error("Import cancelled during cache publication");
+        if ((error.value() != ERROR_ACCESS_DENIED && error.value() != ERROR_SHARING_VIOLATION) ||
+            std::chrono::steady_clock::now() >= deadline)
+            throw std::filesystem::filesystem_error("rename", staging, destination, error);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+#else
     std::filesystem::rename(staging, destination);
+#endif
     capture->jsonl = destination / "capture.jsonl"; capture->source = source;
     return {std::move(capture), destination, fingerprint, false};
 }

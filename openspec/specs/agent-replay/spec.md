@@ -2,7 +2,7 @@
 Replay to a frame or a selected draw on local or Android targets, with shader overrides and shader-edit services, validation replay, performance measurement and image comparison.
 ## Requirements
 ### Requirement: Replay to frame
-`gfxrecon-cli replay frame --capture C --frame N` SHALL replay on the resolved local or Android target and return the frame image path, replay log, target, timings, cache-hit status and the replay manifest, using the shared replay core including optimization, pipeline caches and result caches.
+`gfxrecon-cli replay frame --capture C --frame N` SHALL replay on the resolved local or Android target and return the frame image path, replay log, target, timings, cache-hit status and the replay manifest, using the shared replay core including optimization and pipeline caches. Each CLI invocation SHALL execute its replay rather than restoring a previous session's rendered results.
 
 #### Scenario: Android capture with automatic target
 - **WHEN** `replay frame` runs on an Android capture with one authorized phone connected and `--target auto`
@@ -100,6 +100,6 @@ Every replay result SHALL include the replay manifest path with capture hash, ba
 - **WHEN** the replay loads no target pipeline-cache file
 - **THEN** provenance records that fact and does not imply that driver or hardware caches were cold
 
-#### Scenario: Historical Android result cache hit
-- **WHEN** ordinary replay restores a validated result without contacting the explicitly selected phone
-- **THEN** recorded device identity is identified as historical through device_identity_source=cached_result and current_device_verified=false, while fresh/validation/measurement requests retain their live replay requirements
+#### Scenario: New session does not restore a rendered result
+- **WHEN** ordinary replay runs in a new frontend session with the same request as a previous session
+- **THEN** it replays on the selected target and reports no result-cache hit; old images/readbacks are retained only as session evidence, while compatible target-generated PSO caches can remain warm

@@ -331,7 +331,7 @@ std::vector<Option> ReplayOptions(std::vector<Option> specific) {
         {"screen-off", "", "Turn the Android screen off during replay (restored afterwards)"},
         {"no-optimize", "", "Replay the original capture instead of the optimized copy"},
         {"memory-translation", "default|none|remap|realign|rebind", "Memory portability policy; default preserves the platform default", false, false, "default"},
-        {"fresh", "", "Bypass the shared result cache"}};
+        {"fresh", "", "Compatibility option; every CLI invocation performs a fresh replay"}};
     options.insert(options.end(), specific.begin(), specific.end());
     return options;
 }

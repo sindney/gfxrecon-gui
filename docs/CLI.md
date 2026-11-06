@@ -146,14 +146,13 @@ Replace `MOD` with a module ID from the draw/pipeline output:
 validation. `perf --help` explains repeatable timing. Omitting overrides uses the
 captured shaders.
 
-Ordinary replay commands reuse hash-verified local results. With an explicit
-Android `--serial`, a matching result can be restored before contacting the
-phone. This is previously rendered output: its manifest retains the recorded
-device identity and sets `device_identity_source` to `cached_result` and
-`current_device_verified` to `false`. Use `--fresh` to require a new device
-replay. Validation and performance measurements bypass this reuse. File hashes
-are memoized within a process while file identity, size, modification and change
-times remain unchanged; later CLI processes verify the files again.
+Each CLI invocation performs a real replay; rendered results are never restored
+from another session. Completed session artifacts remain as evidence, not as a
+cross-session result cache. `--fresh` also disables GUI process-local snapshot
+reuse for that request. Validation and performance measurements always run
+fresh. Compatible target-generated PSO caches can remain warm and are separate
+from rendered output. File content is hashed for replay/artifact identity
+validation; timestamps alone are not trusted to prove unchanged bytes.
 
 `replay frame --swapchain virtual|captured|offscreen` selects the same backend
 mode exposed by `perf` (default: `virtual`). Use a matching mode for image checks,
@@ -177,7 +176,7 @@ cannot be replayed on a different GPU, select a policy deliberately, for example
 `memory_translation` records requested and effective policy with source
 `backend_arguments` and `backend_confirmed: false`: effective here denotes the
 mode passed to the backend, not a native-reported observation. Resolved modes
-enter pipeline/result cache identities and comparison checks; requested policy
+enter pipeline cache identities and comparison checks; requested policy
 is also retained in request provenance. Dumps record the dynamic replay policy
 in resume provenance. Use matching policies for image and performance pairs.
 
@@ -203,7 +202,7 @@ the real replay swapchain.
 Every run records requested and backend-confirmed effective swapchain modes.
 GPU reports retain this under `gpu.swapchain` and `gpu.provenance.swapchain`;
 the request manifest/cache identity includes `swapchain_mode`. Different modes
-use separate pipeline/result identities and cannot produce a compatible GPU
+use separate pipeline cache identities and cannot produce a compatible GPU
 comparison. Explicit offscreen replay fails if an older backend cannot confirm
 its effective implementation; rebuild/update the bundled replay tool or APK.
 
@@ -403,5 +402,5 @@ removes private staging files. Raw transfer remains available when the optional
 helper cannot be used (or its configured path is empty).
 
 `backend_timing.artifact_transfer` in the replay manifest records `codec`,
-`integrity`, `raw_bytes` and `wire_bytes`. Cached result restores transfer nothing;
-their stored backend timings describe the original render.
+`integrity`, `raw_bytes` and `wire_bytes`. Every request performs a real replay;
+the timings describe that replay.
