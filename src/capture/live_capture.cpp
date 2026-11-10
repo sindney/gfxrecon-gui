@@ -9,6 +9,7 @@
 #include <thread>
 #include <algorithm>
 #include <set>
+#include <map>
 #include <cstdlib>
 
 namespace gfx {
@@ -41,7 +42,7 @@ void SetJournalProperty(const AdbConnection& adb,const AndroidSessionState& stat
     throw std::runtime_error("Runtime capture property is not owned by this session");
 }
 // Full layer log text from the device; empty before the layer creates it. A local copy is kept in the session directory.
-std::string ReadAndroidLog(const AdbConnection& adb,const AndroidSessionState& state){
+std::string ReadAndroidLog(const AdbConnection& adb,const AndroidSessionState& state,bool preserve=true){
     const auto result=adb.TryShell({"run-as",state.package,"cat",state.relative+"/l.txt"});
     if(result.cancelled)throw std::runtime_error("Capture cancelled.");
     if(result.timedOut)throw std::runtime_error("Capture log read timed out. Check the selected device connection.");
@@ -50,8 +51,58 @@ std::string ReadAndroidLog(const AdbConnection& adb,const AndroidSessionState& s
         throw std::runtime_error("Capture connection failed: "+result.output);
     }
     const auto local=state.directory/"layer.log";std::error_code ignored;
-    if(!std::filesystem::exists(local,ignored)||std::filesystem::file_size(local,ignored)!=result.output.size()){std::ofstream out(local,std::ios::binary);out<<result.output;}
+    if(preserve&&(!std::filesystem::exists(local,ignored)||std::filesystem::file_size(local,ignored)!=result.output.size())){std::ofstream out(local,std::ios::binary);out<<result.output;}
     return result.output;
+}
+// A layer log can stop updating after Vulkan startup.
+// Preserve a single append-only event stream even when its file stops updating.
+std::string ReadAndroidEvents(const AdbConnection& adb,AndroidSessionState& state,bool preserve=true){
+    const auto fileLog=ReadAndroidLog(adb,state,preserve);
+    if(state.logSource=="layer-file"){
+        // A session with no imported captures can safely recover missed events.
+        // Consumed legacy offsets keep their original stream to avoid reimport.
+        if(state.captures)return fileLog;
+        state.logOffset=0;state.logSource="events-v1";if(preserve)SaveAndroidSession(state);
+    }
+    if(state.logSource!="events-v1")throw std::runtime_error("Unsupported Android capture event stream");
+    const auto path=state.directory/"capture-events.log";
+    auto events=Text(path);const auto priorSize=events.size();
+    std::map<std::string,bool> known;
+    const auto scan=[&](const std::string& text,bool append){
+        std::istringstream lines(text);std::string line,active;
+        while(std::getline(lines,line)){
+            if(lines.eof())break; // Do not publish a partially written log line.
+            const auto at=line.find(kRecordingStart);
+            if(at!=std::string::npos){
+                active=Trim(line.substr(at+kRecordingStart.size()));
+                if(active.rfind(state.remote+"/",0)!=0||active.find("..")!=std::string::npos||active.find('\\')!=std::string::npos){active.clear();continue;}
+                if(known.emplace(active,false).second&&append)events+=kRecordingStart+active+'\n';
+            }else if(!active.empty()&&line.find(kRecordingDone)!=std::string::npos){
+                if(!known[active]&&append)events+=kRecordingDone+'\n';
+                known[active]=true;active.clear();
+            }
+        }
+    };
+    scan(events,false);scan(fileLog,true);
+    const auto now=NowMs();
+    if(events.size()==priorSize&&(now<state.lastLogcatReadMs||now-state.lastLogcatReadMs>=500)){
+        state.lastLogcatReadMs=now;
+        const auto pid=adb.TryShell({"pidof",state.package});const auto id=Trim(pid.output);
+        if(pid.Success()&&!id.empty()&&id.find_first_not_of("0123456789")==std::string::npos){
+            const auto logcat=adb.TryShell({"logcat","-d","-b","main","-v","raw","--pid="+id,"gfxrecon:I","*:S"});
+            if(logcat.cancelled)throw std::runtime_error("Capture cancelled.");
+            if(logcat.Success()){
+                if(logcat.output.size()>8*1024*1024)throw std::runtime_error("Capture logcat exceeds the supported 8 MiB limit");
+                if(preserve)std::ofstream(state.directory/"layer-logcat.log",std::ios::binary)<<logcat.output;
+                scan(logcat.output,true);
+            }else if(preserve)std::ofstream(state.directory/"layer-logcat-error.txt")<<logcat.output;
+        }
+    }
+    if(preserve&&events.size()!=priorSize){
+        std::ofstream out(path,std::ios::binary|std::ios::app);out.write(events.data()+priorSize,events.size()-priorSize);
+        if(!out)throw std::runtime_error("Cannot preserve Android capture event log");
+    }
+    return events;
 }
 bool Running(const AdbConnection& adb,const std::string& package,bool cleanup=false){return adb.TryShell({"pidof",package},cleanup).Success();}
 void MarkEnded(const std::filesystem::path& directory){
@@ -67,13 +118,14 @@ AndroidSessionState LoadAndroidSession(const std::filesystem::path& directory){
     const auto j=Json::parse(in);AndroidSessionState state;state.directory=directory;
     state.serial=j.value("serial",std::string{});state.package=j.value("package",std::string{});state.relative=j.value("relative",std::string{});state.remote=j.value("remote",std::string{});
     state.frames=j.value("frames",0u);state.captures=j.value("captures",0u);state.logOffset=j.value("log_offset",uint64_t{0});state.lastTriggerMs=j.value("last_trigger_ms",int64_t{0});
+    state.logSource=j.value("log_source",std::string("layer-file"));
     state.launched=j.value("launched",false);state.ended=j.value("ended",false);state.prepared=true;
     if(state.serial.empty()||state.package.empty()||state.relative.empty())throw std::runtime_error("Capture session.json is incomplete: "+directory.u8string());
     return state;
 }
 Json AndroidSessionJson(const AndroidSessionState& state){
     return {{"schema",1},{"serial",state.serial},{"package",state.package},{"relative",state.relative},{"remote",state.remote},{"frames",state.frames},{"captures",state.captures},
-        {"log_offset",state.logOffset},{"last_trigger_ms",state.lastTriggerMs},{"launched",state.launched},{"ended",state.ended}};
+        {"log_offset",state.logOffset},{"log_source",state.logSource},{"last_trigger_ms",state.lastTriggerMs},{"launched",state.launched},{"ended",state.ended}};
 }
 void SaveAndroidSession(const AndroidSessionState& state){AtomicJson(state.directory/"session.json",AndroidSessionJson(state));}
 void PrepareAndroidCapture(const AdbConnection& adb,const AndroidArmOptions& options,AndroidSessionState& state){
@@ -166,8 +218,8 @@ void SetAndroidTrigger(const AdbConnection& adb,AndroidSessionState& state,bool 
     SetJournalProperty(adb,state,kTrigger,enabled?"true":"false",cleanup);
     if(enabled){state.lastTriggerMs=NowMs();SaveAndroidSession(state);}
 }
-std::vector<AndroidLogLine> ReadAndroidLogLines(const AdbConnection& adb,const AndroidSessionState& state){
-    const auto text=ReadAndroidLog(adb,state);
+std::vector<AndroidLogLine> ReadAndroidLogLines(const AdbConnection& adb,AndroidSessionState& state){
+    const auto text=ReadAndroidEvents(adb,state);
     if(text.size()<state.logOffset)throw std::runtime_error("Capture log was replaced unexpectedly");
     std::vector<AndroidLogLine> lines;size_t position=static_cast<size_t>(state.logOffset),newline;
     while((newline=text.find('\n',position))!=std::string::npos){lines.push_back({Trim(text.substr(position,newline-position)),position,newline+1});position=newline+1;}
@@ -192,7 +244,7 @@ AndroidCaptureFile CollectAndroidCapture(const AdbConnection& adb,AndroidSession
     if(remoteHash.Success()&&remoteHash.output.size()>=64){auto hash=remoteHash.output.substr(0,64);
         if(hash.find_first_not_of("0123456789abcdefABCDEF")==std::string::npos){std::transform(hash.begin(),hash.end(),hash.begin(),::tolower);
             if(hash!=file.sha256)discard("Capture transfer failed hash verification (device "+hash+", host "+file.sha256+")");}}
-    AtomicJson(directory/("capture-"+std::to_string(number)+".json"),Json{{"owner","gfxrecon_gui"},{"complete",true},{"file",target.filename().u8string()},{"sha256",file.sha256},{"bytes",bytes},{"frames",state.frames},{"serial",adb.serial}});
+    AtomicJson(directory/("capture-"+std::to_string(number)+".json"),Json{{"owner","gfxrecon_gui"},{"complete",true},{"file",target.filename().u8string()},{"remote_file",remoteFile},{"sha256",file.sha256},{"bytes",bytes},{"frames",state.frames},{"serial",adb.serial}});
     state.captures=number;SaveAndroidSession(state);
     return file;
 }
@@ -201,7 +253,7 @@ std::vector<AndroidCaptureFile> TriggerAndroidCapture(const AdbConnection& adb,c
     auto state=LoadAndroidSession(directory);
     if(state.serial!=adb.serial)throw std::runtime_error("Capture session belongs to device "+state.serial);
     if(state.ended||LoadJournal(state.Journal()).value("restored",false))throw std::runtime_error("Capture session has ended and its settings are restored; arm a new session");
-    if(!state.frames)throw std::runtime_error("Session was armed for manual start/stop, which is only available in the GUI");
+    if(!state.frames)throw std::runtime_error("Manual session: use capture start, then capture stop to retrieve the recording");
     if(frames&&frames!=state.frames)throw std::runtime_error("Frames per capture are fixed when arming ("+std::to_string(state.frames)+"); arm a new session for "+std::to_string(frames));
     RequireAndroidUnlocked(adb);
     if(ReadAndroidLog(adb,state).empty())throw std::runtime_error(Running(adb,state.package)?"The capture layer has not reported ready. Retry shortly; if the game was already running when armed, restart it (the layer loads at process start)":"The game is not running with capture armed. Launch it (arm without --no-launch), then trigger");
@@ -243,6 +295,61 @@ std::vector<AndroidCaptureFile> TriggerAndroidCapture(const AdbConnection& adb,c
     }
     return files;
 }
+Json StartAndroidManualCapture(const AdbConnection& adb,const std::filesystem::path& directory,std::chrono::seconds timeout){
+    DeviceLock lease(adb.serial);auto state=LoadAndroidSession(directory);
+    if(state.serial!=adb.serial)throw std::runtime_error("Capture session belongs to device "+state.serial);
+    if(state.frames)throw std::runtime_error("Use capture trigger for a bounded session; manual capture requires arm --frames 0");
+    if(state.ended||LoadJournal(state.Journal()).value("restored",false))throw std::runtime_error("Capture session has ended; arm a new session");
+    RequireAndroidUnlocked(adb);
+    if(ReadAndroidLog(adb,state).empty())throw std::runtime_error("Capture layer is not ready; launch the armed Vulkan app first");
+    const auto deadline=std::chrono::steady_clock::now()+timeout;bool requested=false;
+    try{
+        for(;;){
+            std::string file;uint64_t start=state.logOffset;bool finished=false;
+            for(const auto& line:ReadAndroidLogLines(adb,state)){
+                const auto at=line.text.find(kRecordingStart);
+                if(at!=std::string::npos){file=line.text.substr(at+kRecordingStart.size());start=line.begin;finished=false;}
+                else if(line.text.find(kRecordingDone)!=std::string::npos&&!file.empty())finished=true;
+            }
+            if(finished)throw std::runtime_error("A finalized recording is waiting; run capture stop to retrieve it first");
+            if(!file.empty()){
+                state.logOffset=start;SaveAndroidSession(state);
+                return {{"session",directory.u8string()},{"serial",state.serial},{"package",state.package},{"recording",true},{"already_recording",!requested},{"remote_file",file}};
+            }
+            if(Cancelled(adb))throw std::runtime_error("Capture cancelled.");
+            if(!Running(adb,state.package))throw std::runtime_error("Game exited before manual capture started");
+            if(std::chrono::steady_clock::now()>deadline)throw std::runtime_error("Timed out waiting for manual capture to start");
+            if(!requested){SetAndroidTrigger(adb,state,true);requested=true;}
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }catch(...){if(requested)try{SetAndroidTrigger(adb,state,false,true);}catch(...){}throw;}
+}
+std::vector<AndroidCaptureFile> StopAndroidManualCapture(const AdbConnection& adb,const std::filesystem::path& directory,std::chrono::seconds timeout){
+    DeviceLock lease(adb.serial);auto state=LoadAndroidSession(directory);
+    if(state.serial!=adb.serial)throw std::runtime_error("Capture session belongs to device "+state.serial);
+    if(state.frames)throw std::runtime_error("Manual capture stop requires a session armed with --frames 0");
+    if(state.ended||LoadJournal(state.Journal()).value("restored",false))throw std::runtime_error("Capture session has ended; arm a new session");
+    const bool wasRequested=Trim(adb.Shell({"getprop",kTrigger}))=="true";
+    SetAndroidTrigger(adb,state,false);
+    const auto deadline=std::chrono::steady_clock::now()+timeout;
+    const auto cancelDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+    for(;;){
+        std::string file;uint64_t start=state.logOffset;
+        for(const auto& line:ReadAndroidLogLines(adb,state)){
+            const auto at=line.text.find(kRecordingStart);
+            if(at!=std::string::npos){file=line.text.substr(at+kRecordingStart.size());start=line.begin;}
+            else if(line.text.find(kRecordingDone)!=std::string::npos&&!file.empty()){
+                auto captured=CollectAndroidCapture(adb,state,file);state.logOffset=line.end;SaveAndroidSession(state);return {captured};
+            }
+        }
+        if(file.empty()&&(!wasRequested||std::chrono::steady_clock::now()>cancelDeadline))return {};
+        state.logOffset=start;SaveAndroidSession(state);
+        if(Cancelled(adb))throw std::runtime_error("Capture cancelled; unfinished output retained");
+        if(!Running(adb,state.package))throw std::runtime_error("Game exited before recording finished; partial output retained");
+        if(std::chrono::steady_clock::now()>deadline)throw std::runtime_error("Timed out waiting for a manual recording to finish; partial output retained");
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+}
 Json AndroidCaptureStatus(const AdbConnection& adb,const std::filesystem::path& directory){
     auto state=LoadAndroidSession(directory);
     if(state.serial!=adb.serial)throw std::runtime_error("Capture session belongs to device "+state.serial);
@@ -258,7 +365,9 @@ Json AndroidCaptureStatus(const AdbConnection& adb,const std::filesystem::path& 
     if(!state.ended&&!journalRestored){
         const auto log=adb.TryShell({"run-as",state.package,"cat",state.relative+"/l.txt"});
         if(log.Success()&&!log.output.empty()){
-            layerReady=true;std::istringstream lines(log.output.substr(std::min<size_t>(log.output.size(),static_cast<size_t>(state.logOffset))));std::string line;
+            layerReady=true;
+            const auto events=ReadAndroidEvents(adb,state,false);
+            std::istringstream lines(events.substr(std::min<size_t>(events.size(),static_cast<size_t>(state.logOffset))));std::string line;
             while(std::getline(lines,line)){if(line.find(kRecordingStart)!=std::string::npos)recording=true;else if(line.find(kRecordingDone)!=std::string::npos)recording=false;}
         }
         const auto trigger=adb.TryShell({"getprop",kTrigger});if(trigger.Success())status["trigger_property"]=Trim(trigger.output);
@@ -311,6 +420,7 @@ struct LiveCaptureSession::Impl {
     std::atomic_bool abort{false};std::atomic_int command{0};
     AdbConnection adb;
     mutable std::mutex mutex;LiveCaptureState state;
+    int pendingCommand=0; // guarded with state; published before an API call returns
     std::thread worker;std::unique_ptr<GameProcess> game;
     AndroidSessionState android;                       // Android: all session state lives in the shared stateless functions
     std::string activeFile,partial;size_t logOffset=0; // Windows layer-log cursor
@@ -319,8 +429,27 @@ struct LiveCaptureSession::Impl {
     explicit Impl(LiveCaptureOptions o,const AdbConnection& device):options(std::move(o)),adb{device.executable,device.serial,&abort,device.transport}{worker=std::thread([this]{Run();});}
     ~Impl(){abort=true;if(worker.joinable())worker.join();}
     LiveCaptureState Snapshot()const{std::lock_guard<std::mutex> lock(mutex);return state;}
+    void Request(int action){
+        std::lock_guard<std::mutex> lock(mutex);
+        if(state.endingSession)return;
+        if(action==1&&(state.phase!=LivePhase::Armed||pendingCommand))return;
+        if(action==2&&(pendingCommand==2||
+            (state.phase!=LivePhase::Recording&&state.phase!=LivePhase::Triggering&&pendingCommand!=1)))return;
+        if(action>=3&&state.phase==LivePhase::Ended&&!state.gameRunning)return;
+        if(action>=3&&state.phase==LivePhase::Failed&&!state.gameRunning)return;
+        pendingCommand=action;state.commandPending=true;state.endingSession=action>=3;
+        state.detail=action==1?"Capture requested; waiting for the worker":action==2?"Stop requested":
+            "End session requested; waiting for current capture work to finish";
+        command.store(action);
+    }
     void Phase(LivePhase phase,const std::string& detail){
-        {std::lock_guard<std::mutex> lock(mutex);state.phase=phase;state.detail=detail;}
+        {std::lock_guard<std::mutex> lock(mutex);state.phase=phase;state.detail=detail;
+            if((phase==LivePhase::Triggering&&pendingCommand==1)||
+               ((phase==LivePhase::Stopping||phase==LivePhase::Armed)&&pendingCommand==2)||phase==LivePhase::Ended||
+               (phase==LivePhase::Failed&&command.load()<3)){
+                pendingCommand=0;state.commandPending=false;state.endingSession=false;
+            }
+        }
         if(phase==LivePhase::Failed){LOGE("capture")<<detail;}else{LOGI("capture")<<detail;}
         if(options.capture.progress)options.capture.progress(detail);
     }
@@ -414,7 +543,7 @@ struct LiveCaptureSession::Impl {
             Alive();if(ending)FinishSession();else{armed=true;Phase(LivePhase::Armed,"Armed. Play the game, then trigger capture." );}
             while(!abort){
                 const int action=command.exchange(0);const auto phase=Snapshot().phase;
-                if(phase==LivePhase::Ended){if(action==4){CloseGame();Restore();Phase(LivePhase::Ended,"Launched game closed and settings restored");}std::this_thread::sleep_for(std::chrono::milliseconds(100));continue;}
+                if(phase==LivePhase::Ended){if(action==3||action==4){closeOnEnd=action==4;FinishSession();}std::this_thread::sleep_for(std::chrono::milliseconds(100));continue;}
                 if(action==1&&phase==LivePhase::Armed){
                     while(!abort&&std::chrono::steady_clock::now()-lastTrigger<std::chrono::milliseconds(1100))std::this_thread::sleep_for(std::chrono::milliseconds(25));
                     Trigger(true);lastTrigger=std::chrono::steady_clock::now();Phase(LivePhase::Triggering,"Capture requested; waiting for the game's next frame");
@@ -422,13 +551,16 @@ struct LiveCaptureSession::Impl {
                 if(action==2||action==3||action==4){
                     ending=action>=3;closeOnEnd=action==4;
                     if(recording){Trigger(false);stopDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);Phase(LivePhase::Stopping,"Stopping at a frame boundary; the game will keep running");}
-                    else if(phase==LivePhase::Armed&&ending){FinishSession();continue;}
-                    else if(phase==LivePhase::Triggering) {Trigger(false);ending=action>=3;closeOnEnd=action==4;stopDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);}
+                    else if(phase==LivePhase::Armed){
+                        if(ending)FinishSession();else{Trigger(false);Phase(LivePhase::Armed,"Capture request cancelled before recording");}
+                        continue;
+                    }
+                    else if(phase==LivePhase::Triggering) {Trigger(false);ending=action>=3;closeOnEnd=action==4;stopDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);Phase(LivePhase::Stopping,"Cancelling capture request at a frame boundary");}
                 }
                 const auto lines=NewLines();if(options.android&&!lines.empty())SaveAndroidSession(android);
                 for(const auto& line:lines){
                     const auto at=line.find(kRecordingStart);
-                    if(at!=std::string::npos){activeFile=line.substr(at+kRecordingStart.size());recording=true;lastRecord=std::chrono::steady_clock::now();if(stopDeadline!=std::chrono::steady_clock::time_point{})stopDeadline=lastRecord+std::chrono::seconds(30);Phase(LivePhase::Recording,"Recording "+std::string(options.frames?std::to_string(options.frames)+" frames":"until Stop capture"));}
+                    if(at!=std::string::npos){activeFile=line.substr(at+kRecordingStart.size());recording=true;lastRecord=std::chrono::steady_clock::now();if(stopDeadline!=std::chrono::steady_clock::time_point{})stopDeadline=lastRecord+std::chrono::seconds(30);Phase(LivePhase::Recording,"Recording "+std::string(options.frames?std::to_string(options.frames)+" frames":"manually until finished"));}
                     if(line.find(kRecordingDone)!=std::string::npos&&recording){
                         recording=false;Phase(LivePhase::Retrieving,"Retrieving finalized capture; the game remains running");
                         Trigger(false);Collect();stopDeadline={};
@@ -436,6 +568,10 @@ struct LiveCaptureSession::Impl {
                     }
                 }
                 if(recording&&stopDeadline!=std::chrono::steady_clock::time_point{}&&Snapshot().phase!=LivePhase::Stopping){Trigger(false);Phase(LivePhase::Stopping,"Waiting for capture to finish at a frame boundary");}
+                if(Snapshot().phase==LivePhase::Triggering&&!recording&&stopDeadline==std::chrono::steady_clock::time_point{}&&
+                   std::chrono::steady_clock::now()-lastTrigger>options.capture.timeout)
+                    throw std::runtime_error("Capture did not report a recording start within "+std::to_string(options.capture.timeout.count())+
+                        " seconds. Check Vulkan frame presentation and layer/logcat access. Partial output and logs were retained; no unfinished capture was imported.");
                 if(stopDeadline!=std::chrono::steady_clock::time_point{}&&std::chrono::steady_clock::now()>stopDeadline){
                     if(!recording){stopDeadline={};if(ending)FinishSession();else Phase(LivePhase::Armed,"Capture request cancelled before the game produced a frame.");}
                     else throw std::runtime_error("Game did not reach a capture boundary after Stop; incomplete output was retained");
@@ -453,15 +589,15 @@ struct LiveCaptureSession::Impl {
             if(!abort&&!armed&&launched)try{CloseGame();}catch(...){}
             if(options.android&&prepared){try{SetAndroidTrigger(adb,android,false,true);Restore();}catch(const std::exception& restore){detail+="\nRecovery pending: "+std::string(restore.what());}}
             Phase(LivePhase::Failed,detail);
-            while(!abort){if(command.exchange(0)==4){try{CloseGame();Restore();Phase(LivePhase::Ended,"Game closed; settings restored");}catch(const std::exception& e){Phase(LivePhase::Failed,e.what());}}std::this_thread::sleep_for(std::chrono::milliseconds(100));}
+            while(!abort){const auto action=command.exchange(0);if(action==3||action==4){try{closeOnEnd=action==4;FinishSession();}catch(const std::exception& e){Phase(LivePhase::Failed,e.what());}}std::this_thread::sleep_for(std::chrono::milliseconds(100));}
         }
     }
 };
 LiveCaptureSession::LiveCaptureSession(LiveCaptureOptions options,const AdbConnection& device):impl_(std::make_unique<Impl>(std::move(options),device)){}
 LiveCaptureSession::~LiveCaptureSession()=default;
 LiveCaptureState LiveCaptureSession::State()const{return impl_->Snapshot();}
-void LiveCaptureSession::Capture(){if(State().phase==LivePhase::Armed){int empty=0;impl_->command.compare_exchange_strong(empty,1);}}
-void LiveCaptureSession::StopCapture(){impl_->command=2;}
-void LiveCaptureSession::End(bool closeGame){impl_->command=closeGame?4:3;}
-bool LiveCaptureSession::Active()const{const auto phase=State().phase;return phase!=LivePhase::Ended&&phase!=LivePhase::Failed;}
+void LiveCaptureSession::Capture(){impl_->Request(1);}
+void LiveCaptureSession::StopCapture(){impl_->Request(2);}
+void LiveCaptureSession::End(bool closeGame){impl_->Request(closeGame?4:3);}
+bool LiveCaptureSession::Active()const{const auto state=State();return state.commandPending||(state.phase!=LivePhase::Ended&&state.phase!=LivePhase::Failed);}
 }

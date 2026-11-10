@@ -28,6 +28,10 @@ void WriteBmp(const std::filesystem::path& file, const Image& image);
 // Return the original image with only the inner coverage boundary highlighted.
 Image ComposeDrawOutline(const Image& original,const Image& coverageA,const Image& coverageB,uint32_t thickness=2,
                          ImageSourceEncoding sourceEncoding=ImageSourceEncoding::Srgb);
+// Display-sRGB RGBA annotation. Coverage comes from alternate diagnostic colors,
+// never from differences against the application's arbitrary output colors.
+Image MakeDrawOverlay(const Image& coverageA,const Image& coverageB,const Image& colors,
+                      ImageSourceEncoding sourceEncoding,bool outline=false,uint8_t opacity=192);
 // BMP (or PNG) -> PNG. Returns the decoded extent.
 Image ConvertToPng(const std::filesystem::path& source, const std::filesystem::path& png);
 // Per-channel max/mean absolute difference, differing pixel count and PSNR (RGB, null when identical).

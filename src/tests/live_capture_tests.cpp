@@ -26,19 +26,24 @@ std::vector<std::string> Words(const std::string& text){
 // Phone whose layer reacts to capture_android_trigger: Recording line on enable, Finished a couple of log reads later.
 struct FakePhone {
     std::map<std::string,std::string> settings{{"gpu_debug_app","prior.app"}},props{{"debug.gfxrecon.capture_frames","7-9"}};
-    std::string relative,log;
-    bool locked=false,started=false,running=false,corruptHash=false,neverStarts=false;
+    std::string relative,log,logcat;
+    bool locked=false,started=false,running=false,corruptHash=false,neverStarts=false,fileEvents=true,logcatAllowed=true,silentTrigger=false,capturing=false;
+    std::chrono::milliseconds triggerDelay{0},transferDelay{0};std::atomic_bool transferEntered{false};
     int pendingFinish=0,captures=0,triggerSets=0,inputs=0;
     std::map<std::string,std::string> files;
     ProcessResult Run(const ProcessRequest& request,const std::atomic_bool*){
         Require(request.arguments.size()>=4&&request.arguments[1]=="phone-c","Fake phone: wrong device");
         const auto& type=request.arguments[2];const auto words=Words(request.arguments[3]);
-        if(type=="exec-out"){std::ofstream out(request.stdoutFile,std::ios::binary);out<<files.at(words.back());return {0};}
+        if(type=="exec-out"){transferEntered=true;std::this_thread::sleep_for(transferDelay);std::ofstream out(request.stdoutFile,std::ios::binary);out<<files.at(words.back());return {0};}
         Require(type=="shell"&&!words.empty(),"Fake phone: unexpected transport");
         if(words[0]=="dumpsys")return {0,std::string("KeyguardServiceDelegate\n showing=")+(locked?"true":"false")+"\n secure=true"};
         if(words[0]=="input"||words[0]=="wm"){++inputs;return {0};}
         if(words[0]=="pm")return {0,"package:/data/app/replay.apk"};
         if(words[0]=="pidof")return running?ProcessResult{0,"4242"}:ProcessResult{1,""};
+        if(words[0]=="logcat"){
+            Require(std::find(words.begin(),words.end(),"--pid=4242")!=words.end(),"Capture logcat was not scoped to the game PID");
+            return logcatAllowed?ProcessResult{0,logcat}:ProcessResult{1,"logcat denied"};
+        }
         if(words[0]=="cmd")return {0,"test.app/Activity\n"};
         if(words[0]=="settings"){
             if(words[1]=="get")return {0,(settings.count(words[3])?settings.at(words[3]):"null")+"\n"};
@@ -49,11 +54,14 @@ struct FakePhone {
             props[words[1]]=words[2];
             if(words[1]=="debug.gfxrecon.capture_android_trigger"){
                 ++triggerSets;
-                if(words[2]=="true"){
+                if(words[2]=="true"&&!silentTrigger){
+                    std::this_thread::sleep_for(triggerDelay);capturing=true;
                     const auto name="/data/data/test.app/"+relative+"/c_trigger_"+std::to_string(++captures)+".gfxr";
                     files[name]=std::string(4096+captures,'x')+std::to_string(captures);
-                    log+="Recording graphics API capture to "+name+"\n";pendingFinish=2;
+                    const auto event="Recording graphics API capture to "+name+"\n";
+                    logcat+=event;if(fileEvents)log+=event;pendingFinish=props["debug.gfxrecon.capture_trigger_frames"].empty()?0:2;
                 }
+                if(words[2]=="false"&&capturing&&!pendingFinish)pendingFinish=2;
             }
             return {0};
         }
@@ -66,7 +74,7 @@ struct FakePhone {
             if(words[2]=="mkdir"){relative=words[4];return {0};}
             if(words[2]=="cat"){
                 if(!started||neverStarts)return {1,"cat: No such file or directory"};
-                if(pendingFinish>0&&--pendingFinish==0)log+="Finished recording graphics API capture\n";
+                if(pendingFinish>0&&--pendingFinish==0){capturing=false;logcat+="Finished recording graphics API capture\n";if(fileEvents)log+="Finished recording graphics API capture\n";}
                 return {0,log};
             }
             if(words[2]=="stat")return {0,std::to_string(files.at(words.back()).size())+"\n"};
@@ -82,6 +90,81 @@ AdbConnection Connect(FakePhone& phone){return AdbConnection{"fake-adb","phone-c
 void RunAndroidCaptureTests(const std::filesystem::path& root){
     using namespace std::chrono_literals;
     const auto base=root/"android-capture";std::filesystem::remove_all(base);std::filesystem::create_directories(base);
+    // Advanced manual controls return between operations and can record several
+    // clips without ending the session. Repeated start/stop is idempotent.
+    for(bool fileEvents:{true,false}){
+        FakePhone phone;phone.fileEvents=fileEvents;const auto original=phone.settings;
+        AndroidArmOptions arm;arm.directory=base/(fileEvents?"manual-api":"manual-api-logcat");arm.package="test.app";arm.frames=0;
+        ArmAndroidCapture(Connect(phone),arm);
+        for(unsigned i=0;i<2;++i){
+            Require(StartAndroidManualCapture(Connect(phone),arm.directory,5s)["recording"]==true,"Manual recording did not start");
+            Require(StartAndroidManualCapture(Connect(phone),arm.directory,5s)["already_recording"]==true,"Repeated manual start requested another capture");
+            const auto files=StopAndroidManualCapture(Connect(phone),arm.directory,5s);
+            Require(files.size()==1&&LoadAndroidSession(arm.directory).captures==i+1&&phone.running,"Manual stop failed to retrieve or ended the game");
+            Require(StopAndroidManualCapture(Connect(phone),arm.directory,5s).empty(),"Repeated manual stop duplicated a capture");
+        }
+        Require(phone.captures==2,"Manual start duplicated recording");EndAndroidCapture(Connect(phone),arm.directory,false);
+        Require(phone.running&&phone.settings==original,"Manual end failed to preserve the app or restore settings");
+    }
+    {
+        FakePhone phone;phone.triggerDelay=500ms;phone.transferDelay=700ms;
+        LiveCaptureOptions options;options.android=true;options.frames=2;options.capture.package="test.app";options.capture.output=base/"pending-commands";
+        LiveCaptureSession session(options,Connect(phone));Await(session,[](const auto& s){return s.phase==LivePhase::Armed;});
+        session.Capture();Require(session.State().commandPending,"Capture was not marked pending synchronously");
+        session.Capture(); // must not leave another trigger queued
+        const auto deadline=std::chrono::steady_clock::now()+5s;
+        while(!phone.transferEntered&&std::chrono::steady_clock::now()<deadline)std::this_thread::sleep_for(10ms);
+        Require(phone.transferEntered,"Capture did not enter retrieval");session.End(false);
+        Require(session.State().commandPending&&session.State().endingSession,"End was not marked pending during retrieval");
+        session.End(true); // a duplicate must not change the accepted No choice
+        Await(session,[](const auto& s){return s.phase==LivePhase::Ended&&!s.commandPending;});
+        Require(phone.captures==1&&session.State().captures.size()==1&&session.State().gameRunning,"Duplicate capture/end was queued or changed the close choice");
+        session.End(true);Await(session,[](const auto& s){return !s.gameRunning&&!s.commandPending;});
+    }
+    {
+        FakePhone phone;LiveCaptureOptions options;options.android=true;options.frames=0;options.capture.package="test.app";options.capture.output=base/"manual-end";
+        LiveCaptureSession session(options,Connect(phone));Await(session,[](const auto& s){return s.phase==LivePhase::Armed;});
+        session.Capture();Await(session,[](const auto& s){return s.phase==LivePhase::Recording;});session.End(false);
+        Await(session,[](const auto& s){return s.phase==LivePhase::Ended&&!s.commandPending;});
+        Require(session.State().captures.size()==1&&session.State().gameRunning,"End session did not finish/retrieve manual recording and preserve the app");
+    }
+    // The game's layer file stops after initialization, while logcat still
+    // reports recording. Merge both sources without importing another session
+    // or duplicating events when the logcat snapshot is read again.
+    {
+        FakePhone phone;phone.fileEvents=false;
+        AndroidArmOptions arm;arm.directory=base/"logcat";arm.package="test.app";arm.frames=3;arm.timeout=5s;
+        ArmAndroidCapture(Connect(phone),arm);
+        phone.logcat="Recording graphics API capture to /data/data/another.app/files/c.gfxr\nFinished recording graphics API capture\n";
+        for(unsigned i=0;i<2;++i){
+            auto files=TriggerAndroidCapture(Connect(phone),arm.directory,0,5s);
+            Require(files.size()==1&&LoadAndroidSession(arm.directory).captures==i+1,"Logcat-only events were lost, duplicated, or imported from another session");
+        }
+        auto state=LoadAndroidSession(arm.directory);
+        Require(ReadAndroidLogLines(Connect(phone),state).empty(),"Repeated logcat snapshot replayed consumed events");
+        Require(std::filesystem::is_regular_file(arm.directory/"layer-logcat.log")&&
+            std::filesystem::is_regular_file(arm.directory/"capture-events.log"),"Capture event sources were not retained");
+        EndAndroidCapture(Connect(phone),arm.directory,false);
+    }
+    {
+        FakePhone phone;phone.fileEvents=false;
+        AndroidArmOptions arm;arm.directory=base/"legacy-uncollected";arm.package="test.app";arm.frames=2;
+        ArmAndroidCapture(Connect(phone),arm);
+        auto saved=Load(arm.directory/"session.json");saved.erase("log_source");saved["log_offset"]=18;
+        AtomicJson(arm.directory/"session.json",saved);
+        Require(TriggerAndroidCapture(Connect(phone),arm.directory,0,5s).size()==1&&
+            LoadAndroidSession(arm.directory).logSource=="events-v1","Uncollected legacy session could not migrate from its stale file cursor");
+        EndAndroidCapture(Connect(phone),arm.directory,false);
+    }
+    // File events remain usable on devices denying logcat; both channels may
+    // also contain the same completed capture and must not cause duplicates.
+    for(bool logcatAllowed:{false,true}){
+        FakePhone phone;phone.logcatAllowed=logcatAllowed;
+        AndroidArmOptions arm;arm.directory=base/(logcatAllowed?"dual-source":"file-only");arm.package="test.app";arm.frames=2;
+        ArmAndroidCapture(Connect(phone),arm);
+        Require(TriggerAndroidCapture(Connect(phone),arm.directory,0,5s).size()==1,"Healthy layer file required logcat or duplicated its completion");
+        EndAndroidCapture(Connect(phone),arm.directory,false);
+    }
     // Stateless arm -> trigger -> trigger -> status -> end; every call takes a fresh connection and reads only the session directory.
     {
         FakePhone phone;const auto original=phone.settings,originalProps=phone.props;const auto dir=base/"flow";
@@ -150,18 +233,30 @@ void RunAndroidCaptureTests(const std::filesystem::path& root){
         Require(phone.settings==original&&Load(dir/"device-journal.json")["restored"]==true,"Recovery from the same journal failed");
     }
     // The GUI session runs the same functions and keeps its behaviour.
-    {
-        FakePhone phone;const auto original=phone.settings;
-        LiveCaptureOptions options;options.android=true;options.frames=2;options.capture.package="test.app";options.capture.output=base/"gui";
+    for(bool fileEvents:{true,false}){
+        FakePhone phone;phone.fileEvents=fileEvents;const auto original=phone.settings;
+        const auto directory=base/(fileEvents?"gui":"gui-logcat");
+        LiveCaptureOptions options;options.android=true;options.frames=2;options.capture.package="test.app";options.capture.output=directory;
         LiveCaptureSession session(options,Connect(phone));
         Await(session,[](const auto& s){return s.phase==LivePhase::Armed;});
         for(unsigned repetition=0;repetition<2;++repetition){
             session.Capture();Await(session,[&](const auto& s){return s.phase==LivePhase::Armed&&s.captures.size()==repetition+1;});
         }
-        Require(session.State().gameRunning&&Load(base/"gui"/"session.json")["captures"]==2,"GUI session did not keep the game running or persist state");
+        Require(session.State().gameRunning&&Load(directory/"session.json")["captures"]==2,"GUI session did not keep the game running or persist state");
         session.End(false);Await(session,[](const auto& s){return s.phase==LivePhase::Ended;});
-        Require(phone.settings==original&&phone.running&&Load(base/"gui"/"device-journal.json")["restored"]==true,"GUI End did not restore settings");
+        Require(phone.settings==original&&phone.running&&Load(directory/"device-journal.json")["restored"]==true,"GUI End did not restore settings");
         const auto files=session.State().captures;Require(files.size()==2&&files[0]!=files[1]&&std::filesystem::file_size(files[0])>4096,"GUI captures missing");
+    }
+    {
+        FakePhone phone;phone.silentTrigger=true;const auto original=phone.settings;
+        LiveCaptureOptions options;options.android=true;options.frames=2;options.capture.package="test.app";
+        options.capture.output=base/"no-start";options.capture.timeout=1s;
+        LiveCaptureSession session(options,Connect(phone));Await(session,[](const auto& s){return s.phase==LivePhase::Armed;});
+        session.Capture();const auto deadline=std::chrono::steady_clock::now()+5s;
+        while(session.State().phase!=LivePhase::Failed&&std::chrono::steady_clock::now()<deadline)std::this_thread::sleep_for(50ms);
+        Require(session.State().phase==LivePhase::Failed&&!session.State().commandPending&&!session.State().endingSession&&session.State().detail.find("recording start")!=std::string::npos&&
+            session.State().captures.empty()&&phone.running&&phone.settings==original&&phone.props["debug.gfxrecon.capture_android_trigger"]!="true",
+            "A silent capture waited forever, imported unfinished output, stopped the game, or failed to restore settings");
     }
     std::filesystem::remove_all(base);
 }

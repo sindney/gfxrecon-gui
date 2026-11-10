@@ -1,4 +1,4 @@
-"""Build the original unprivileged ARM64 OEM counter-producer launcher."""
+"""Build the unprivileged ARM64 Adreno/Mali OEM counter-producer launcher."""
 import argparse
 import hashlib
 import json

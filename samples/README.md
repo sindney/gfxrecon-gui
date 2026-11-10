@@ -6,6 +6,7 @@ Open them with **File > Samples** in GFXReconstruct Inspector.
 - `android-triangle.gfxr`: three frames captured on a Qualcomm Adreno 850 phone. Automatic replay uses an authorized Android device with the replay APK installed.
 - `indexed-cube.gfxr`: three Windows frames with indexed cube geometry and a captured uniform transform. Select a draw and click Mesh to inspect solid/wireframe, local input, post-VS screen space and vertex coordinates.
 - `indirect-triangles.gfxr`: three Windows frames with a three-record indexed indirect batch. In Image, choose Solid coverage/Wireframe/Depth and All or Draw 0/1/2 to inspect each triangle on the replay GPU.
+- `mip-depth-stencil.gfxr`: three Windows frames with an 8×8 texture containing four levels (red, green, blue, yellow), plus depth and stencil outputs. Use Image's Mip dropdown to inspect the 8×8, 4×4, 2×2 and 1×1 levels; select Depth or Stencil and choose a draw diagnostic to inspect the independent geometry annotation.
 
 Offline API/shader inspection does not require a phone. Android replay requires a
 compatible Android device; platform-specific extensions can prevent local

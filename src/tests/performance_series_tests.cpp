@@ -7,6 +7,15 @@
 
 namespace gfx::tests {
 void PerformanceSeriesTests() {
+    if(PerformanceScale("PERCENT/NONE",100).unit!="%" || PerformanceScale("PERCENT/NONE",100).divisor!=1 ||
+       PerformanceScale("BYTE/NONE",2500000).unit!="MB" ||
+       FormatPerformanceValue(2500000,PerformanceScale("BYTE/NONE",2500000))!="2.5" ||
+       PerformanceScale("NONE/NONE",12).unit!="1" || PerformanceScale("NONE",12).unit!="1" ||
+       PerformanceScale("NONE/PIXEL",2).unit!="1/px" ||
+       PerformanceScale("FRAGMENT/PIXEL",1.25).unit!="FRAGMENT/PIXEL" ||
+       PerformanceScale("BYTE*NONE/SECOND*NONE",2500).unit!="KB/s" ||
+       PerformanceScale("UNKNOWN(99)/NONE",5).unit!="UNKNOWN(99)")
+        throw std::runtime_error("Mali dimensionless factors obscured readable units or changed count/rate/ratio meaning");
     for(const auto& example:std::vector<std::pair<double,std::string>>{{500,"B/s"},{2500,"KB/s"},{2500000,"MB/s"},{2108770000,"GB/s"}}){
         const auto scale=PerformanceScale("BYTE/SECOND",example.first);
         if(scale.unit!=example.second||FormatPerformanceValue(example.first,scale).find('e')!=std::string::npos)

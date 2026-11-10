@@ -39,6 +39,16 @@ void RunCliTests(const std::filesystem::path& root) {
     Require(usage({"doctor", "extra"}), "unexpected positional");
     Require(usage({"--settings-dir"}), "missing global value");
     Require(usage({"no-such-command"}), "unknown command");
+    const auto manual=Parse({"capture","arm","--package","test.app","--frames","0"});
+    Require(manual.args.Number("frames",3)==0,"manual arm frame count");
+    for(const auto* action:{"start","stop"}){
+        Require(usage({"capture",action}),"manual commands require a session");
+        Require(Parse({"capture",action,"--session","manual"}).command->Name()==std::string("capture ")+action,"manual commands are discoverable");
+        const auto missing=Invoke({"capture",action,"--session",(root/"missing-manual").u8string(),"--quiet","--settings-dir",settings});
+        Require(missing.exit==kFailed&&missing.document["error"]["code"]=="session_not_found","manual commands report missing session");
+    }
+    const auto windowsManual=Parse({"capture","windows","run","--exe","game.exe","--trigger-after","1","--frames","0","--stop-file","stop.capture"});
+    Require(windowsManual.args.Get("stop-file")=="stop.capture","Windows manual stop signal");
     Args numbers; numbers.values["n"] = {"12x"};
     bool rejected = false; try { numbers.Number("n", 0); } catch (const CliError& e) { rejected = e.exit == kUsage; }
     Require(rejected && numbers.Number("missing", 7) == 7, "number parsing");

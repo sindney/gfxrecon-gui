@@ -100,8 +100,14 @@ void Walk(const Json& value, Json inherited, const std::string& role, const std:
            std::map<std::string, ResourceArtifact>& files, unsigned depth = 0) {
     if (depth > 32) throw std::runtime_error("Replay metadata nesting exceeds the supported limit");
     if (value.is_object()) {
+        // Native dump metadata names the image's total counts levels/layers;
+        // mipLevel/arrayLayer below identify one dumped subresource.
+        if(value.contains("imageId"))for(const auto& names:{std::pair{"levels","mipLevels"},std::pair{"layers","arrayLayers"}}){
+            const auto count=value.find(names.first);
+            if(count!=value.end()&&count->is_number_integer()&&count->get<int64_t>()>0)inherited[names.second]=*count;
+        }
         for (auto key : {"drawIndex", "dispatchIndex", "beginCommandBufferIndex", "queueSubmitIndex", "imageId", "bufferId",
-                         "format", "extent", "dimensions", "aspect", "mipLevel", "arrayLayer", "size", "offset", "binding", "stride", "type", "set", "arrayIndex", "location", "vertexBufferBinding"})
+                         "format", "extent", "dimensions", "aspect", "mipLevel", "mipLevels", "arrayLayers", "arrayLayer", "depth", "size", "offset", "binding", "stride", "type", "set", "arrayIndex", "location", "vertexBufferBinding"})
             if (value.contains(key)) inherited[key] = value[key];
         if (value.contains("file") && value["file"].is_string()) {
             const auto filename = std::filesystem::u8path(value["file"].get<std::string>()).filename();

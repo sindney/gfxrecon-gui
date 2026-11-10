@@ -12,6 +12,13 @@ if(Python3_Interpreter_FOUND AND EXISTS "${_gui_root}/local-tools.json")
     string(JSON _mesh_compiler GET "${_mesh_tools}" compiler)
     execute_process(COMMAND "${Python3_EXECUTABLE}" "${_gui_root}/scripts/generate_mesh_workload.py"
         "${PROJECT_SOURCE_DIR}" "${CMAKE_BINARY_DIR}" "${_mesh_compiler}" COMMAND_ERROR_IS_FATAL ANY)
+    execute_process(COMMAND "${Python3_EXECUTABLE}" "${_gui_root}/scripts/generate_image_workload.py"
+        "${CMAKE_BINARY_DIR}" "${_mesh_compiler}" COMMAND_ERROR_IS_FATAL ANY)
+    add_executable(gfxrecon-gui-images "${_gui_root}/tests/workloads/secondary_main.cpp" "${CMAKE_BINARY_DIR}/gui-images/app.cpp")
+    target_include_directories(gfxrecon-gui-images PRIVATE "${CMAKE_BINARY_DIR}/gui-images")
+    target_link_libraries(gfxrecon-gui-images PRIVATE gfxrecon-testapp-base)
+    target_compile_definitions(gfxrecon-gui-images PRIVATE GFXRECON_GUI_MESH NOMINMAX)
+    set_target_properties(gfxrecon-gui-images PROPERTIES CXX_STANDARD 20 RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/validation")
     add_executable(gfxrecon-gui-mesh "${_gui_root}/tests/workloads/secondary_main.cpp" "${CMAKE_BINARY_DIR}/gui-mesh/app.cpp")
     target_include_directories(gfxrecon-gui-mesh PRIVATE "${CMAKE_BINARY_DIR}/gui-mesh")
     target_link_libraries(gfxrecon-gui-mesh PRIVATE gfxrecon-testapp-base)

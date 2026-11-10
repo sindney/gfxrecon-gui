@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 NAME = "gfxrecon-gui"
 ARCHIVE = NAME + "-windows-x64.zip"
 CLI = "gfxrecon-cli.exe"
-PUBLIC_DOCS = ("docs/GUI.md", "docs/CLI.md", "docs/RELATIONS.md", "docs/BUILD.md", "docs/images/inspector-wireframe.png")
+PUBLIC_DOCS = ("docs/GUI.md", "docs/CLI.md", "docs/RELATIONS.md", "docs/BUILD.md", "docs/MALI_COUNTERS.md", "docs/images/inspector-wireframe.png")
 # astcenc ships as two CPU variants; the core picks AVX2 when supported, else SSE2 (design D9).
 ASTCENC = ("astcenc-avx2.exe", "astcenc-sse2.exe")
 ASTCENC_LICENSE = "licenses/astc-encoder.txt"
@@ -367,11 +367,13 @@ def package_runtime(args):
         environment["GFXRECON_GUI_LIVE_WORKDIR"] = str(unpacked / "samples/test-res")
         if (unpacked / "samples/indexed-cube.gfxr").is_file():
             environment["GFXRECON_GUI_MESH_CAPTURE"] = str(unpacked / "samples/indexed-cube.gfxr")
+        if (unpacked / "samples/mip-depth-stencil.gfxr").is_file():
+            environment["GFXRECON_GUI_SUBRESOURCE_CAPTURE"] = str(unpacked / "samples/mip-depth-stencil.gfxr")
         if args.verify_android: environment["GFXRECON_GUI_CAPTURE_DEVICE"] = args.verify_android
         from test_workflow import registered_layer
         with registered_layer(True, unpacked / "tools/layer/VkLayer_gfxreconstruct.json"), registered_layer(True,unpacked/'tools/validation/VkLayer_khronos_validation.json'):
             tested = subprocess.run([str(unpacked / "gfxrecon_gui_tests.exe"), "--test"], cwd=unpacked,
-                                    env=environment, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+                                    env=environment, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=240)
         (build / "packaged-workflow.log").write_text(tested.stdout + tested.stderr, encoding="utf-8")
         if tested.returncode:
             raise ValueError(f"Packaged GUI capture/replay workflow failed:\n{tested.stdout}\n{tested.stderr}")

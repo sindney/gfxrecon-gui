@@ -66,8 +66,8 @@ void Workspace::DrawCompletedCapture(const std::filesystem::path& file) {
         ImGui::TableNextColumn();ImGui::BeginDisabled(Busy()&&!autoReplayRunning_);
         if(ImGui::Button("Open")){Open(display.u8string());ImGui::CloseCurrentPopup();focusFrames_=true;}
         ImGui::SameLine();ImGui::BeginDisabled(saved);
-        if(ImGui::Button(saved?"Saved":"Save"))RequestCaptureSave(source,false);
-        ImGui::EndDisabled();ImGui::SetItemTooltip("Keep this capture in its default location:\n%s",source.u8string().c_str());
+        if(ImGui::Button("Save"))RequestCaptureSave(source,false);
+        ImGui::EndDisabled();ImGui::SetItemTooltip("%s\n%s",saved?"Saved":"Keep this capture in its default location",destination.u8string().c_str());
         ImGui::SameLine();if(ImGui::Button("Save As..."))RequestCaptureSave(source,true);
         ImGui::SetItemTooltip("Choose a folder and filename. The default session copy is retained; shader edits are exported separately.");
         ImGui::EndDisabled();ImGui::EndTable();

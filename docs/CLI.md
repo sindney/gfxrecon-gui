@@ -281,7 +281,10 @@ Plain `perf` without either GPU option retains this legacy CPU wall-time mode.
 Use `--gpu-timing isolated-frame --frames N --runs N` for GPU-only measurements;
 explicit `--counter-profile none` also enables GPU timing while leaving counters off.
 
-The Android OEM Perfetto provider supports optional counter sampling.
+Android OEM Perfetto providers support optional counter sampling on Adreno and
+Mali devices with an accessible `gpu.counters` producer. This was tested on a
+Mali-G720-Immortalis MC12 (V2339A, Android 16); the GPU vendor alone does not
+guarantee that a phone exposes counters.
 Configure the bundled `gpu_counter_producer` helper and matching replay APK.
 All advertised metrics are exposed without a named-metric allowlist, including
 ALU, bandwidth and unfamiliar vendor counters. IDs and units are discovered at
@@ -295,6 +298,14 @@ in this frame window; averaging and clock alignment can blur boundaries, and
 short frames may have few samples. Bandwidth rates do not establish exact bytes
 per frame. Full/half fragment rates do not by themselves prove a particular
 shader used FP16 arithmetic.
+
+Mali MONOTONIC/RAW timestamps are mapped to BOOTTIME using direct trace clock
+snapshots. The report retains `counter_clock_bridges`, original timestamps in
+`gpu-counters-decoded.json`, observed offset variation and extrapolation distance.
+Snapshot acquisition latency and drift between snapshots remain unverified;
+observed offset variation is not an uncertainty bound. Missing/inconsistent clock
+evidence leaves counters unavailable. Discovery and helper failures retain
+`counter-producer.log` when available, alongside the selected producer identity.
 
 The report retains `runs[].gpu.samples`, each run's `gpu.counter_window`,
 `runs[].counters`, summary `metrics`, paired `comparisons`, CSV exports, and raw
@@ -310,7 +321,23 @@ incompatible numerical comparisons remain suppressed.
 .\gfxrecon-cli.exe capture windows run --exe tools/gfxrecon-gui-live.exe --cwd samples/test-res --trigger-after 2 --frames 3 --out captured
 ```
 
-Android sample (install the bundled debug sample APK first):
+Before Android capture, install the compatible **replay APK**, which supplies
+the capture layer. On Android 11+, install it with `--force-queryable` so the
+target can see it; this usually avoids target manifest changes. From the extracted
+Windows distribution:
+
+```powershell
+.\tools\adb.exe -s SERIAL install --force-queryable -g -t -r .\tools\android\replay-debug.apk
+```
+
+On Android 10, omit `--force-queryable`. The GUI's **Install replay APK** button
+selects the flag automatically. The target must be debuggable, actively rendering
+with Vulkan, and match the layer ABI (`arm64-v8a` for the bundled APKs). No capture
+SDK or extra storage permissions are needed in the target: CLI capture uses its
+private storage and `run-as`. See [Android setup](BUILD.md#android-capture-setup)
+for layer visibility alternatives and troubleshooting.
+
+Android sample (also install the bundled debug sample APK first):
 
 ```powershell
 .\gfxrecon-cli.exe capture arm --package com.lunarg.gfxreconstruct.test.test_apps.test_launcher --args triangle --frames 3 --out capture-session
@@ -323,6 +350,45 @@ Android sample (install the bundled debug sample APK first):
 after interruption. Keep the phone authorized and unlocked. See command `--help`
 for scheduling and device selection. Keep private captures and generated reports
 outside Git, for example under `.sessions/`.
+`capture arm` configures the layer before restarting the app; trigger recording
+after reaching the desired scene and use `capture end` to restore settings.
+An app already running before layer setup must be restarted to load the layer.
+Android recording events are merged from the layer file and game-scoped logcat,
+with duplicates and other sessions excluded. The session retains `layer.log`,
+`layer-logcat.log`, and `capture-events.log`. Short trimmed captures can still
+require a large initial resource snapshot. The CLI waits for a recording-finished
+event before retrieval; a timeout does not make an existing partial file valid.
+
+Advanced manual Android recording keeps the app and session armed between clips:
+
+```powershell
+.\gfxrecon-cli.exe capture arm --package com.example.game --frames 0 --out manual-session
+.\gfxrecon-cli.exe capture start --session manual-session
+# Interact with the app, then finish and retrieve the clip.
+.\gfxrecon-cli.exe capture stop --session manual-session
+# Repeat start/stop for more clips, then restore settings.
+.\gfxrecon-cli.exe capture end --session manual-session
+```
+
+`start` returns when recording begins; calling it again while recording does not
+start another clip. `stop` waits for finalization, retrieves and verifies the file,
+and leaves the app running. Repeating `stop` without another recording returns no
+new files. Stop before `end` to retrieve a manual clip; `end --close-game` closes
+the app. The GUI combines finishing a manual clip and ending the session into
+**End session**. The C++ capture API also retains separate `Capture`,
+`StopCapture`, and `End` operations for automation.
+
+Windows automation can use separate trigger and stop files:
+
+```powershell
+.\gfxrecon-cli.exe capture windows run --exe game.exe --cwd game-dir --trigger-file start.capture --frames 0 --stop-file stop.capture --out manual-windows
+```
+
+From another terminal, create `start.capture` when ready, then `stop.capture`
+to finish. Use fresh signal paths or remove old signal files before running;
+an existing file is acted on immediately. The command retrieves and verifies
+the finished capture and closes its launched app. Bounded Windows captures still
+use `--frames N` without `--stop-file`.
 
 ## Static relationship queries
 
@@ -391,6 +457,12 @@ cancellation/failure preserves an existing destination. Export destinations cann
 replace the index or recorded source/decoded evidence.
 
 ### Android artifact transfer integrity
+
+Uploads wait for the Android receiver to consume the declared byte count and
+verify SHA-256 before publishing the file. ADB's `exec-in` exit alone does not
+establish completion. Each upload uses its own staging files, so a failed or
+cancelled upload cannot replace a valid destination. Reusable capture-cache
+entries are also checksum-verified before replay uses them.
 
 When the bundled `artifact_transport` helper is available, Android replay sends
 artifact bundles with LZ4. The header precedes the compressed payload and records

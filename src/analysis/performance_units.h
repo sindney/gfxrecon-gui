@@ -8,7 +8,21 @@
 namespace gfx {
 struct PerformanceDisplayScale { double divisor=1;std::string unit; };
 // Display only: provider descriptors and saved sample values retain raw units.
-inline PerformanceDisplayScale PerformanceScale(const std::string& unit,double magnitude){
+inline PerformanceDisplayScale PerformanceScale(const std::string& rawUnit,double magnitude){
+    // Mali descriptors explicitly encode dimensionless factors as NONE.
+    // Simplify the label only; raw descriptor strings/arrays remain evidence.
+    const auto product=[](const std::string& text){
+        std::string result;std::istringstream input(text);std::string factor;
+        while(std::getline(input,factor,'*'))if(factor!="NONE"){
+            if(!result.empty())result+='*';result+=factor;
+        }
+        return result;
+    };
+    const auto slash=rawUnit.find('/');
+    auto unit=product(rawUnit.substr(0,slash));
+    if(unit.empty())unit="1";
+    if(slash!=std::string::npos){const auto denominator=product(rawUnit.substr(slash+1));if(!denominator.empty())unit+='/'+denominator;}
+    if(unit=="1"&&rawUnit!="1")return {1,"1"};
     std::string suffix=unit;
     bool scalable=true;
     if(unit=="BYTE/SECOND")suffix="B/s";

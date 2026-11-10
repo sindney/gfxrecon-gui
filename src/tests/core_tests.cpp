@@ -4,6 +4,7 @@
 #include "analysis/image_display.h"
 #include "analysis/image_details.h"
 #include "analysis/image_readback_layout.h"
+#include "analysis/image_subresources.h"
 #include "analysis/depth_sample.h"
 #include "platform/process.h"
 #include "shaders/syntax.h"
@@ -302,6 +303,17 @@ void ResourceTests(const std::filesystem::path& dir) {
     const auto fragment=gfx::CollectStageSamplers(capture,execution,{0,"VK_SHADER_STAGE_FRAGMENT_BIT","main"});
     CHECK(fragment.size()==2);CHECK(fragment[0].sampler==8&&!fragment[0].immutable);CHECK(fragment[1].sampler==7&&fragment[1].immutable);
     const auto vertex=gfx::CollectStageSamplers(capture,execution,{0,"VK_SHADER_STAGE_VERTEX_BIT","main"});CHECK(vertex.size()==1&&vertex[0].sampler==9);
+    gfx::Capture mipCapture;gfx::Event mipEvent;mipEvent.block=18;mipEvent.name="vkCmdDraw";mipEvent.commandBuffer=5;mipCapture.events.push_back(mipEvent);
+    gfx::Execution mipExecution;mipExecution.valid=mipExecution.primary=true;mipExecution.begin=10;mipExecution.submit=20;mipExecution.renderScope={11,30};mipCapture.executions.push_back(mipExecution);
+    mipCapture.objects[70]={"Image","",1,0,{{"mipLevels",5},{"arrayLayers",2}}};
+    gfx::Json mipMeta={{"category","input"},{"imageId",70},{"mipLevel",0},{"set",1},{"binding",4},{"arrayIndex",2},{"arrayLayer",1}};
+    gfx::EnrichImageMetadata(mipCapture,mipMeta);CHECK(mipMeta.at("mipLevels")==5);
+    const auto selector=gfx::InputMipDumpRequest(mipCapture,0,mipMeta,3);
+    const auto& descriptor=selector.at("Draw").back()[0].at("Descriptors")[0];
+    CHECK(descriptor.at("Set")==1&&descriptor.at("Binding")==4&&descriptor.at("ArrayIndex")==2);
+    CHECK(descriptor.at("SubresourceRange").at("BaseMipLevel")==3&&descriptor.at("SubresourceRange").at("LevelCount")==1&&descriptor.at("SubresourceRange").at("BaseArrayLayer")==1);
+    auto another=mipMeta;another["mipLevel"]=3;CHECK(gfx::ImageBindingKey(mipMeta)==gfx::ImageBindingKey(another));
+    another["binding"]=5;CHECK(gfx::ImageBindingKey(mipMeta)!=gfx::ImageBindingKey(another));
     const auto folder = dir / "resources"; std::filesystem::create_directory(folder);
     std::vector<uint8_t> data(8); const float f = 1.5f; const uint32_t u = 0xaabbccddu;
     std::memcpy(data.data(), &f, 4); std::memcpy(data.data() + 4, &u, 4);
@@ -314,13 +326,14 @@ void ResourceTests(const std::filesystem::path& dir) {
     bool rejected = false; try { gfx::ReadResourcePage(folder / "buffer.bin", 9); } catch (...) { rejected = true; }
     CHECK(rejected);
     { std::ofstream image(folder / "image.bmp", std::ios::binary); image << "fixture"; }
-    { std::ofstream meta(folder / "fixture_dr.json"); meta << R"([{"drawCallCommands":[{"drawIndex":143,"colorAttachments":[{"imageId":16,"format":"VK_FORMAT_R8G8B8A8_SRGB","subresources":[{"file":"/remote/image.bmp","mipLevel":0}]}]}]}])"; }
+    { std::ofstream meta(folder / "fixture_dr.json"); meta << R"([{"drawCallCommands":[{"drawIndex":143,"colorAttachments":[{"imageId":16,"levels":5,"layers":2,"format":"VK_FORMAT_R8G8B8A8_SRGB","subresources":[{"file":"/remote/image.bmp","mipLevel":0}]}]}]}])"; }
     const auto resources = gfx::CollectResources(folder);
     CHECK(resources.size() == 2);
     const auto found = std::find_if(resources.begin(), resources.end(), [](const auto& artifact) { return artifact.file.filename() == "image.bmp"; });
     CHECK(found != resources.end() && found->metadata.at("drawIndex") == 143 && found->metadata.at("imageId") == 16);
     CHECK(found->metadata.at("format") == "VK_FORMAT_R8G8B8A8_SRGB");
     CHECK(found->metadata.at("category")=="output");
+    CHECK(found->metadata.at("mipLevel")==0&&found->metadata.at("mipLevels")==5&&found->metadata.at("arrayLayers")==2);
     {std::ofstream meta(folder/"inputs_dr.json");meta<<R"([{"drawCallCommands":[{"drawIndex":143,"descriptors":{"fragment":[{"set":1,"binding":2,"arrayIndex":0,"imageId":16,"file":"/remote/image.bmp"},{"set":1,"binding":3,"arrayIndex":0,"imageId":16,"file":"/remote/image.bmp"}]}}]}])";}
     const auto slots=gfx::CollectResources(folder);CHECK(slots.size()==4);
     CHECK(std::count_if(slots.begin(),slots.end(),[](const auto& x){return x.metadata.value("category","")=="input"&&x.metadata.value("stage","")=="fragment";})==2);

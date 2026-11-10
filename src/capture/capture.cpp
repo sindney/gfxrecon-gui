@@ -1,4 +1,5 @@
 #include "capture/capture.h"
+#include "capture/live_capture.h"
 #include "core/artifacts.h"
 #include "platform/device_lock.h"
 
@@ -164,21 +165,25 @@ CaptureResult CaptureAndroid(const AdbConnection& adb, const CaptureRequest& r) 
         Save(r.output / "launch.json", Json{{"activity", activity}, {"output", started}});
         if (r.progress) r.progress("Recording the selected frames");
         const auto deadline = std::chrono::steady_clock::now() + r.timeout;
+        AndroidSessionState events;events.directory=r.output;events.serial=adb.serial;events.package=r.package;events.relative=relative;events.remote=remote;
+        const auto finished=[&]{
+            bool complete=false;
+            for(const auto& line:ReadAndroidLogLines(adb,events)){
+                complete|=line.text.find("Finished recording graphics API capture")!=std::string::npos;
+                AdvanceAndroidLog(events,line.end,false);
+            }
+            return complete;
+        };
         bool complete = false;
         while (std::chrono::steady_clock::now() < deadline) {
             if (adb.cancel && adb.cancel->load()) throw std::runtime_error("Capture cancelled.");
-            const auto log = adb.TryShell({"run-as", r.package, "cat", relative + "/l.txt"});
-            if (log.cancelled || log.timedOut) throw std::runtime_error("Capture interrupted; restoring device settings.");
-            if (log.Success() && log.output.find("Finished recording graphics API capture") != std::string::npos) { complete = true; break; }
+            if (finished()) { complete = true; break; }
             auto running = adb.TryShell({"pidof", r.package});
             if (!running.Success() && Trim(running.output).empty()) {
-                const auto finalLog = adb.TryShell({"run-as", r.package, "cat", relative + "/l.txt"});
-                complete = finalLog.Success() && finalLog.output.find("Finished recording graphics API capture") != std::string::npos;
+                complete = finished();
                 if (!complete) throw std::runtime_error("Application exited before capture completed. Check Vulkan support and the capture log.");
                 break;
             }
-            if (!log.Success() && log.output.find("No such file") == std::string::npos)
-                throw std::runtime_error("Capture device connection failed:\n" + log.output);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
         adb.Stop(r.package); launched = false;

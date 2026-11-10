@@ -2,6 +2,7 @@
 #include "gui/refresh_overlay.h"
 #include "core/log.h"
 #include "core/image_decode.h"
+#include "analysis/image_subresources.h"
 
 #include <algorithm>
 #include <iomanip>
@@ -23,12 +24,13 @@ void Workspace::OpenResource(const ResourceArtifact& artifact, uint64_t offset,b
     const auto file = artifact.file; const auto generation = selectionGeneration_;
     const bool astc=IsAstcArtifact(file,artifact.metadata);
     if(file.extension()==".bmp"||astc){
-        resourceMetadata_=artifact.metadata;
-        auto found=std::find_if(imageTabs_.begin(),imageTabs_.end(),[&](const auto& tab){return tab.file==file&&tab.metadata==artifact.metadata;});
+        auto enriched=artifact;if(capture_)EnrichImageMetadata(*capture_,enriched.metadata);
+        resourceMetadata_=enriched.metadata;
+        auto found=std::find_if(imageTabs_.begin(),imageTabs_.end(),[&](const auto& tab){return ImageBindingKey(tab.metadata)==ImageBindingKey(enriched.metadata);});
         if(found==imageTabs_.end()){
             if(imageTabs_.size()>=32)imageTabs_.erase(imageTabs_.begin());
-            imageTabs_.push_back(artifact);imageTab_=static_cast<int>(imageTabs_.size()-1);
-        }else imageTab_=static_cast<int>(found-imageTabs_.begin());
+            imageTabs_.push_back(enriched);imageTab_=static_cast<int>(imageTabs_.size()-1);
+        }else{*found=enriched;imageTab_=static_cast<int>(found-imageTabs_.begin());}
         imageTabRequest_=true;imageView_=artifact.metadata.value("category","")=="input"?2:1;selectedDrawImage_=file;
         if(astc){
             const auto png=DecodedPngPath(file);std::error_code ec;
@@ -53,7 +55,9 @@ void Workspace::OpenResource(const ResourceArtifact& artifact, uint64_t offset,b
             catch(const std::exception& error){resourceImage_.Release();status_=error.what();LOGE("resources")<<status_;}
             return;
         }
-        try{resourceImage_.LoadBmp(file,artifact.metadata.value("aspect",std::string{}),artifact.metadata.value("format",std::string{}));resourceMode_=1;if(activate){focusImage_=true;status_="Replay resource: "+file.u8string();LOGI("resources")<<status_;}}
+        try{resourceImage_.LoadBmp(file,artifact.metadata.value("aspect",std::string{}),artifact.metadata.value("format",std::string{}));
+            if(artifact.metadata.contains("overlayFile"))try{resourceImage_.SetOverlay(std::filesystem::u8path(artifact.metadata.at("overlayFile").get<std::string>()));}catch(const std::exception& error){status_="Geometry overlay unavailable: "+std::string(error.what());}
+            resourceMode_=1;if(activate){focusImage_=true;status_="Replay resource: "+file.u8string();LOGI("resources")<<status_;}}
         catch(const std::exception& error){resourceImage_.Release();status_=error.what();LOGE("resources")<<status_;}
         return;
     }
@@ -64,6 +68,39 @@ void Workspace::OpenResource(const ResourceArtifact& artifact, uint64_t offset,b
         else result.resourcePage = ReadResourcePage(file, offset);
         result.message = "Replay resource: " + file.u8string(); return result;
     }, JobKind::Resource);
+}
+void Workspace::SelectImageMip(uint32_t mip){
+    if(Busy()||!capture_||imageTab_<0||imageTab_>=int(imageTabs_.size())||selectedExecution_<0)return;
+    const auto source=imageTabs_[imageTab_];const auto key=ImageBindingKey(source.metadata);
+    if(mip==source.metadata.value("mipLevel",0u))return;
+    if(!source.metadata.contains("mipLevels")||mip>=source.metadata["mipLevels"].get<uint32_t>())return;
+    for(const auto& asset:resources_)if(ImageBindingKey(asset.metadata)==key&&asset.metadata.value("mipLevel",0u)==mip){OpenResource(asset,0,false);return;}
+    if(source.metadata.value("category","")!="input"){status_="Only the bound output mip is available for this attachment.";return;}
+    const auto capture=capture_;const auto execution=selectedExecution_,subdraw=selectedSubdraw_;const auto generation=selectionGeneration_;
+    const auto mode=replayMode_;const auto serial=androidSerial_;const auto tools=tools_;const auto memory=memoryTranslation_;const auto overrides=activeOverrides_;
+    Start("Reading texture mip "+std::to_string(mip),[this,capture,execution,subdraw,generation,source,key,mip,mode,serial,tools,memory,overrides]{
+        ReplayRequest request;request.capture=capture->source;request.expectedCaptureHash=capture->fingerprint;request.output=sessionsDir_/std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+        request.frame=capture->executions.at(execution).frame;request.dump=InputMipDumpRequest(*capture,execution,source.metadata,mip);
+        request.outputsOnly=true;request.descriptorImages=true;request.memoryTranslation=memory;request.overrides=overrides;
+        request.cacheDirectory=sessionsDir_.parent_path()/"replay-cache";
+        request.indirectSubdraw=subdraw;request.indirectDrawIdSafe=true;request.visualizationPipeline=capture->events.at(capture->executions.at(execution).event).pipeline;
+        const auto target=ResolveReplayTarget(mode,capture->android,serial,tools.at("adb"),&cancel_);
+        const auto replay=ReplayCapture(request,target,tools,&cancel_);
+        for(auto asset:replay.resources)if(ImageBindingKey(asset.metadata)==key&&asset.metadata.value("mipLevel",0u)==mip){
+            EnrichImageMetadata(*capture,asset.metadata);
+            if(IsAstcArtifact(asset.file,asset.metadata)){
+                const auto decoded=DecodeCompressedImage(asset.file,asset.metadata,DecodedPngPath(asset.file),tools,&cancel_);
+                if(decoded.value("status",std::string{})!="ok")throw std::runtime_error("Mip decode failed: "+decoded.value("reason",std::string("unknown")));
+            }
+            WorkspaceResult result;result.selectionGeneration=generation;result.mipResource=std::move(asset);result.message="Texture mip "+std::to_string(mip)+" ready";return result;
+        }
+        throw std::runtime_error("Replay did not return the selected texture mip; previous preview retained");
+    },JobKind::Resource);
+}
+void Workspace::RestoreImageSelection(){
+    if(!pendingImageSelection_)return;
+    const auto key=ImageBindingKey(*pendingImageSelection_);const auto mip=pendingImageSelection_->value("mipLevel",0u);pendingImageSelection_.reset();
+    for(const auto& asset:resources_)if(ImageBindingKey(asset.metadata)==key&&asset.metadata.value("mipLevel",0u)==mip){OpenResource(asset,0,false);return;}
 }
 void Workspace::DrawResources() {
     if (focusResources_) { ImGui::SetNextWindowFocus(); focusResources_ = false; }

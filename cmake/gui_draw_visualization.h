@@ -17,12 +17,13 @@ inline std::string directory,mode="original";
 inline uint64_t capture_pipeline=0;
 inline int subdraw=-1;
 inline bool enabled=false,applied=false,wire_supported=false,draw_id_safe=false;
+inline bool coverage_variant=false;
 inline std::string error;
 inline std::vector<uint32_t> uv_shader;
 inline void Report(){
     if(!enabled)return;
     std::ofstream out(directory+"/gui-visualization-result.json");
-    out<<nlohmann::json{{"protocol",mode=="silhouette"?3:mode=="uv"?2:1},{"mode",mode},{"pipeline",capture_pipeline},{"subdraw",subdraw},{"applied",applied},{"error",error},{"wireframe_supported",wire_supported}}.dump(2);
+    out<<nlohmann::json{{"protocol",mode=="silhouette"?3:mode=="uv"?2:1},{"mode",mode},{"pipeline",capture_pipeline},{"subdraw",subdraw},{"applied",applied},{"error",error},{"wireframe_supported",wire_supported},{"coverage_variant",coverage_variant}}.dump(2);
 }
 inline void Load(std::string path,const std::string& request){
     // The CLI resolves DumpResourcesOptions after constructing this consumer.
@@ -33,7 +34,7 @@ inline void Load(std::string path,const std::string& request){
     }
     std::lock_guard<std::mutex> lock(mutex);directory=path;enabled=false;applied=false;error.clear();pipelines.clear();wire_supported=false;mode="original";subdraw=-1;
     std::ifstream in(path+"/gui-visualization.json");if(!in)return;
-    const auto config=nlohmann::json::parse(in);mode=config.value("mode",std::string("original"));subdraw=config.value("subdraw",-1);capture_pipeline=config.value("pipeline",uint64_t(0));
+    const auto config=nlohmann::json::parse(in);mode=config.value("mode",std::string("original"));subdraw=config.value("subdraw",-1);capture_pipeline=config.value("pipeline",uint64_t(0));coverage_variant=config.value("coverage_variant",false);
     uv_shader.clear();
     if(mode=="uv"){
         std::ifstream shader(path+"/gui-uv.spv",std::ios::binary|std::ios::ate);
@@ -71,8 +72,8 @@ template<typename Table> inline void Prepare(Table table,PFN_vkCreateGraphicsPip
     if(mode=="wireframe"&&!wire_supported){error="The replay device does not support fillModeNonSolid";Report();return;}
     if(ci.pDynamicState)for(uint32_t i=0;i<ci.pDynamicState->dynamicStateCount;++i){const auto state=uint32_t(ci.pDynamicState->pDynamicStates[i]);if(state>=1000267000u){error="Extended dynamic pipeline states are not supported by this overlay";Report();return;}}
     Pipelines pair;pair.device=device;
-    pair.pass=(mode=="depth"||mode=="silhouette")?Create(table,func,device,ci,pass_shader,sizeof(pass_shader),false):mode=="uv"?Create(table,func,device,ci,uv_shader.data(),uv_shader.size()*4,false):Create(table,func,device,ci,solid_shader,sizeof(solid_shader),false);
-    if(mode=="depth")pair.fail=Create(table,func,device,ci,fail_shader,sizeof(fail_shader),true);
+    pair.pass=(mode=="depth"||mode=="silhouette")?Create(table,func,device,ci,coverage_variant?solid_shader:pass_shader,coverage_variant?sizeof(solid_shader):sizeof(pass_shader),false):mode=="uv"?Create(table,func,device,ci,uv_shader.data(),uv_shader.size()*4,false):coverage_variant?Create(table,func,device,ci,pass_shader,sizeof(pass_shader),false):Create(table,func,device,ci,solid_shader,sizeof(solid_shader),false);
+    if(mode=="depth")pair.fail=coverage_variant?Create(table,func,device,ci,pass_shader,sizeof(pass_shader),true):Create(table,func,device,ci,fail_shader,sizeof(fail_shader),true);
     if(pair.pass&&(mode!="depth"||pair.fail))pipelines[original]=pair;
     else{if(pair.pass)table->DestroyPipeline(device,pair.pass,nullptr);if(pair.fail)table->DestroyPipeline(device,pair.fail,nullptr);}
     Report();

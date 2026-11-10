@@ -75,6 +75,21 @@ Image ComposeDrawOutline(const Image& original,const Image& coverageA,const Imag
     }
     return result;
 }
+Image MakeDrawOverlay(const Image& coverageA,const Image& coverageB,const Image& colors,ImageSourceEncoding encoding,bool outline,uint8_t opacity){
+    Image result;result.width=colors.width;result.height=colors.height;result.rgba.resize(colors.rgba.size());
+    if(outline)return ComposeDrawOutline(result,coverageA,coverageB,2);
+    if(colors.rgba.size()!=size_t(colors.width)*colors.height*4||!colors.width||!colors.height)throw std::runtime_error("Invalid diagnostic image");
+    for(const auto* image:{&coverageA,&coverageB}){
+        if(image->width!=colors.width||image->height!=colors.height)throw ImageExtentMismatch(colors.width,colors.height,image->width,image->height);
+        if(image->rgba.size()!=colors.rgba.size())throw std::runtime_error("Invalid diagnostic coverage");
+    }
+    const ImageDisplayRange range;
+    for(size_t p=0;p<colors.rgba.size();p+=4){
+        const bool covered=coverageA.rgba[p]!=coverageB.rgba[p]||coverageA.rgba[p+1]!=coverageB.rgba[p+1]||coverageA.rgba[p+2]!=coverageB.rgba[p+2];
+        if(covered){for(int c=0;c<3;++c)result.rgba[p+c]=range.MapColor(colors.rgba[p+c],encoding,true);result.rgba[p+3]=opacity;}
+    }
+    return result;
+}
 Image ConvertToPng(const std::filesystem::path& source, const std::filesystem::path& png) {
     auto image = LoadImage(source);
     WritePng(png, image);

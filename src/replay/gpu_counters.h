@@ -9,7 +9,8 @@
 
 namespace gfx {
 // Small bounded decoders for the supported OEM Perfetto GPU protocol. Unknown
-// fields are skipped; malformed/interned/incremental clocks fail explicitly.
+// fields are skipped; absolute MONOTONIC/RAW clocks require BOOTTIME snapshot
+// bridges. Malformed/interned/incremental clocks fail explicitly.
 Json DecodeGpuCounterServiceState(const std::vector<uint8_t>& bytes);
 Json DecodeGpuCounterTrace(const std::vector<uint8_t>& bytes);
 Json SelectGpuCounters(const Json& serviceState, uint64_t periodNs, const std::string& profile);

@@ -112,11 +112,109 @@ Using compatible prebuilt APKs requires:
   editing shaders. A local macOS Vulkan runtime is unnecessary for device replay.
 
 Configure `adb` and `replay_apk` in **Settings > Tools and devices** or `local-tools.json`.
-Use **File > Capture application > Android** to select a device, check setup
-and install the replay APK. The sample APK (`test_apk`) is only needed for the
+Use **Settings > Tools and devices > Capture environment** to select a device,
+probe support and install the replay APK. **File > Capture application** offers
+device/app selection and launch/recording controls. The sample APK (`test_apk`) is only needed for the
 bundled Android test workload. Validation layers are only needed when enabling
 validation. Replay still depends on GPU/extension compatibility; use the original
 capture device when possible.
+
+### Android capture setup
+
+For this workflow, the target APK must be **debuggable** and actually use Vulkan
+for the scene being captured. A game supporting both Vulkan and OpenGL ES must
+be running its Vulkan renderer. The target process and capture layer must have
+matching ABIs; the bundled Android APKs use `arm64-v8a`. This setup loads the layer
+from a separate APK, supported on Android 10 and newer.
+
+1. Connect an authorized, unlocked phone with USB or wireless debugging enabled.
+2. Configure `adb` and `replay_apk` in **Settings > Tools and devices**, then use
+   **Capture environment > Install replay APK**. The replay APK supplies `VK_LAYER_LUNARG_gfxreconstruct`;
+   installing only the target app or test sample is insufficient. The test sample
+   APK is optional when capturing your own app.
+3. Open **File > Capture application**. It selects the first ready connected phone
+   independently of replay-device history; choose another device if needed, enter
+   or select the target app, and click **Launch**. The inspector checks `run-as`,
+   configures the GPU debug layer and capture output, and restarts the target so
+   the layer loads before Vulkan initialization. For on-demand capture, navigate
+   to the scene and trigger recording after arming.
+   Missing prerequisites open a focused setup dialog; a successful check proceeds
+   to launch without wizard pages. **Probe** is optional. Timing, arguments,
+   frame counts/ranges and the Windows working directory are shown inline.
+4. Use **Capture** when ready and **End session** to finish any recording and
+   restore its journaled settings. End session asks whether to close the app:
+   **Yes** closes it, **No** leaves it running. End session stays available while
+   the app runs, allowing a later Yes answer. The title-bar X only hides controls;
+   closing the question with its X cancels the end request. After an interrupted
+   session, use the recovery controls or CLI `capture restore`.
+
+The target normally needs no embedded GFXReconstruct library, SDK integration,
+or storage permission changes. Captures go into its private `files/` directory
+and are retrieved through `run-as`. Android also supports a manifest opt-in,
+`com.android.graphics.injectLayers.enable`, for external layer loading; this is
+unnecessary for an already debuggable app and does not replace the inspector's
+`run-as` requirement. See [Android's external-layer conditions](https://developer.android.com/ndk/guides/graphics/validation-layer#enable-app).
+
+### Android 11+ package visibility shortcut
+
+Android 11+ can hide an installed layer APK from the target's Vulkan loader.
+Install the **replay/layer APK** with `--force-queryable` to make it visible without
+rebuilding each target APK. **Settings > Tools and devices > Capture environment >
+Install replay APK** adds
+this flag on Android 11+; use that button again if the replay APK was previously
+installed with a plain `adb install`.
+
+Manual equivalent from the extracted Windows distribution:
+
+```powershell
+.\tools\adb.exe -s SERIAL install --force-queryable -g -t -r .\tools\android\replay-debug.apk
+```
+
+On Android 10, omit `--force-queryable`. Accept any installation confirmation on
+the phone. GFXReconstruct's [Android instructions](https://github.com/LunarG/gfxreconstruct/blob/dev/USAGE_android.md#android-11-and-newer)
+also note that some devices require repeating the installation for visibility
+to take effect.
+
+If you control the target's manifest, declaring the layer package inside
+`<manifest>` is an alternative to that install flag, not a requirement to do both:
+
+```xml
+<queries>
+    <package android:name="com.lunarg.gfxreconstruct.replay" />
+</queries>
+```
+
+### Android capture troubleshooting
+
+| Symptom | Check or action |
+| --- | --- |
+| `run-as` says the target is not debuggable | Install a debuggable build of the target; a profileable-only build is insufficient for this workflow. |
+| `Debug layer app ... not installed` even though the replay APK is present | Reinstall the replay APK through the GUI or with `--force-queryable` on Android 11+, then restart/arm the target again. |
+| `VK_ERROR_LAYER_NOT_PRESENT` | Check the replay APK installation/visibility and that its native layer ABI matches the target process. |
+| App runs but no capture is produced | Confirm Vulkan is active and capture was armed before the app restarted; inspect the capture log and `adb logcat -s gfxrecon vulkan`. |
+| Capture remains at “waiting for the game's next frame” | Update the inspector and reinstall its current replay APK through setup. Older layer builds can stop writing the file log after repeated Vulkan initialization. Current builds preserve that log and also read game-scoped logcat events; inspect `capture-events.log`, `layer.log`, and `layer-logcat.log`. A missing start event reports a timeout. |
+| `fopen ... permission denied` after manual configuration | Choose an app-writable capture path. The inspector normally chooses private storage; external paths can require separate permissions. |
+
+Successful layer initialization logs `Initializing GFXReconstruct capture layer`.
+Keep the capture session's logs and settings journal when diagnosing a failure.
+Starting a trimmed capture writes existing GPU resources before recording the
+requested frames. This can pause a large game for several seconds and produce
+a large file even for a short frame range. A file's existence or stable size
+alone does not establish completion; the inspector requires a recording-finished
+event before importing it.
+
+The backend's repeated file-logger initialization regression can be checked
+separately from game capture:
+
+```powershell
+cmake --build build-tools --config Release --target gfxrecon_capture_logging_test
+.\build-tools\Release\gfxrecon_capture_logging_test.exe .sessions\capture-logging-test.log
+```
+
+Create `.sessions` first if it does not exist. The test writes the supplied new
+log file and checks that both probe-instance and renderer-instance messages survive.
+
+### Building Android APKs
 
 Building the Android APKs from source additionally requires:
 
@@ -136,6 +234,23 @@ installing them and running device checks are separate steps. Device checks
 can also use compatible prebuilt debug APKs. APK compilation on
 this Mac has not been validated; the real-device workflow was tested using APKs
 already installed on the connected phone, with their hashes recorded locally.
+
+The generated Android sample manifest also declares visibility of the replay
+package. This is an alternative when the replay APK was installed manually;
+your own target can use the Android 11+ install shortcut above without adding
+a manifest query.
+
+The same unprivileged ARM64 helper launches Adreno and Mali OEM Perfetto counter
+producers. Build it and configure `gpu_counter_producer` to the output path; keep
+the generated `.capabilities.json` beside it:
+
+```sh
+python3 scripts/build_counter_producer.py --ndk-root PATH_TO_ANDROID_NDK --output build-tools/android/gpu-counter-producer
+```
+
+Counter availability requires runtime discovery and successful sample emission.
+No root or GPU clock changes are needed. See [Mali acceptance evidence](MALI_COUNTERS.md)
+for the tested device, clock handling, and reproducible checks.
 
 To exercise the real GUI capture/replay workflow on an authorized, unlocked
 device with `adb`, `replay_apk` and `test_apk` explicitly configured:

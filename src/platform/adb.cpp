@@ -51,8 +51,41 @@ std::string AdbConnection::Shell(const std::vector<std::string>& words, bool cle
     return Checked(TryShell(words, cleanup), "ADB command on " + serial);
 }
 void AdbConnection::Put(const std::string& package, const std::filesystem::path& source, const std::string& remote) const {
-    Checked(Run({"exec-in", AndroidCommand({"run-as", package, "sh", "-c", "cat > " + QuoteAndroidArgument(remote)})}, source),
-            "Artifact upload to " + serial);
+    // exec-in can return while Android's cat is still draining buffered stdin.
+    // Stage uniquely, acknowledge verified bytes on the receiver, then publish. A failed
+    // or cancelled transfer cannot overwrite a later upload to the same path.
+    const auto token=Sha256Text(remote+source.u8string()+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())).substr(0,24);
+    const auto pending=remote+".upload-"+token,ack=pending+".ack",ackPending=ack+".partial";
+    const auto operation="Artifact upload to "+serial;
+    const auto bytes=std::filesystem::file_size(source);
+    const auto digest=Sha256File(source,cancel);
+    try {
+        // exec-in can end stdin with EIO rather than clean EOF. Read the known
+        // byte count, then validate content instead of relying on cat's status.
+        const auto receive="if head -c "+std::to_string(bytes)+" > "+QuoteAndroidArgument(pending)+
+            " && upload_checksum=$(sha256sum "+QuoteAndroidArgument(pending)+") && test \"${upload_checksum%% *}\" = "+QuoteAndroidArgument(digest)+
+            "; then printf '%s' "+QuoteAndroidArgument(token)+" > "+QuoteAndroidArgument(ackPending)+
+            "; else printf 'failed' > "+QuoteAndroidArgument(ackPending)+"; fi; mv "+QuoteAndroidArgument(ackPending)+" "+QuoteAndroidArgument(ack);
+        Checked(Run({"exec-in",AndroidCommand({"run-as",package,"sh","-c",receive})},source),operation);
+        const auto publish="set -e; if test -f "+QuoteAndroidArgument(ack)+"; then upload_status=$(cat "+QuoteAndroidArgument(ack)+
+            "); test \"$upload_status\" = "+QuoteAndroidArgument(token)+" || { echo 'Upload receiver failed' >&2; exit 1; }; mv "+
+            QuoteAndroidArgument(pending)+" "+QuoteAndroidArgument(remote)+"; rm -f "+QuoteAndroidArgument(ack)+"; printf '%s' "+QuoteAndroidArgument(token)+"; fi";
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+        while(std::chrono::steady_clock::now()<deadline){
+            if(cancel&&cancel->load())throw std::runtime_error("Operation cancelled.");
+            const auto remaining=std::chrono::duration_cast<std::chrono::milliseconds>(deadline-std::chrono::steady_clock::now());
+            if(remaining.count()<=0)break;
+            const auto result=Run({"shell",AndroidCommand({"run-as",package,"sh","-c",publish})},{},{},false,remaining);
+            const auto output=Checked(result,operation);
+            if(output==token)return;
+            if(!output.empty())throw std::runtime_error(operation+" returned an unexpected receiver acknowledgement");
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        throw std::runtime_error(operation+" timed out waiting for the receiver to finish writing; the uploaded file was not published");
+    }catch(...){
+        try{Shell({"run-as",package,"rm","-f",pending,ack,ackPending},true);}catch(...){}
+        throw;
+    }
 }
 void AdbConnection::Get(const std::string& package, const std::string& source, const std::filesystem::path& destination) const {
     auto temporary = destination; temporary += ".partial";

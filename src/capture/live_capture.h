@@ -10,12 +10,13 @@ struct LiveCaptureOptions {
     ProcessRequest process;
     std::string layerDirectory, infoTool;
     bool android = false;
-    uint32_t frames = 3; // zero: record until Stop
+    uint32_t frames = 3; // zero: record until StopCapture or End
 };
 struct LiveCaptureState {
     LivePhase phase = LivePhase::Starting;
     std::string detail;
     bool gameRunning = false;
+    bool commandPending = false, endingSession = false;
     std::vector<std::filesystem::path> captures;
 };
 class LiveCaptureSession {
@@ -23,6 +24,7 @@ public:
     LiveCaptureSession(LiveCaptureOptions options, const AdbConnection& device = {"",""});
     ~LiveCaptureSession();
     LiveCaptureState State() const;
+    // Accepted requests update pending state before returning; duplicates are ignored.
     void Capture();
     void StopCapture();
     void End(bool closeGame = false);
@@ -38,7 +40,7 @@ private:
 struct AndroidArmOptions {
     std::filesystem::path directory;     // session directory; must not already hold a device journal
     std::string package, arguments;
-    uint32_t frames = 3;                 // frames per capture, fixed at launch by the layer (0: manual start/stop, GUI only)
+    uint32_t frames = 3;                 // frames per capture, fixed at launch by the layer (0: manual start/stop)
     bool launch = true;                  // false: journal and apply settings only; the next launch of the app is captured
     std::chrono::seconds timeout{120};   // layer initialisation wait
 };
@@ -46,7 +48,9 @@ struct AndroidSessionState {
     std::filesystem::path directory;
     std::string serial, package, relative, remote;
     uint32_t frames = 0, captures = 0;
-    uint64_t logOffset = 0;              // bytes of the layer log already consumed (complete lines only)
+    uint64_t logOffset = 0;              // bytes of logSource already consumed (complete lines only)
+    std::string logSource = "events-v1"; // merged session-scoped file/logcat events; legacy sessions use layer-file
+    int64_t lastLogcatReadMs = 0;        // polling throttle; not persisted
     int64_t lastTriggerMs = 0;           // system clock; the layer needs a frame boundary between triggers
     bool launched = false, ended = false;
     bool prepared = false;               // not persisted: the recovery journal exists and may need restoring
@@ -85,7 +89,7 @@ AndroidSessionState ArmAndroidCapture(const AdbConnection& adb, const AndroidArm
 // waits for a frame boundary since the previous change.
 void SetAndroidTrigger(const AdbConnection& adb, AndroidSessionState& state, bool enabled, bool cleanup = false);
 // Complete new layer-log lines since the persisted offset (does not advance it; see AdvanceAndroidLog).
-std::vector<AndroidLogLine> ReadAndroidLogLines(const AdbConnection& adb, const AndroidSessionState& state);
+std::vector<AndroidLogLine> ReadAndroidLogLines(const AdbConnection& adb, AndroidSessionState& state);
 void AdvanceAndroidLog(AndroidSessionState& state, uint64_t offset, bool save = true);
 // Pulls a finished capture into <session>/captures/capture-N.gfxr with a capture-N.json sidecar and verifies it.
 AndroidCaptureFile CollectAndroidCapture(const AdbConnection& adb, AndroidSessionState& state, const std::string& remoteFile);
@@ -94,6 +98,10 @@ AndroidCaptureFile CollectAndroidCapture(const AdbConnection& adb, AndroidSessio
 // `frames` 0 uses the armed count; any other value must equal it (the layer fixes it at launch).
 std::vector<AndroidCaptureFile> TriggerAndroidCapture(const AdbConnection& adb, const std::filesystem::path& directory, uint32_t frames,
                                                       std::chrono::seconds timeout, const std::function<void(const std::string&)>& progress = {});
+// Advanced manual controls: arm with frames=0, start without blocking until
+// recording finishes, then stop/retrieve while leaving the session armed.
+Json StartAndroidManualCapture(const AdbConnection& adb,const std::filesystem::path& directory,std::chrono::seconds timeout);
+std::vector<AndroidCaptureFile> StopAndroidManualCapture(const AdbConnection& adb,const std::filesystem::path& directory,std::chrono::seconds timeout);
 Json AndroidCaptureStatus(const AdbConnection& adb, const std::filesystem::path& directory);
 // Optionally closes the game, then restores every journaled setting. Throws AndroidRestoreConflict on conflicts.
 Json EndAndroidCapture(const AdbConnection& adb, const std::filesystem::path& directory, bool closeGame);

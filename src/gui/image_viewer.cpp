@@ -40,6 +40,7 @@ bool RotateButton(const char* id,bool right){
 }
 }
 void ImageViewer::AbsoluteDifference(const ImageViewer& baseline, const ImageViewer& modified) {
+    ClearOverlay();
     if (baseline.width_ != modified.width_ || baseline.height_ != modified.height_)
         throw std::runtime_error("Comparison images have different dimensions");
     width_ = baseline.width_; height_ = baseline.height_;
@@ -56,12 +57,23 @@ void ImageViewer::AbsoluteDifference(const ImageViewer& baseline, const ImageVie
     Upload();
 }
 void ImageViewer::Release() {
+    ClearOverlay();
     RetireTexture(texture_);
     texture_ = 0;
     width_ = height_ = 0; rgba_.clear(); depthValues_.clear(); name_.clear();sourceFormat_.clear();
     sourceEncoding_=ImageSourceEncoding::Srgb;scalar_=false;range_={};rangeDomainMaximum_=1;
 }
+void ImageViewer::ClearOverlay(){RetireTexture(overlayTexture_);overlayTexture_=0;}
+void ImageViewer::SetOverlay(const std::filesystem::path& path){
+    ClearOverlay();if(path.empty())return;
+    const auto overlay=LoadImage(path);
+    if(overlay.width!=uint32_t(width_)||overlay.height!=uint32_t(height_))throw ImageExtentMismatch(width_,height_,overlay.width,overlay.height);
+    glGenTextures(1,&overlayTexture_);glBindTexture(GL_TEXTURE_2D,overlayTexture_);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,width_,height_,0,GL_RGBA,GL_UNSIGNED_BYTE,overlay.rgba.data());glBindTexture(GL_TEXTURE_2D,0);
+}
 void ImageViewer::MakeThumbnail(const ImageViewer& image) {
+    ClearOverlay();
     if (!image.width_ || !image.height_) { Release(); return; }
     const auto scale = std::min(100.0 / image.width_, 68.0 / image.height_);
     width_ = std::max(1, static_cast<int>(image.width_ * scale)); height_ = std::max(1, static_cast<int>(image.height_ * scale));
@@ -87,6 +99,7 @@ bool ImageViewer::DrawThumbnail(const char* id, float height) const {
     return clicked;
 }
 void ImageViewer::LoadThumbnailBmp(const std::filesystem::path& path,const std::string& aspect,const std::string& format) {
+    ClearOverlay();
     std::ifstream input(path,std::ios::binary);std::array<unsigned char,54> header{};
     input.read(reinterpret_cast<char*>(header.data()),header.size());
     auto u16=[&](size_t n){uint16_t v;std::memcpy(&v,header.data()+n,2);return v;};
@@ -117,6 +130,7 @@ bool ImageViewer::DrawPreview(const char* id,ImVec2 size,bool selected)const{
     return clicked;
 }
 void ImageViewer::LoadBmp(const std::filesystem::path& path,const std::string& aspect,const std::string& format) {
+    ClearOverlay();
     std::ifstream input(path, std::ios::binary);
     std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(input)), {});
     auto u16 = [&](size_t at) { uint16_t v; std::memcpy(&v, bytes.data() + at, 2); return v; };
@@ -153,6 +167,7 @@ void ImageViewer::LoadBmp(const std::filesystem::path& path,const std::string& a
     Upload();
 }
 void ImageViewer::LoadPng(const std::filesystem::path& path,const std::string& format) {
+    ClearOverlay();
     auto image = gfx::LoadImage(path);  // decoded host-side (e.g. from raw ASTC blocks); opaque/straight alpha as written by astcenc
     width_ = static_cast<int>(image.width); height_ = static_cast<int>(image.height); rgba_ = std::move(image.rgba);
     fitToView_ = true;
@@ -180,6 +195,7 @@ void ImageViewer::Upload() {
 void ImageViewer::Draw(const std::string& details,const std::string& tooltip,const std::function<void()>& beforeChannels) {
     if (!texture_) { ImGui::TextWrapped("Render a frame to inspect its replay screenshot."); return; }
     if (beforeChannels) beforeChannels();
+    if(!texture_)return; // A cached mode switch may retire this image in the toolbar callback.
     const auto& style = ImGui::GetStyle();
     const float spacing = style.ItemSpacing.x;
     const float numberWidth = ImGui::GetFontSize() * 3;
@@ -264,6 +280,7 @@ void ImageViewer::Draw(const std::string& details,const std::string& tooltip,con
     ImGui::InvisibleButton("##image-content",size);
     const auto a=orientation_.Uv(0,0),b=orientation_.Uv(1,0),c=orientation_.Uv(1,1),d=orientation_.Uv(0,1);
     ImGui::GetWindowDrawList()->AddImageQuad(static_cast<ImTextureID>(texture_),origin,ImVec2(origin.x+size.x,origin.y),ImVec2(origin.x+size.x,origin.y+size.y),ImVec2(origin.x,origin.y+size.y),ImVec2(a[0],a[1]),ImVec2(b[0],b[1]),ImVec2(c[0],c[1]),ImVec2(d[0],d[1]));
+    if(overlayTexture_)ImGui::GetWindowDrawList()->AddImageQuad(static_cast<ImTextureID>(overlayTexture_),origin,ImVec2(origin.x+size.x,origin.y),ImVec2(origin.x+size.x,origin.y+size.y),ImVec2(origin.x,origin.y+size.y),ImVec2(a[0],a[1]),ImVec2(b[0],b[1]),ImVec2(c[0],c[1]),ImVec2(d[0],d[1]));
     if (ImGui::IsItemHovered()) {
         if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
             ImGui::SetScrollX(ImGui::GetScrollX() - ImGui::GetIO().MouseDelta.x);

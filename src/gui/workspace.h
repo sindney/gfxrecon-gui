@@ -72,7 +72,10 @@ struct WorkspaceResult {
     int dumpExecution = -1;
     std::optional<ResourcePage> resourcePage;
     std::filesystem::path resourceImage;
+    std::optional<ResourceArtifact> mipResource;
     bool captureSetupReady = false;
+    bool captureProbe = false;
+    std::string captureSetupIssue, captureSetupError;
     bool deferReplay = false;
     std::shared_ptr<LiveCaptureSession> liveSession;
     std::shared_ptr<MeshData> mesh;
@@ -114,6 +117,9 @@ public:
     const ImageViewer& SelectedImage() const {return resourceImage_;}
     const Json& ValidationReport() const {return validationReport_;}
 #ifdef IMGUI_TEMPLATE_TESTS
+    void OpenImageForTests(const ResourceArtifact& asset){pendingImageSelection_=asset.metadata;}
+    const Json& ImageMetadataForTests()const{return resourceMetadata_;}
+    size_t ImageDocumentCountForTests()const{return imageTabs_.size();}
     void SetPerformanceFixture(Json value, bool supported = false) { perfResult_ = std::move(value); perfCapabilities_ = {{"available", supported}, {"detail", "Fixture: no device is queried"}}; perfFixture_ = true; perfPlotCache_.clear(); perfPlotsInitialized_ = false; perfSettingsRequest_ = perfResult_.is_object() ? -1 : 1; }
     const std::set<std::string>& PerformanceSelectedMetricsForTests() const { return perfPlotMetrics_; }
     void StartPerformanceJobFixture(uint32_t durationMs = 400);
@@ -125,6 +131,15 @@ public:
     void SetReplayDevicesForTests(std::vector<AndroidDevice> devices){devices_=std::move(devices);}
     void ConfigureArtifactTransportFixture(const std::string& path){tools_["artifact_transport"]=path;}
     void ConfigureAdbFixture(const std::string& path){tools_["adb"]=path;RefreshToolAvailability();}
+    void SetCaptureUiFixture(std::vector<AndroidDevice> devices,std::optional<LiveCaptureState> state={},const std::string& history="old-phone"){
+        captureUiFixture_=true;captureStateFixture_=std::move(state);devices_=std::move(devices);androidSerial_=history;captureMode_=0;capturePackage_="test.app";
+        captureSerial_.clear();captureStyle_=0;captureLength_=3;captureSetupReady_=false;captureError_.clear();
+        captureDiscoverPending_=captureInspectPending_=captureLaunchPending_=false;
+    }
+    void ClearCaptureUiFixture(){captureUiFixture_=false;captureStateFixture_.reset();devices_.clear();deviceInfo_.reset();androidSerial_.clear();captureSerial_.clear();captureError_.clear();captureRepairOpen_=false;}
+    void SetCaptureUiStateForTests(std::optional<LiveCaptureState> state){captureStateFixture_=std::move(state);}
+    const std::string& CaptureSerialForTests()const{return captureSerial_;}
+    const std::string& ReplaySerialForTests()const{return androidSerial_;}
     void LoadMeshFixture(std::shared_ptr<MeshData> data){const auto generation=selectionGeneration_;Start("Loading mesh fixture",[data,generation]{WorkspaceResult r;r.mesh=data;r.meshPreview=true;r.selectionGeneration=generation;return r;});}
     void LoadDrawFixture(const std::filesystem::path& directory){const auto generation=selectionGeneration_;const auto execution=selectedExecution_;const auto block=capture_->events[selectedEvent_].block;Start("Loading draw fixture",[directory,generation,execution,block]{WorkspaceResult r;r.replayResult=true;r.drawPreview=true;r.descriptorImages=true;r.resources=CollectResources(directory);r.selectionGeneration=generation;r.dumpExecution=execution;r.dumpBlock=block;return r;});}
 #endif
@@ -168,7 +183,12 @@ public:
     const MeshViewer& Mesh() const { return mesh_; }
     bool CaptureSessionActive() const { return liveCapture_ && liveCapture_->Active(); }
     void EndCaptureSession(bool closeGame = false) { if (liveCapture_) liveCapture_->End(closeGame); }
-    std::optional<LiveCaptureState> LiveState() const { return liveCapture_ ? std::optional<LiveCaptureState>(liveCapture_->State()) : std::nullopt; }
+    std::optional<LiveCaptureState> LiveState() const {
+#ifdef IMGUI_TEMPLATE_TESTS
+        if(captureUiFixture_)return captureStateFixture_;
+#endif
+        return liveCapture_ ? std::optional<LiveCaptureState>(liveCapture_->State()) : std::nullopt;
+    }
 private:
     void Start(const std::string& name, std::function<WorkspaceResult()> work, JobKind kind = JobKind::Tools, uint32_t frame = 0);
     void CompleteOperation(PanelState state, const std::string& detail);
@@ -208,6 +228,8 @@ private:
     void DrawCapture();
     void DrawBuffer();
     void OpenResource(const ResourceArtifact& artifact, uint64_t offset = 0,bool activate = true);
+    void SelectImageMip(uint32_t mip);
+    void RestoreImageSelection();
     void StartCapture();
     void StartLiveCapture();
     void DrawLiveCapture();
@@ -215,9 +237,14 @@ private:
     void RequestCaptureSave(const std::filesystem::path& source, bool saveAs);
     std::filesystem::path CaptureSaveDestination(const std::filesystem::path& source);
     void PollLiveCapture();
-    void InspectCaptureDevice();
+    void SelectCaptureDevice(bool first=false);
+    bool CaptureTargetLocked() const;
+    void DrawCaptureDevice();
+    void DrawCaptureSetup();
+    void DrawCaptureEnvironment();
+    void PollCaptureSetup();
     void InstallReplayApk(bool sample = false);
-    void CheckCaptureSetup();
+    void CheckCaptureSetup(bool launchAfter=false);
     void SetCaptureProgress(const std::string& phase);
     void RefreshRecoveries();
     static WorkspaceResult ImportCapture(const std::filesystem::path& file, const std::filesystem::path& session,
@@ -305,7 +332,14 @@ private:
     std::vector<AndroidDevice> devices_;
     std::optional<AndroidInfo> deviceInfo_;
     bool showCapture_ = false, captureInProgress_ = false, captureSetupReady_ = false;
-    int captureStep_ = 0;
+    std::string captureSerial_, captureSetupIssue_;
+    bool captureSelectFirst_=false,captureDiscoverPending_=false,captureInspectPending_=false;
+    bool captureLaunchPending_=false,captureResumeLaunch_=false,captureRepairOpen_=false,captureOpenTools_=false,captureFocusTools_=false;
+    bool captureSettingsVisited_=false;
+#ifdef IMGUI_TEMPLATE_TESTS
+    bool captureUiFixture_=false;
+    std::optional<LiveCaptureState> captureStateFixture_;
+#endif
     std::string captureError_, capturePhase_;
     std::mutex capturePhaseMutex_;
     std::filesystem::path captureSession_;
@@ -325,6 +359,7 @@ private:
     std::string objectLabel_;
     ImageViewer resourceImage_;
     std::vector<ResourceArtifact> imageTabs_;
+    std::optional<Json> pendingImageSelection_;
     int imageTab_ = -1;
     bool imageTabRequest_ = false;
     int imageSidebar_ = 1;

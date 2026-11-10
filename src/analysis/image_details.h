@@ -13,7 +13,11 @@ inline std::string ImageDetails(const Json& m){
         if(dimensions.size()>2&&dimensions[2].is_number()&&dimensions[2].get<uint64_t>()>1)text+=" x "+std::to_string(dimensions[2].get<uint64_t>());
     }
     text+="\nMip "+number("mipLevel")+" | Layer "+number("arrayLayer");
+    if(m.contains("mipLevels"))text+=" | "+number("mipLevels")+" mip levels";
+    else text+=" | mip count unknown";
     if(m.value("category","")=="input")text+="\n"+m.value("stage",std::string("Shader"))+" | Set "+number("set")+" | Binding "+number("binding")+"["+number("arrayIndex")+"]";
+    if(m.contains("overlayFile"))text+="\nGeometry overlay; source depth/stencil values are unchanged. Coverage does not imply depth/stencil writes.";
+    if(m.contains("overlayUnavailable"))text+="\nGeometry overlay unavailable: "+m.value("overlayUnavailable",std::string{});
     return text;
 }
 }

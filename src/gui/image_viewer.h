@@ -19,6 +19,9 @@ public:
     void Draw(const std::string& details = {}, const std::string& tooltip = {},
               const std::function<void()>& beforeChannels = {});
     void Release();
+    void SetOverlay(const std::filesystem::path& path);
+    void ClearOverlay();
+    bool HasOverlay()const{return overlayTexture_!=0;}
     void AbsoluteDifference(const ImageViewer& baseline, const ImageViewer& modified);
     void MakeThumbnail(const ImageViewer& image);
     bool DrawThumbnail(const char* id, float height = 68) const;
@@ -37,6 +40,7 @@ public:
 private:
     void Upload();
     unsigned texture_ = 0;
+    unsigned overlayTexture_ = 0;
     int width_ = 0, height_ = 0;
     float zoom_ = 0.5f;
     bool fitToView_ = true;

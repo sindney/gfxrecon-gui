@@ -40,6 +40,8 @@ Leave **Counters** unchecked for GPU duration only, or enable it to collect all
 advertised provider counters supported together. There is no precision/bandwidth
 filter. Provider co-collection limits leave explicit unavailable rows rather
 than hiding metrics. **Counter us** appears while counters are enabled.
+Adreno and Mali use this same flow when the phone exposes an accessible OEM
+Perfetto counter producer. Names and units come from that device's catalog.
 
 **Probe** optionally checks the GPU backend and provider. **Start** validates the
 current settings and launches fresh
@@ -63,6 +65,9 @@ preserves the selection, so clearing it restores previously selected graphs.
 Bandwidth and other rates use readable SI units (KB/s, MB/s, GB/s, etc.) shared
 by each metric's baseline/modified statistics, graph and tooltip. Saved reports
 and exports retain the original provider units and raw values; 1 MB is 1000000 B.
+Mali's explicit dimensionless unit factors are simplified for display:
+`PERCENT/NONE` becomes `%`, `BYTE/NONE` uses B/KB/MB, and `NONE/NONE` becomes `1`.
+Byte counts retain count semantics; they are not converted into bandwidth rates.
 Plots use milliseconds from each frame window's start, and each outer run is a
 separate overlay. Points and lines preserve real zeros and missing-data gaps;
 short windows may contain few counter samples. Right-click a graph for **Fit**.
@@ -96,7 +101,8 @@ Click an **Inputs** or **Outputs** thumbnail to open its image tab. **Frame
 presentation** shows the completed frame. Image identity, format, mip and slice
 are in the footer; hover it for details. Image previews have two stable rows:
 
-- Draw visualization and indirect-subdraw selection, with equal fixed widths,
+- Draw visualization, indirect-subdraw selection and the **Mip** dropdown share
+  the same compact width,
   then **| Rotate / Flip H/V | Fit / scale**.
 - RGB mask, sRGB and display range, including Auto/Reset.
 
@@ -111,6 +117,29 @@ selecting a normal or indirect draw does not change the toolbar layout.
 | RGB / sRGB | Inspect channels or encode the displayed linear RGB values for sRGB |
 | Rotate / Flip | Change display orientation without changing source bytes |
 | Range / Auto / Reset | Adjust black/white points or restore the display range |
+| Mip | Select an image level; missing input levels are read on demand |
+
+**Mip 0** means the base level, not zero mip levels. The dropdown always stays
+visible alongside the other preview controls and uses a short label such as
+**Mip 2**. It is gray when there is no usable choice, including frame presentation
+and single-level images. Hover it for the total level count from image metadata.
+Selecting an input mip fetches only that binding's requested level; subsequent
+visits reuse it in the current draw snapshot. Compressed ASTC levels are decoded
+at their own dimensions. Output previews expose the levels present in their
+readback; other levels are disabled. The selection describes the image being inspected, not a shader's
+per-fragment LOD. If creation metadata is unavailable, the count is shown as unknown.
+The bundled **File > Samples > mip-depth-stencil.gfxr** capture provides four
+distinctly colored levels for trying the controls.
+
+Draw diagnostics can also appear over **Depth** and **Stencil** previews when a
+matching color diagnostic is available. The annotation is a separate display
+layer: source scalar data, full-precision depth readout and range controls remain
+unchanged. Geometry coverage is not evidence that the draw wrote depth or stencil.
+**Depth pass & fail** compares geometry against depth before the selected draw;
+it does not emulate fragment discard, stencil tests or shader-written depth.
+Passes without a compatible color target, unsupported diagnostic pipelines and
+attachments with mismatched extents retain the original image and explain the
+limitation in its tooltip.
 
 **sRGB** is enabled by default. The viewer first interprets source pixels using
 the captured resource format, applies the display range in linear RGB, then
@@ -186,14 +215,58 @@ resources are explained in the panel.
 
 ## Capture and settings
 
-Open **File > Capture application** and follow the target/setup/recording steps.
-On-demand capture arms the process first; trigger after it reaches the desired
-scene. Completed captures offer **Save** and **Save As**.
+Open **File > Capture application**, choose a device and app, then click **Launch**.
+Click **Capture** once the scene is ready. Launch checks the environment automatically;
+missing prerequisites open focused setup guidance. **Probe** is optional.
+The first ready connected phone is selected when opening idle capture controls,
+independently of the saved replay device. An explicit selection stays while connected.
 
 Windows sample: `tools/gfxrecon-gui-live.exe`, working directory `samples/test-res`.
-For Android, connect an authorized device and install the bundled sample/replay
-APKs from the setup controls. The target must support capture; restart it when
-enabling its capture layer.
+
+For Android:
+
+1. Connect and unlock an authorized phone. The target must be a debuggable app
+   actively using Vulkan; the bundled layer must match the target process ABI.
+2. In **Settings > Tools and devices > Capture environment**, click **Install replay APK**. This APK supplies the
+   capture layer even when capturing a different app. **Install test sample** is
+   optional and only needed to try our sample workload.
+3. On Android 11+, the installer automatically uses `--force-queryable` so the
+   target can see the layer APK. If it was installed manually without that flag,
+   use **Install replay APK** again; target manifest changes are usually unnecessary.
+4. Choose the app in capture controls and click **Launch**, then **Capture** when
+   ready. The default records the selected number of **Frames**. Timing and arguments
+   are inline, with a working directory for Windows: **Manual** records until **End session**; **Scheduled**
+   records its configured startup frame range and closes the launched app afterward.
+
+**Launch**, **Capture**, and **End session** stay visible;
+unavailable actions are gray, with tooltips explaining their purpose and availability.
+**Capture** disables immediately when clicked and becomes available again after a
+bounded recording finishes and is retrieved. A failed capture requires a new launch.
+**End session** finishes and retrieves any recording, then restores settings. It asks whether to close the
+app: **Yes** ends capture and closes it; **No** ends capture while keeping it running.
+After choosing Yes or No, End session stays disabled until the operation finishes or fails.
+End session remains available while the app runs, so you can later choose Yes.
+Closing that question with its X cancels the request. The capture dialog's title-bar
+X only hides controls; reopening preserves the session. Completed captures offer **Open**,
+**Save**, and **Save As...**; **Save** becomes disabled after confirmation and its
+tooltip retains the destination.
+
+Advanced manual start/stop without ending the session is available through the
+[CLI](CLI.md#capture) and capture API.
+
+Use capture's **Settings** button or open **Settings > Tools and devices** directly
+to edit the environment, probe a device, install APKs, or configure tool paths.
+Setup repair offers **Retry** after fixing its reported prerequisite.
+
+The inspector writes to the target's private storage and retrieves captures with
+`run-as`; no embedded capture SDK or extra target storage permissions are needed.
+If the log reports a missing layer APK or `VK_ERROR_LAYER_NOT_PRESENT`, check
+[package visibility and capture troubleshooting](BUILD.md#android-11-package-visibility-shortcut).
+Starting recording can pause the game while its existing GPU resources are saved.
+Android sessions retain `layer.log`, game-scoped `layer-logcat.log`, and a merged
+`capture-events.log`; recording still completes when only logcat receives the
+layer's start/finish messages. A missing start event reports a timeout. Partial
+files are retained for diagnosis and are not imported as completed captures.
 
 Use the Events phone button, immediately after the clock button, to select the
 replay device. Its tooltip shows the selected target. Choose Automatic, the local

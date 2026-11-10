@@ -67,6 +67,15 @@ void WaitForWorkspace(ImGuiTestContext* ctx, gfx::Workspace& workspace) {
         if (!workspace.Busy() && !workspace.HasPendingWork()) { ctx->Yield(2); if (!workspace.Busy() && !workspace.HasPendingWork()) return; }
     } while (std::chrono::steady_clock::now() < deadline && !ctx->IsError());
 }
+void CaptureTargetAction(ImGuiTestContext* ctx,gfx::Workspace& workspace,const std::string& label){
+    WaitForWorkspace(ctx,workspace);ctx->SetRef("//Capture application");ctx->ItemClick("##capture-device");
+    ctx->SetRef("//$FOCUSED");ctx->ItemClick(label.c_str());ctx->Yield(2);WaitForWorkspace(ctx,workspace);ctx->SetRef("//Capture application");
+}
+void CloseCaptureControls(ImGuiTestContext* ctx){ctx->WindowClose("//Capture application");ctx->Yield(2);}
+void EndCaptureChoice(ImGuiTestContext* ctx,bool closeApp){
+    ctx->SetRef("//Capture application");ctx->ItemClick("End session");ctx->SetRef("//End session");
+    ctx->ItemClick(closeApp?"Yes":"No");ctx->SetRef("//Capture application");
+}
 std::vector<std::string> PerfLogSnapshot() {
     std::vector<std::string> result;
     for (const auto& record : Log::Instance().RecentRecords())
@@ -95,7 +104,7 @@ void ReviewScreenshot(ImGuiTestContext* ctx,const char* suffix){
     const auto folder=std::getenv("GFXRECON_GUI_REVIEW_DIR");if(!folder)return;
     std::filesystem::create_directories(std::filesystem::u8path(folder));ctx->Yield(4);
     const auto path=std::filesystem::u8path(folder)/(std::string(suffix)+".png");const auto* viewport=ImGui::GetMainViewport();ctx->CaptureReset();
-    const int flags=std::string(suffix)=="phone-unlock-notice"||(std::string(suffix)=="settings-dialog"||std::string(suffix)=="settings-tools"||std::string(suffix)=="replay-device")||std::string(suffix).rfind("perf-popup",0)==0?ImGuiCaptureFlags_IncludePopups:0;
+    const int flags=std::string(suffix)=="phone-unlock-notice"||(std::string(suffix)=="settings-dialog"||std::string(suffix)=="settings-tools"||std::string(suffix)=="replay-device")||std::string(suffix).rfind("perf-popup",0)==0||std::string(suffix).rfind("capture-",0)==0?ImGuiCaptureFlags_IncludePopups:0;
     ctx->CaptureArgs->InCaptureRect=ImRect(viewport->Pos,ImVec2(viewport->Pos.x+viewport->Size.x,viewport->Pos.y+viewport->Size.y));
     std::snprintf(ctx->CaptureArgs->InOutputFile,sizeof(ctx->CaptureArgs->InOutputFile),"%s",path.u8string().c_str());IM_CHECK(ctx->CaptureScreenshot(flags));
 }
@@ -217,6 +226,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
                 gfx::WriteBmp(vars.directory / "linear.bmp", linear); gfx::WritePng(vars.directory / "linear.png", linear);
                 gfx::WriteBmp(vars.directory / "encoded.bmp", encoded); gfx::WritePng(vars.directory / "encoded.png", encoded);
                 gfx::WritePng(vars.directory / "modified.png", modified); gfx::WriteBmp(vars.directory / "depth.bmp", depth);
+                gfx::WritePng(vars.directory/"overlay.png",gfx::Image{2,1,{255,140,0,255,0,0,0,0}});
                 { const float values[]{0.25f, 0.75f}; std::ofstream sidecar(vars.directory / "depth.bmp.depth.bin", std::ios::binary);
                   sidecar.write(reinterpret_cast<const char*>(values), sizeof(values)); }
                 vars.baseline.LoadPng(vars.directory / "linear.png", "VK_FORMAT_R16G16B16A16_SFLOAT");
@@ -234,7 +244,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
                 vars.viewer.LoadBmp(std::filesystem::u8path(std::getenv("GFXRECON_GUI_IMAGE_PREVIEW")), "COLOR", "VK_FORMAT_B10G11R11_UFLOAT_PACK32");
             }
             ImGui::SetNextItemWidth(160);
-            if (ImGui::Combo("Source", &vars.source, "Linear BMP\0Linear PNG\0sRGB PNG\0Presentation\0Depth\0Difference\0Empty\0")) {
+            if (ImGui::Combo("Source", &vars.source, "Linear BMP\0Linear PNG\0sRGB PNG\0Presentation\0Depth\0Difference\0Empty\0Depth + overlay\0")) {
                 switch (vars.source) {
                 case 0: vars.viewer.LoadBmp(vars.directory / "linear.bmp", "COLOR", "VK_FORMAT_R16G16B16A16_SFLOAT"); break;
                 case 1: vars.viewer.LoadPng(vars.directory / "linear.png", "VK_FORMAT_R16G16B16A16_SFLOAT"); break;
@@ -243,6 +253,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
                 case 4: vars.viewer.LoadBmp(vars.directory / "depth.bmp", "DEPTH", "VK_FORMAT_D32_SFLOAT"); break;
                 case 5: vars.viewer.AbsoluteDifference(vars.baseline, vars.modified); break;
                 case 6: vars.viewer.Release(); break;
+                case 7: vars.viewer.LoadBmp(vars.directory/"depth.bmp","DEPTH","VK_FORMAT_D32_SFLOAT");vars.viewer.SetOverlay(vars.directory/"overlay.png");break;
                 }
             }
             ImGui::SameLine();
@@ -286,8 +297,13 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         ctx->ComboClick("Source/Depth"); ctx->Yield(); IM_CHECK(vars.viewer.HasDepthValues()); IM_CHECK_EQ(vars.viewer.DisplayPixel(0,0)[0], 64);
         IM_CHECK((ctx->ItemInfo("sRGB").ItemFlags & ImGuiItemFlags_Disabled) != 0); ctx->ItemClick("Auto");
         IM_CHECK(std::abs(vars.viewer.Range().minimum - 0.25f) < 0.00001f && std::abs(vars.viewer.Range().maximum - 0.75f) < 0.00001f);
+        ctx->ComboClick("Source/Depth + overlay");ctx->Yield();IM_CHECK(vars.viewer.HasOverlay()&&vars.viewer.HasDepthValues());
+        const auto scalarRaw=vars.viewer.Pixel(0,0);IM_CHECK_EQ(scalarRaw[0],64);
+        ctx->ItemClick("Auto");IM_CHECK(vars.viewer.HasOverlay()&&vars.viewer.Pixel(0,0)==scalarRaw);
+        IM_CHECK(std::abs(vars.viewer.Range().minimum-.25f)<.00001f&&std::abs(vars.viewer.Range().maximum-.75f)<.00001f);
         const auto baselineRaw = vars.baseline.Pixel(0,0); ctx->ComboClick("Source/Difference"); ctx->Yield();
         IM_CHECK(!vars.viewer.HasDepthValues()); IM_CHECK(vars.viewer.SourceEncoding() == gfx::ImageSourceEncoding::Linear);
+        IM_CHECK(!vars.viewer.HasOverlay());
         IM_CHECK_EQ(vars.viewer.Range().minimum, 0.0f); IM_CHECK_EQ(vars.viewer.Range().maximum, 1.0f);
         IM_CHECK((ctx->ItemInfo("sRGB").ItemFlags & ImGuiItemFlags_Disabled) == 0);
         IM_CHECK_EQ(vars.viewer.Pixel(0,0)[0], 64); IM_CHECK_EQ(vars.viewer.DisplayPixel(0,0)[0], 137);
@@ -426,7 +442,9 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         ctx->SetRef("//Events");
         const auto phone=ctx->ItemInfo("##event-replay-device");
         IM_CHECK(phone.RectFull.Min.x>=ctx->ItemInfo("##event-perf").RectFull.Max.x);
-        ctx->MouseMoveToPos(phone.RectFull.GetCenter());ctx->Yield(60);
+        ctx->MouseMoveToPos(phone.RectFull.GetCenter());
+        // Fast test runs can render 60 frames before the hover delay expires.
+        ctx->SleepNoSkip(ImGui::GetStyle().HoverDelayNormal + .2f, 1.0f / 60);
         IM_CHECK(VisibleUiText(ctx).find(workspace.ReplayDeviceLabel())!=std::string::npos);
         ctx->SetRef("//Perf");ctx->MouseMove("Open...");ctx->Yield(3);
         const auto graphMenu = [&] {
@@ -488,6 +506,43 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         IM_CHECK(workspace.PerformanceOpen());
         IM_CHECK(ctx->WindowInfo("//Perf").Window->DockId == dockId);
         ctx->WindowClose("//Perf");
+    };
+
+    t = IM_REGISTER_TEST(engine, "performance", "Mali counters retain raw units with readable plots");
+    t->UserData = app;
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        using gfx::Json;
+        auto& workspace = static_cast<App*>(ctx->Test->UserData)->Workspace();
+        const uint64_t origin = 1000000000;
+        const char* names[]{"GPU utilization", "External memory read", "Shader core count"};
+        const char* units[]{"PERCENT/NONE", "BYTE/NONE", "NONE/NONE"};
+        const double values[]{25,2500000,12};
+        Json report{{"schema","gfxrecon-perf/1"},{"status","complete"},{"mode","single-frame"},{"runs_requested",1},
+            {"policy",{{"frame",1},{"counter_profile","all"}}},{"metrics",Json::array()},{"runs",Json::array()}};
+        Json counters=Json::array();
+        for(int i=0;i<3;++i){
+            report["metrics"].push_back({{"key","counter_"+std::to_string(65536+i)},{"counter_id",65536+i},{"name",names[i]},
+                {"unit",units[i]},{"baseline",gfx::SummarizePerfValues({values[i],values[i]})}});
+            counters.push_back({{"id",65536+i},{"name",names[i]},{"unit",units[i]},
+                {"samples",Json::array({{{"timestamp_boot_ns",origin},{"value",values[i]}},{{"timestamp_boot_ns",origin+1000000},{"value",values[i]}}})},
+                {"summary",{{"coverage_estimate",1},{"gap_threshold_ns",4000000}}}});
+        }
+        report["runs"].push_back({{"variant","baseline"},{"index",1},
+            {"gpu",{{"counter_window",{{"status","available"},{"start_boot_ns",origin},{"end_boot_ns",origin+1000000}}}}},
+            {"counters",{{"status","complete"},{"period_ns",1000000},{"counters",counters}}}});
+        const auto original=report;
+        workspace.SetPerformanceFixture(std::move(report));workspace.OpenPerformance();ctx->Yield(5);ctx->SetRef("//Perf");
+        const auto text=VisibleUiText(ctx);
+        IM_CHECK(text.find("%")!=std::string::npos&&text.find("MB")!=std::string::npos);
+        for(int i=0;i<3;++i){
+            ImPlotPlot* graph=nullptr;
+            for(int j=0;j<GImPlot->Plots.GetBufSize();++j){auto* candidate=GImPlot->Plots.GetByIndex(j);
+                if(candidate->TitleOffset>=0&&std::string(candidate->GetTitle())==names[i]){graph=candidate;break;}}
+            IM_CHECK(graph!=nullptr);
+            IM_CHECK(graph->Items.GetLegendCount()==1);
+        }
+        IM_CHECK(workspace.PerformanceResult()==original);
+        ReviewScreenshot(ctx,"perf-window-mali-units");ctx->WindowClose("//Perf");
     };
 
     t = IM_REGISTER_TEST(engine, "performance", "unavailable counter clock retains GPU duration");
@@ -807,20 +862,119 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
     };
 
     t = IM_REGISTER_TEST(engine, "shell", "File capture opens a non-dockable dialog without device access");
+    t->UserData=app;
     t->TestFunc = [](ImGuiTestContext* ctx) {
+        auto& workspace=static_cast<App*>(ctx->Test->UserData)->Workspace();workspace.SetCaptureUiFixture({});
         ctx->MenuClick("//##MainMenuBar/File/Capture application...");
-        ctx->SetRef("//Capture application"); IM_CHECK(ctx->ItemExists("Next"));
+        ctx->SetRef("//Capture application"); IM_CHECK(ctx->ItemExists("Launch")&&!ctx->ItemExists("Next"));
         IM_CHECK((ImGui::FindWindowByName("Capture application")->Flags & ImGuiWindowFlags_NoDocking) != 0);
         ctx->Yield(3);const auto width=ImGui::FindWindowByName("Capture application")->Size.x;ctx->Yield(30);
         IM_CHECK(std::abs(ImGui::FindWindowByName("Capture application")->Size.x-width)<1);
-        ctx->ItemClick("Close");
+        CloseCaptureControls(ctx);
+        workspace.ClearCaptureUiFixture();
     };
+
+    t=IM_REGISTER_TEST(engine,"capture-ui","connected device default ignores replay history");t->UserData=app;
+    t->TestFunc=[](ImGuiTestContext* ctx){
+        auto& workspace=static_cast<App*>(ctx->Test->UserData)->Workspace();
+        workspace.SetCaptureUiFixture({{"offline","offline","Offline"},{"phone-a","device","First connected phone"},{"phone-b","device","Second connected phone"}}, {},"phone-b");
+        ctx->MenuClick("//##MainMenuBar/File/Capture application...");ctx->SetRef("//Capture application");ctx->Yield(3);
+        IM_CHECK(workspace.CaptureSerialForTests()=="phone-a"&&workspace.ReplaySerialForTests()=="phone-b");
+        CaptureTargetAction(ctx,workspace,"phone-b");IM_CHECK(workspace.CaptureSerialForTests()=="phone-b");
+        workspace.SetReplayDevicesForTests({{"phone-a","device","First"},{"phone-b","device","Second"}});ctx->Yield(3);
+        IM_CHECK(workspace.CaptureSerialForTests()=="phone-b");
+        workspace.SetReplayDevicesForTests({{"phone-a","device","First"}});ctx->Yield(3);
+        IM_CHECK(workspace.CaptureSerialForTests()=="phone-a"&&workspace.ReplaySerialForTests()=="phone-b");
+        const auto text=VisibleUiText(ctx);IM_CHECK(text.find("NDK")==std::string::npos&&text.find("Tool paths")==std::string::npos);
+        ReviewScreenshot(ctx,"capture-idle");CloseCaptureControls(ctx);workspace.ClearCaptureUiFixture();
+    };
+    t=IM_REGISTER_TEST(engine,"capture-ui","capture actions stay visible and disabled across session states");t->UserData=app;
+    t->TestFunc=[](ImGuiTestContext* ctx){
+        auto& workspace=static_cast<App*>(ctx->Test->UserData)->Workspace();
+        workspace.SetCaptureUiFixture({{"phone-a","device","Connected"}});workspace.RequestCapture();ctx->Yield(3);ctx->SetRef("//Capture application");
+        std::map<std::string,ImVec2> positions;
+        for(const auto* label:{"Launch","Capture","End session"}){IM_CHECK(ctx->ItemExists(label));positions[label]=ctx->ItemInfo(label).RectFull.Min;}
+        IM_CHECK(!ctx->ItemExists("Stop"));
+        IM_CHECK(!ctx->ItemExists("Close app")&&!ctx->ItemExists("Close")&&!ctx->ItemExists("Options"));
+        IM_CHECK(ctx->ItemExists("##capture-timing")&&ctx->ItemExists("##capture-arguments"));
+        for(const auto phase:{gfx::LivePhase::Starting,gfx::LivePhase::Armed,gfx::LivePhase::Triggering,gfx::LivePhase::Recording,gfx::LivePhase::Stopping,gfx::LivePhase::Retrieving,gfx::LivePhase::Ended,gfx::LivePhase::Failed}){
+            gfx::LiveCaptureState state;state.phase=phase;state.gameRunning=true;state.detail="Full session diagnostics remain available in the tooltip.";
+            workspace.SetCaptureUiStateForTests(state);ctx->Yield(3);
+            for(const auto* label:{"Launch","Capture","End session"}){
+                IM_CHECK(ctx->ItemExists(label));const auto position=ctx->ItemInfo(label).RectFull.Min;
+                IM_CHECK(std::abs(position.x-positions[label].x)<1&&std::abs(position.y-positions[label].y)<1);
+            }
+            const auto enabled=[&](const char* label){return (ctx->ItemInfo(label).ItemFlags&ImGuiItemFlags_Disabled)==0;};
+            IM_CHECK(enabled("Capture")== (phase==gfx::LivePhase::Armed));
+            IM_CHECK(enabled("End session")); // Can still close a running app after ending monitoring.
+            if(phase==gfx::LivePhase::Starting){
+                ctx->MouseMove("Capture");ctx->SleepNoSkip(ImGui::GetStyle().HoverDelayNormal+.2f,1.0f/60);
+                IM_CHECK(VisibleUiText(ctx).find("Available once the app is armed")!=std::string::npos);
+                ctx->MouseMoveToPos(ImVec2(20,20));ctx->Yield(3);
+            }
+            if(phase==gfx::LivePhase::Armed)ReviewScreenshot(ctx,"capture-armed");
+            if(phase==gfx::LivePhase::Recording)ReviewScreenshot(ctx,"capture-recording");
+        }
+        gfx::LiveCaptureState state;state.phase=gfx::LivePhase::Armed;state.gameRunning=true;state.commandPending=true;
+        workspace.SetCaptureUiStateForTests(state);ctx->Yield(3);
+        IM_CHECK((ctx->ItemInfo("Capture").ItemFlags&ImGuiItemFlags_Disabled)!=0);
+        state.endingSession=true;workspace.SetCaptureUiStateForTests(state);ctx->Yield(3);
+        IM_CHECK((ctx->ItemInfo("End session").ItemFlags&ImGuiItemFlags_Disabled)!=0);
+        IM_CHECK((ctx->ItemInfo("Launch").ItemFlags&ImGuiItemFlags_Disabled)!=0);
+        state.commandPending=state.endingSession=false;workspace.SetCaptureUiStateForTests(state);ctx->Yield(3);
+        IM_CHECK((ctx->ItemInfo("Capture").ItemFlags&ImGuiItemFlags_Disabled)==0);
+        CloseCaptureControls(ctx);workspace.ClearCaptureUiFixture();
+    };
+    t=IM_REGISTER_TEST(engine,"capture-ui","end session asks yes or no and title bar close leaves capture active");t->UserData=app;
+    t->TestFunc=[](ImGuiTestContext* ctx){
+        auto& workspace=static_cast<App*>(ctx->Test->UserData)->Workspace();
+        workspace.SetCaptureUiFixture({{"phone-a","device","Connected"}});workspace.RequestCapture();ctx->Yield(3);ctx->SetRef("//Capture application");
+        gfx::LiveCaptureState state;state.phase=gfx::LivePhase::Armed;state.gameRunning=true;state.detail="Armed";
+        workspace.SetCaptureUiStateForTests(state);ctx->Yield(2);ctx->ItemClick("End session");ctx->SetRef("//End session");
+        IM_CHECK(ctx->ItemExists("Yes")&&ctx->ItemExists("No"));IM_CHECK(workspace.LiveState()->phase==gfx::LivePhase::Armed);
+        ReviewScreenshot(ctx,"capture-end-question");ctx->WindowClose("//End session");ctx->SetRef("//Capture application");
+        IM_CHECK(workspace.LiveState()->phase==gfx::LivePhase::Armed&&workspace.LiveState()->gameRunning);
+        CloseCaptureControls(ctx);IM_CHECK(workspace.LiveState()->phase==gfx::LivePhase::Armed&&workspace.LiveState()->gameRunning);
+        workspace.ClearCaptureUiFixture();
+    };
+    t=IM_REGISTER_TEST(engine,"capture-ui","missing setup opens focused repair and settings keep environment controls");t->UserData=app;
+    t->TestFunc=[](ImGuiTestContext* ctx){
+        auto& workspace=static_cast<App*>(ctx->Test->UserData)->Workspace();const auto adb=workspace.ConfiguredTools().at("adb");
+        workspace.SetCaptureUiFixture({{"phone-a","device","Connected"}});workspace.ConfigureAdbFixture("");workspace.RequestCapture();ctx->Yield(3);ctx->SetRef("//Capture application");
+        IM_CHECK(!ctx->ItemExists("Install replay APK"));ctx->ItemClick("Probe");ctx->Yield(3);ctx->SetRef("//Capture setup");
+        IM_CHECK(ctx->ItemExists("Retry")&&ctx->ItemExists("Settings...")&&ctx->ItemExists("Cancel"));
+        IM_CHECK(!ctx->ItemExists("Install replay APK"));ReviewScreenshot(ctx,"capture-setup");
+        ctx->ItemClick("Settings...");ctx->Yield(4);ctx->SetRef("//Settings");
+        IM_CHECK(ctx->ItemExists("**/Capture environment")&&ctx->ItemExists("**/Install replay APK")&&ctx->ItemExists("**/Install test sample"));
+        IM_CHECK(ctx->ItemExists("**/adb"));ReviewScreenshot(ctx,"capture-environment");
+        ctx->ItemClick("Close");workspace.ConfigureAdbFixture(adb);workspace.ClearCaptureUiFixture();
+    };
+    if(std::getenv("GFXRECON_GUI_CAPTURE_PROBE_SERIAL")){
+        t=IM_REGISTER_TEST(engine,"capture-device","connected phone is selected and probed in compact controls");t->UserData=app;
+        t->TestFunc=[](ImGuiTestContext* ctx){
+            auto& workspace=static_cast<App*>(ctx->Test->UserData)->Workspace();
+            const auto history=workspace.ReplaySerialForTests();
+            ctx->MenuClick("//##MainMenuBar/File/Capture application...");WaitForWorkspace(ctx,workspace);ctx->SetRef("//Capture application");
+            const auto connectedDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);
+            while(workspace.CaptureSerialForTests()!=std::getenv("GFXRECON_GUI_CAPTURE_PROBE_SERIAL")&&std::chrono::steady_clock::now()<connectedDeadline){
+                ctx->Yield();std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            WaitForWorkspace(ctx,workspace);
+            IM_CHECK(workspace.CaptureSerialForTests()==std::getenv("GFXRECON_GUI_CAPTURE_PROBE_SERIAL"));
+            IM_CHECK(workspace.ReplaySerialForTests()==history);
+            ctx->ItemClick("Probe");WaitForWorkspace(ctx,workspace);
+            IM_CHECK(workspace.Status()=="Capture setup ready.");
+            IM_CHECK(ctx->ItemExists("Launch")&&ctx->ItemExists("Capture")&&!ctx->ItemExists("Next"));
+            ReviewScreenshot(ctx,"capture-device");CloseCaptureControls(ctx);
+        };
+    }
 
     t = IM_REGISTER_TEST(engine, "replay-policy", "memory translation setting persists"); t->UserData = app;
     t->TestFunc = [](ImGuiTestContext* ctx) {
         auto& workspace = static_cast<App*>(ctx->Test->UserData)->Workspace(); WaitForWorkspace(ctx, workspace);
         const auto original = workspace.MemoryTranslation();
         ctx->MenuClick("//##MainMenuBar/File/Settings..."); ctx->SetRef("//Settings");
+        WaitForWorkspace(ctx,workspace);
         IM_CHECK(ctx->ItemExists(SettingsItem(ctx,"Memory translation")));
         SettingsCombo(ctx,"Memory translation/Remap"); ctx->Yield(2);
         IM_CHECK(workspace.MemoryTranslation() == "remap");
@@ -1006,29 +1160,20 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             if (ctx->Test->ArgVariant == 2) {
                 ctx->MenuClick("//##MainMenuBar/File/Capture application...");
                 ctx->SetRef("//Capture application");
-                ctx->ItemClick("Android");
-                ctx->ItemClick("Refresh devices"); wait();
-                ctx->Yield(2);
-                ctx->ItemClick("Device");
-                const auto* popup = ctx->WindowInfo("//$FOCUSED").Window;
-                IM_CHECK(popup != nullptr);
-                const std::string devicePath = std::string("//") + popup->Name + "/**/" + std::getenv("GFXRECON_GUI_CAPTURE_DEVICE");
-                ctx->ItemClick(devicePath.c_str());
-                ctx->ItemClick("Next"); wait();
-                IM_CHECK(workspace.Status().find("Device inspected:") != std::string::npos);
-                ctx->ItemClick("Install replay APK"); wait();
+                CaptureTargetAction(ctx,workspace,std::getenv("GFXRECON_GUI_CAPTURE_DEVICE"));
+                ctx->ItemClick("Settings");ctx->Yield(3);ctx->SetRef("//Settings");
+                ctx->ItemClick("**/Install replay APK"); wait();
                 IM_CHECK(workspace.Status().find("Replay APK installed on ") != std::string::npos);
-                ctx->ItemClick("Install test sample"); wait();
+                ctx->ItemClick("**/Install test sample"); wait();
                 IM_CHECK(workspace.Status().find("Sample APK installed on ") != std::string::npos);
-                ctx->ItemClick("Next");
-                ctx->ItemClick("Use Vulkan test sample");
-                ctx->ComboClick("Capture timing/Scheduled frames");
+                ctx->ItemClick("Close");ctx->MenuClick("//##MainMenuBar/File/Capture application...");wait();
+                ctx->SetRef("//Capture application");ctx->ItemInputValue("##capture-package","com.lunarg.gfxreconstruct.test.test_apps.test_launcher");ctx->ItemInputValue("##capture-arguments","triangle");ctx->ComboClick("##capture-timing/Scheduled");
                 const auto previousCapture = workspace.CurrentCapture();
-                ctx->ItemInputValue("Frames", "1000000-1000001");
-                ctx->ItemClick("Start capture");
+                ctx->ItemInputValue("Frame range", "1000000-1000001");ctx->SetRef("//Capture application");
+                ctx->ItemClick("Launch");
                 for (int i = 0; i < 1200 && workspace.Busy() && !std::filesystem::exists(workspace.ActiveCaptureSession() / "device-journal.json"); ++i) ctx->Yield();
                 IM_CHECK(workspace.Busy());
-                ctx->ItemClick("Cancel capture"); wait();
+                workspace.CancelJob(); wait();
                 IM_CHECK(!workspace.Busy());
                 IM_CHECK(workspace.CurrentCapture() == previousCapture);
                 {
@@ -1036,31 +1181,29 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
                     const auto recovered = gfx::Json::parse(cancelled);
                     IM_CHECK(recovered.at("restored").get<bool>());
                 }
-                ctx->ItemInputValue("Frames", "1-3");
-                ctx->ItemClick("Start capture"); wait();
+                ctx->SetRef("//Capture application");ctx->ItemInputValue("Frame range", "1-3");ctx->SetRef("//Capture application");
+                ctx->ItemClick("Launch"); wait();
                 IM_CHECK(workspace.CurrentCapture() != nullptr);
                 IM_CHECK_EQ(workspace.CurrentCapture()->frames, 3);
                 const auto journal = workspace.CurrentCapture()->source.parent_path() / "device-journal.json";
                 std::ifstream input(journal); const auto state = gfx::Json::parse(input);
                 IM_CHECK(state.at("restored").get<bool>());
                 IM_CHECK_EQ(state.at("serial").get<std::string>(), std::string(std::getenv("GFXRECON_GUI_CAPTURE_DEVICE")));
-                ctx->SetRef("//Capture application"); IM_CHECK(ctx->ItemExists("Open capture")); ctx->ItemClick("Open capture"); wait();
+                ctx->SetRef("//Capture application"); IM_CHECK(ctx->ItemExists("**/Open")); ctx->ItemClick("**/Open"); wait();
             } else if (ctx->Test->ArgVariant == 3) {
                 ctx->MenuClick("//##MainMenuBar/File/Capture application...");
                 ctx->SetRef("//Capture application");
-                // A previous platform's completed capture reopens at Save / inspect.
-                if (ctx->ItemExists("New capture")) ctx->ItemClick("New capture");
-                ctx->ItemClick("Local Windows");
-                ctx->ItemInputValue("Executable", std::getenv("GFXRECON_GUI_CAPTURE_WINDOWS"));
-                ctx->ItemClick("Next"); ctx->ItemClick("Next");
-                ctx->ItemInputValue("Arguments", "triangle");
-                ctx->ItemInputValue("Working directory", std::getenv("GFXRECON_GUI_CAPTURE_WORKDIR"));
-                ctx->ComboClick("Capture timing/Scheduled frames");
-                ctx->ItemInputValue("Frames", "1-3");
-                ctx->ItemClick("Start capture"); wait();
+                CaptureTargetAction(ctx,workspace,"Local Windows");
+                ctx->ItemInputValue("##capture-executable", std::getenv("GFXRECON_GUI_CAPTURE_WINDOWS"));
+                ctx->SetRef("//Capture application");
+                ctx->ItemInputValue("##capture-arguments", "triangle");
+                ctx->ItemInputValue("##capture-directory", std::getenv("GFXRECON_GUI_CAPTURE_WORKDIR"));
+                ctx->ComboClick("##capture-timing/Scheduled");
+                ctx->ItemInputValue("Frame range", "1-3");ctx->SetRef("//Capture application");
+                ctx->ItemClick("Launch"); wait();
                 IM_CHECK(workspace.CurrentCapture() != nullptr);
                 IM_CHECK_EQ(workspace.CurrentCapture()->frames, 3);
-                ctx->SetRef("//Capture application"); ctx->ItemClick("Open capture"); wait();
+                ctx->SetRef("//Capture application"); ctx->ItemClick("**/Open"); wait();
             } else {
                 workspace.Open(std::getenv(android ? "GFXRECON_GUI_ANDROID_CAPTURE" : "GFXRECON_GUI_TEST_CAPTURE")); wait();
             }
@@ -1315,7 +1458,9 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             auto readPreference=[&](){std::ifstream file(settings/"gfxrecon_preferences.json");return gfx::Json::parse(file).at("full_draw_replay").get<bool>();};
             auto replayCount=[&](){size_t n=0;for(const auto& f:std::filesystem::recursive_directory_iterator(settings/"sessions"))if(f.is_regular_file()&&f.path().filename()=="manifest.json"){
                 std::ifstream in(f.path());const auto j=gfx::Json::parse(in);
-                if(j.value("complete",false)&&!j.value("dump_request",gfx::Json{}).is_null())++n;
+                bool coverage=false;const auto config=f.path().parent_path()/"gui-visualization.json";
+                if(std::filesystem::is_regular_file(config)){std::ifstream input(config);coverage=gfx::Json::parse(input).value("coverage_variant",false);}
+                if(j.value("complete",false)&&!j.value("dump_request",gfx::Json{}).is_null()&&!coverage)++n;
             }return n;};
             IM_CHECK(!readPreference());const auto before=replayCount();
             w.SelectExecution(0,true);WaitForWorkspace(ctx,w);
@@ -1332,6 +1477,75 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             IM_CHECK(w.CachedDrawModeCount()>=5u);IM_CHECK_EQ(replayCount(),before+9);
             ctx->MenuClick("//##MainMenuBar/File/Settings...");ctx->SetRef("//Settings");SettingsCombo(ctx,"Draw replay/Light (on demand)");
             IM_CHECK(!w.FullDrawReplay());IM_CHECK(!readPreference());ctx->ItemClick("Close");
+        };
+    }
+    if(std::getenv("GFXRECON_GUI_GAME_MIP_CAPTURE")){
+        t=IM_REGISTER_TEST(engine,"integration","Mali game texture mip selection reads compressed subresources");t->UserData=app;
+        t->TestFunc=[](ImGuiTestContext* ctx){
+            auto& w=static_cast<App*>(ctx->Test->UserData)->Workspace();
+            w.SetCaptureUiFixture({}, {},std::getenv("GFXRECON_GUI_GAME_MIP_SERIAL"));
+            struct Restore{gfx::Workspace& w;~Restore(){w.ClearCaptureUiFixture();}} restore{w};
+            w.SetReplayMode(gfx::ReplayMode::Android);w.SetMemoryTranslation("remap");w.SetFullDrawReplay(false);
+            w.Open(std::getenv("GFXRECON_GUI_GAME_MIP_CAPTURE"));WaitForWorkspace(ctx,w);
+            const auto execution=std::getenv("GFXRECON_GUI_GAME_MIP_EXECUTION")?std::atoi(std::getenv("GFXRECON_GUI_GAME_MIP_EXECUTION")):18;
+            w.SelectExecution(execution,true);WaitForWorkspace(ctx,w);IM_CHECK(w.ExecutionState(execution)==gfx::PanelState::Success);
+            gfx::ResourceArtifact input;for(const auto& asset:w.Resources())if(asset.metadata.value("category","")=="input"&&asset.metadata.value("mipLevels",0u)>1){input=asset;break;}
+            IM_CHECK(!input.file.empty());ctx->LogInfo("Texture %llu has %u mip levels",input.metadata.value("imageId",uint64_t(0)),input.metadata.value("mipLevels",0u));
+            w.OpenImageForTests(input);WaitForWorkspace(ctx,w);const int width=w.SelectedImage().Width(),height=w.SelectedImage().Height();IM_CHECK(width>0&&height>0);
+            const auto mip=std::min(2u,input.metadata.value("mipLevels",1u)-1);ctx->WindowFocus("//Image");ctx->Yield(3);
+            ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);ctx->ComboClick(("##image-mip/Mip "+std::to_string(mip)).c_str());WaitForWorkspace(ctx,w);
+            IM_CHECK_EQ(w.ImageMetadataForTests().value("mipLevel",0u),mip);IM_CHECK_EQ(w.SelectedImage().Width(),std::max(1,width>>mip));IM_CHECK_EQ(w.SelectedImage().Height(),std::max(1,height>>mip));
+            ReviewScreenshot(ctx,"mali-game-input-mip");
+            ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);ctx->ComboClick("##image-mip/Mip 0");IM_CHECK(!w.Busy());IM_CHECK_EQ(w.SelectedImage().Width(),width);
+            if(std::getenv("GFXRECON_GUI_GAME_SCALAR_OVERLAY")){
+                gfx::ResourceArtifact depth;for(const auto& asset:w.Resources())if(asset.metadata.value("category","")=="output"&&asset.metadata.value("aspect","")=="DEPTH"){depth=asset;break;}
+                IM_CHECK(!depth.file.empty());w.OpenImageForTests(depth);ctx->Yield(3);
+                ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);ctx->ComboClick("##draw-visualization/Orange outline");WaitForWorkspace(ctx,w);
+                IM_CHECK_EQ(w.ImageMetadataForTests().value("aspect",std::string{}),"DEPTH");IM_CHECK(w.SelectedImage().HasOverlay()&&w.SelectedImage().HasDepthValues());
+                const auto annotation=gfx::LoadImage(std::filesystem::u8path(w.ImageMetadataForTests().at("overlayFile").get<std::string>()));
+                size_t covered=0;for(size_t p=3;p<annotation.rgba.size();p+=4)covered+=annotation.rgba[p]!=0;
+                ctx->LogInfo("Mali outline pixels: %zu",covered);IM_CHECK(covered>0);
+                ReviewScreenshot(ctx,"mali-game-depth-outline");
+            }
+        };
+    }
+    if(std::getenv("GFXRECON_GUI_SUBRESOURCE_CAPTURE")){
+        t=IM_REGISTER_TEST(engine,"integration","mip preview reads levels on demand and scalar diagnostics preserve values");t->UserData=app;
+        t->TestFunc=[](ImGuiTestContext* ctx){
+            auto& w=static_cast<App*>(ctx->Test->UserData)->Workspace();w.SetReplayMode(gfx::ReplayMode::Local);w.SetFullDrawReplay(false);
+            w.Open(std::getenv("GFXRECON_GUI_SUBRESOURCE_CAPTURE"));WaitForWorkspace(ctx,w);w.SelectExecution(0,true);WaitForWorkspace(ctx,w);
+            ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);IM_CHECK(ctx->ItemExists("##image-mip"));
+            const auto selectorWidth=ctx->ItemInfo("##image-mip").RectFull.GetWidth();
+            IM_CHECK_EQ(ctx->ItemInfo("##draw-visualization").RectFull.GetWidth(),selectorWidth);
+            IM_CHECK_EQ(ctx->ItemInfo("##indirect-subdraw").RectFull.GetWidth(),selectorWidth);
+            IM_CHECK((ctx->ItemInfo("##image-mip").ItemFlags&ImGuiItemFlags_Disabled)!=0);
+            ctx->ItemClick("image-documents/Frame presentation");ctx->Yield(3);IM_CHECK(ctx->ItemExists("##image-mip"));
+            IM_CHECK((ctx->ItemInfo("##image-mip").ItemFlags&ImGuiItemFlags_Disabled)!=0);
+            auto find=[&](const char* category,const char* aspect){for(const auto& asset:w.Resources())if(asset.metadata.value("category","")==category&&asset.metadata.value("aspect","")==aspect)return asset;return gfx::ResourceArtifact{};};
+            const auto input=find("input","COLOR");IM_CHECK(!input.file.empty());IM_CHECK_EQ(input.metadata.at("mipLevels").get<int>(),4);
+            w.OpenImageForTests(input);ctx->Yield(3);const auto tabs=w.ImageDocumentCountForTests();IM_CHECK_EQ(w.SelectedImage().Width(),8);IM_CHECK_EQ(w.SelectedImage().Pixel(0,0)[0],255);
+            IM_CHECK((ctx->ItemInfo("##image-mip").ItemFlags&ImGuiItemFlags_Disabled)==0);
+            for(const auto mip:{3,1}){
+                ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);ctx->ComboClick(("##image-mip/Mip "+std::to_string(mip)).c_str());WaitForWorkspace(ctx,w);
+                IM_CHECK_EQ(w.ImageMetadataForTests().at("mipLevel").get<int>(),mip);IM_CHECK_EQ(w.SelectedImage().Width(),8>>mip);IM_CHECK_EQ(w.ImageDocumentCountForTests(),tabs);
+                IM_CHECK_EQ(w.SelectedImage().Pixel(0,0)[1],255);if(mip==1)IM_CHECK_EQ(w.SelectedImage().Pixel(0,0)[0],0);
+            }
+            ReviewScreenshot(ctx,"input-mip-1");
+            ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);ctx->ComboClick("##image-mip/Mip 3");IM_CHECK(!w.Busy()&&!w.HasPendingWork());
+            const auto depth=find("output","DEPTH"),stencil=find("output","STENCIL");IM_CHECK(!depth.file.empty()&&!stencil.file.empty());
+            const auto depthHash=gfx::Sha256File(depth.file),stencilHash=gfx::Sha256File(stencil.file);
+            w.OpenImageForTests(depth);ctx->Yield(3);const auto depthPixel=w.SelectedImage().Pixel(w.SelectedImage().Width()/2,w.SelectedImage().Height()/2);
+            for(const auto* mode:{"Solid coverage","Wireframe","Depth pass & fail","UV density","Orange outline"}){
+                ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);ctx->ComboClick((std::string("##draw-visualization/")+mode).c_str());WaitForWorkspace(ctx,w);
+                IM_CHECK_EQ(w.ImageMetadataForTests().value("aspect",std::string{}),"DEPTH");IM_CHECK(w.SelectedImage().HasOverlay()&&w.SelectedImage().HasDepthValues());
+                IM_CHECK(w.SelectedImage().Pixel(w.SelectedImage().Width()/2,w.SelectedImage().Height()/2)==depthPixel);
+                IM_CHECK(gfx::Sha256File(depth.file)==depthHash);ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);ctx->ItemClick("Auto");IM_CHECK(w.SelectedImage().HasOverlay());
+            }
+            ReviewScreenshot(ctx,"depth-orange-outline");
+            const auto stencilWithOverlay=find("output","STENCIL");IM_CHECK(stencilWithOverlay.metadata.contains("overlayFile"));
+            w.OpenImageForTests(stencilWithOverlay);ctx->Yield(3);IM_CHECK(w.SelectedImage().HasOverlay());
+            IM_CHECK(gfx::Sha256File(stencil.file)==stencilHash);w.SetDrawVisualization(1);ctx->Yield(3);IM_CHECK(!w.Busy());IM_CHECK_EQ(w.ImageMetadataForTests().value("aspect",std::string{}),"STENCIL");IM_CHECK(w.SelectedImage().HasOverlay());
+            ReviewScreenshot(ctx,"stencil-solid-coverage");w.SetDrawVisualization(0);ctx->Yield(3);IM_CHECK(!w.SelectedImage().HasOverlay());
         };
     }
     if(const auto indirect=std::getenv("GFXRECON_GUI_INDIRECT_CAPTURE")) {
@@ -1509,27 +1723,28 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
                     }
                 }
             } cleanup{w};
-            ctx->MenuClick("//##MainMenuBar/File/Capture application...");ctx->SetRef("//Capture application");ctx->ItemClick("Local Windows");
-            ctx->ItemInputValue("Executable",std::getenv("GFXRECON_GUI_LIVE_GAME"));ctx->ItemClick("Next");ctx->ItemClick("Next");
-            ctx->ItemInputValue("Working directory",std::getenv("GFXRECON_GUI_LIVE_WORKDIR"));ctx->ItemInputValue("Arguments","");
-            ctx->ComboClick("Capture timing/On demand: N frames");ctx->ItemInputValue("Frames per capture",3);ctx->ItemClick("Launch armed");
+            ctx->MenuClick("//##MainMenuBar/File/Capture application...");CaptureTargetAction(ctx,w,"Local Windows");
+            ctx->ItemInputValue("##capture-executable",std::getenv("GFXRECON_GUI_LIVE_GAME"));ctx->SetRef("//Capture application");
+            ctx->ItemInputValue("##capture-directory",std::getenv("GFXRECON_GUI_LIVE_WORKDIR"));ctx->ItemInputValue("##capture-arguments","");
+            ctx->ComboClick("##capture-timing/N frames");ctx->SetRef("//Capture application");ctx->ItemInputValue("##capture-frames",3);ctx->ItemClick("Launch");
             IM_CHECK(WaitLive(ctx,w,[](const auto&s){return s.phase==gfx::LivePhase::Armed;}));
-            IM_CHECK(w.LiveState()->captures.empty());ctx->ItemClick("Capture N frames");
+            IM_CHECK(w.LiveState()->captures.empty());ctx->ItemClick("Capture");
             IM_CHECK(WaitLive(ctx,w,[](const auto&s){return s.phase==gfx::LivePhase::Armed&&s.captures.size()==1;}));IM_CHECK(w.LiveState()->gameRunning);
             const auto defaultCapture=w.LiveState()->captures.front();const auto defaultHash=gfx::Sha256File(defaultCapture);
-            ctx->ItemClick("**/Save");WaitForWorkspace(ctx,w);IM_CHECK(ctx->ItemExists("**/Saved"));
+            ctx->ItemClick("**/Save");WaitForWorkspace(ctx,w);IM_CHECK(ctx->ItemExists("**/Save"));
+            IM_CHECK((ctx->ItemInfo("**/Save").ItemFlags&ImGuiItemFlags_Disabled)!=0);
             IM_CHECK(gfx::Sha256File(defaultCapture)==defaultHash);IM_CHECK(w.LiveState()->gameRunning);
             ctx->ItemClick("**/Open");WaitForWorkspace(ctx,w);IM_CHECK_EQ(w.CurrentCapture()->frames,3u);IM_CHECK_EQ(w.BaselineImage().Width(),0);
-            ctx->MenuClick("//##MainMenuBar/File/Capture application...");ctx->SetRef("//Capture application");ctx->ItemClick("End session (keep game running)");
+            ctx->MenuClick("//##MainMenuBar/File/Capture application...");EndCaptureChoice(ctx,false);
             IM_CHECK(WaitLive(ctx,w,[](const auto&s){return s.phase==gfx::LivePhase::Ended;}));IM_CHECK(w.LiveState()->gameRunning);
-            ctx->ItemClick("Close launched game");IM_CHECK(WaitLive(ctx,w,[](const auto&s){return !s.gameRunning;}));
-            ctx->ItemClick("New session");ctx->ItemClick("Next");ctx->ItemClick("Next");ctx->ComboClick("Capture timing/On demand: start-stop");ctx->ItemClick("Launch armed");
-            IM_CHECK(WaitLive(ctx,w,[](const auto&s){return s.phase==gfx::LivePhase::Armed;}));ctx->ItemClick("Start recording");
-            IM_CHECK(WaitLive(ctx,w,[](const auto&s){return s.phase==gfx::LivePhase::Recording;}));ctx->ItemClick("Stop capture");
-            IM_CHECK(WaitLive(ctx,w,[](const auto&s){return s.phase==gfx::LivePhase::Armed&&!s.captures.empty();}));IM_CHECK(w.LiveState()->gameRunning);
-            ctx->ItemClick("Close launched game");IM_CHECK(WaitLive(ctx,w,[](const auto&s){return !s.gameRunning;}));ctx->ItemClick("Hide controls");
+            EndCaptureChoice(ctx,true);IM_CHECK(WaitLive(ctx,w,[](const auto&s){return !s.gameRunning;}));
+            ctx->SetRef("//Capture application");ctx->ComboClick("##capture-timing/Manual");ctx->SetRef("//Capture application");ctx->ItemClick("Launch");
+            IM_CHECK(WaitLive(ctx,w,[](const auto&s){return s.phase==gfx::LivePhase::Armed;}));ctx->ItemClick("Capture");
+            IM_CHECK(WaitLive(ctx,w,[](const auto&s){return s.phase==gfx::LivePhase::Recording;}));EndCaptureChoice(ctx,false);
+            IM_CHECK(WaitLive(ctx,w,[](const auto&s){return s.phase==gfx::LivePhase::Ended&&!s.captures.empty();}));IM_CHECK(w.LiveState()->gameRunning);
+            EndCaptureChoice(ctx,true);IM_CHECK(WaitLive(ctx,w,[](const auto&s){return !s.gameRunning;}));CloseCaptureControls(ctx);
             ctx->MenuClick("//##MainMenuBar/File/Capture application...");ctx->SetRef("//Capture application");
-            IM_CHECK(ctx->ItemExists("**/Save As..."));ctx->ItemClick("Hide controls");
+            IM_CHECK(ctx->ItemExists("**/Save As..."));CloseCaptureControls(ctx);
         };
     }
 
@@ -1686,7 +1901,8 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         const auto preferences=std::filesystem::u8path(ExeDirectory())/"test-state/gfxrecon_preferences.json";
         {std::ifstream file(preferences);const auto j=gfx::Json::parse(file);IM_CHECK_EQ(j.at("android_serial").get<std::string>(),"phone-a");IM_CHECK_EQ(j.at("replay_mode").get<int>(),2);}
         ReviewScreenshot(ctx,"replay-device");ctx->ItemClick("Close");ctx->SetRef("//Events");
-        ctx->MouseMove("##event-replay-device");ctx->Yield(60);IM_CHECK(VisibleUiText(ctx).find("Android phone-a")!=std::string::npos);
+        ctx->MouseMove("##event-replay-device");ctx->SleepNoSkip(ImGui::GetStyle().HoverDelayNormal+.2f,1.0f/60);
+        IM_CHECK(VisibleUiText(ctx).find("Android phone-a")!=std::string::npos);
         ctx->ItemClick("##event-replay-device");ctx->SetRef("//Replay device");ctx->ItemClick(gfx::LocalReplayLabel());
         IM_CHECK_EQ(w.ReplayDeviceLabel(),gfx::LocalReplayLabel());ctx->ItemClick("Close");
         ctx->SetRef("//Events");ctx->ItemClick("##event-replay-device");ctx->SetRef("//Replay device");

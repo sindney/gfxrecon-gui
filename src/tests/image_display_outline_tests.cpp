@@ -35,5 +35,13 @@ void ImageDisplayOutlineTests(const std::filesystem::path&) {
     require(outlined==8,"outline coverage geometry changed");
     require(ComposeDrawOutline(original,coverageA,coverageA,1,ImageSourceEncoding::Linear).rgba==originalBytes,"empty coverage must preserve all original bytes");
     require(original.rgba==originalBytes&&coverageA.rgba==coverageABytes&&coverageB.rgba==coverageBBytes,"compositing must not mutate original/coverage inputs used by raw comparisons");
+    const auto overlay=MakeDrawOverlay(coverageA,coverageB,original,ImageSourceEncoding::Srgb);
+    require(overlay.rgba[0+3]==0&&overlay.rgba[(3*7+3)*4+3]==192,"overlay must be transparent outside independently measured coverage");
+    const auto boundary=MakeDrawOverlay(coverageA,coverageB,original,ImageSourceEncoding::Srgb,true);
+    require(boundary.rgba[3]==0&&boundary.rgba[(3*7+3)*4+3]==255,"two-pixel outline must be a separate RGBA annotation");
+    auto smaller=coverageA;smaller.width=6;bool mismatch=false;
+    try{MakeDrawOverlay(smaller,coverageB,original,ImageSourceEncoding::Linear);}catch(const ImageExtentMismatch&){mismatch=true;}
+    require(mismatch,"unmatched attachment masks must not be resized silently");
+    require(original.rgba==originalBytes,"scalar overlay preparation changed source pixels");
 }
 }

@@ -8,6 +8,8 @@
 #include <chrono>
 #include <future>
 #include <thread>
+#include <regex>
+#include <set>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -72,7 +74,7 @@ struct Phone {
         if (words[0] == "run-as") {
             if (words[2] == "test") return {1};
             if (words[2] == "mkdir") relative = words[4];
-            if (words[2] == "cat") return {0, "Finished recording graphics API capture"};
+            if (words[2] == "cat") return {0, "Recording graphics API capture to /data/data/test.app/"+relative+"/c_frames_1_through_3.gfxr\nFinished recording graphics API capture\n"};
             if (words[2] == "find") return {0, relative + "/c_frames_1_through_3.gfxr\n"};
             return {0};
         }
@@ -81,6 +83,46 @@ struct Phone {
 };
 }
 void RunDeviceTests(const std::filesystem::path& root) {
+    // An adb exec-in success only means input was sent, not that the receiver
+    // closed its output. Publication requires the transfer's own acknowledgement.
+    const auto uploadSource=root/"upload.bin";
+    {std::ofstream out(uploadSource,std::ios::binary);out<<"binary upload fixture";}
+    std::set<std::string> uploadTokens;
+    for(int scenario=0;scenario<4;++scenario){
+        std::atomic_bool cancel{false};unsigned polls=0;bool staged=false,published=false,cleaned=false;std::string token,pending;
+        const std::string remote="files/cache/capture.partial";
+        AdbConnection upload{"fake-adb","upload-phone",&cancel,[&](const ProcessRequest& request,const std::atomic_bool* cancellation){
+            Require(request.arguments.size()==4&&request.arguments[1]=="upload-phone","Upload escaped its target device");
+            const auto words=ShellWords(request.arguments[3]);
+            Require(words.size()>=4&&words[0]=="run-as"&&words[1]=="test.app","Upload escaped its package");
+            if(request.arguments[2]=="exec-in"){
+                Require(request.stdinFile==uploadSource&&words[2]=="sh"&&words[3]=="-c","Upload stopped using binary stdin");
+                std::smatch match;Require(std::regex_search(words[4],match,std::regex("\\.upload-([0-9a-f]{24})")),"Upload lacks a unique staging path");
+                token=match[1];pending=remote+".upload-"+token;
+                Require(uploadTokens.insert(token).second&&words[4].find(QuoteAndroidArgument(pending))!=std::string::npos,"Upload staging path was reused");
+                Require(words[4].find("head -c "+std::to_string(std::filesystem::file_size(uploadSource)))!=std::string::npos&&
+                    words[4].find(Sha256File(uploadSource))!=std::string::npos,"Receiver did not require the complete source length and digest");
+                staged=true;return ProcessResult{0}; // receiver is still writing!
+            }
+            if(words[2]=="rm"){
+                Require(cancellation==nullptr&&words==std::vector<std::string>({"run-as","test.app","rm","-f",pending,pending+".ack",pending+".ack.partial"}),
+                    "Upload cleanup touched a published or unrelated file");
+                cleaned=true;return ProcessResult{0};
+            }
+            Require(staged&&words[2]=="sh"&&words[3]=="-c"&&words[4].find(QuoteAndroidArgument(pending+".ack"))!=std::string::npos,
+                "Upload published without checking its own acknowledgement");
+            ++polls;
+            if(scenario==1)return ProcessResult{1,"Upload receiver failed"};
+            if(scenario==2){cancel=true;return ProcessResult{0};}
+            if(scenario==3)return ProcessResult{0,"foreign acknowledgement"};
+            if(polls<3){Require(!published,"Upload was published while receiver was writing");return ProcessResult{0};}
+            published=true;return ProcessResult{0,token};
+        }};
+        bool failed=false;try{upload.Put("test.app",uploadSource,remote);}catch(const std::runtime_error&){failed=true;}
+        Require(failed==(scenario!=0),"Upload accepted an incomplete, failed, cancelled, or foreign acknowledgement");
+        Require(scenario==0?(published&&polls==3&&!cleaned):(!published&&cleaned),"Upload returned before acknowledgement or failed to clean owned staging");
+    }
+    std::filesystem::remove(uploadSource);
     // Exercise the real framing/parser with an injected transport: binary data,
     // malformed headers, path traversal, duplicate files and cancellation.
     const auto downloads = root / "batched-downloads";

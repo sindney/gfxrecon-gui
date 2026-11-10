@@ -40,9 +40,9 @@ std::filesystem::path SessionArgument(const Args& args) {
     if (!std::filesystem::is_directory(directory)) throw CliError(kFailed, "session_not_found", "Capture session directory does not exist: " + directory.u8string(), {{"session", directory.u8string()}});
     return directory;
 }
-uint32_t FrameCount(const Args& args, uint32_t fallback) {
+uint32_t FrameCount(const Args& args, uint32_t fallback,bool allowManual=false) {
     const auto frames = args.Number("frames", fallback);
-    if (frames < 1 || frames > 1000000) throw Usage("--frames must be 1 to 1,000,000");
+    if (frames < (allowManual?0:1) || frames > 1000000) throw Usage(allowManual?"--frames must be 0 to 1,000,000 (0 is manual)":"--frames must be 1 to 1,000,000");
     return static_cast<uint32_t>(frames);
 }
 [[noreturn]] void RethrowConflict(const AndroidRestoreConflict& conflict, const std::string& serial) {
@@ -85,13 +85,13 @@ Json VerifyAll(const Context& context, const std::vector<std::filesystem::path>&
 Json Arm(Context& context, const Args& args) {
     const auto directory = args.Has("out") ? std::filesystem::absolute(std::filesystem::u8path(args.Get("out"))) : context.NewSession("capture");
     AndroidArmOptions options; options.directory = directory; options.package = args.Get("package");
-    options.arguments = args.Get("args"); options.frames = FrameCount(args, 3); options.launch = !args.Has("no-launch");
+    options.arguments = args.Get("args"); options.frames = FrameCount(args, 3,true); options.launch = !args.Has("no-launch");
     options.timeout = Timeout(context, Seconds(120));
     const auto device = SelectDevice(context);
     const auto state = ArmAndroidCapture(device, options, [&](const std::string& text) { context.Progress(text); });
     Json result{{"session", directory.u8string()}, {"serial", state.serial}, {"package", state.package}, {"frames_per_trigger", state.frames},
         {"journal", state.Journal().u8string()}, {"launched", state.launched}, {"armed", state.launched},
-        {"next", "gfxrecon-cli capture trigger --session \"" + directory.u8string() + "\""}};
+        {"next", std::string("gfxrecon-cli capture ")+(state.frames?"trigger":"start")+" --session \"" + directory.u8string() + "\""}};
     if (!state.launched) result["note"] = "Settings are applied and journaled but nothing was launched; start " + state.package + " now so the layer loads at process start, then trigger. Run 'capture end' to restore settings.";
     return result;
 }
@@ -108,6 +108,16 @@ Json Trigger(Context& context, const Args& args) {
 Json Status(Context& context, const Args& args) {
     const auto directory = SessionArgument(args);
     return AndroidCaptureStatus(SessionDevice(context, LoadAndroidSession(directory).serial), directory);
+}
+Json StartManual(Context& context,const Args& args){
+    const auto directory=SessionArgument(args);const auto state=LoadAndroidSession(directory);
+    return StartAndroidManualCapture(SessionDevice(context,state.serial),directory,Timeout(context,Seconds(120)));
+}
+Json StopManual(Context& context,const Args& args){
+    const auto directory=SessionArgument(args);const auto state=LoadAndroidSession(directory);
+    const auto files=StopAndroidManualCapture(SessionDevice(context,state.serial),directory,Timeout(context,Seconds(120)));
+    std::vector<std::filesystem::path> paths;for(const auto& file:files)paths.push_back(file.path);
+    return VerifyAll(context,paths,{{"session",directory.u8string()},{"serial",state.serial},{"package",state.package},{"recording",false},{"session_armed",true}});
 }
 Json End(Context& context, const Args& args) {
     const auto directory = SessionArgument(args);
@@ -164,7 +174,9 @@ Json Windows(Context& context, const Args& args) {
         return VerifyAll(context, captured.files, {{"session", directory.u8string()}, {"mode", "scheduled"}, {"frame_range", args.Get("frames")}});
     }
     if (args.Has("trigger-after") == args.Has("trigger-file")) throw Usage("'capture windows run' requires exactly one of --trigger-after SEC or --trigger-file PATH");
-    const auto frames = FrameCount(args, 3);
+    const auto frames = FrameCount(args, 3,true);
+    if(!frames&&!args.Has("stop-file"))throw Usage("Manual Windows capture (--frames 0) requires --stop-file PATH");
+    if(frames&&args.Has("stop-file"))throw Usage("--stop-file requires manual capture (--frames 0)");
     const auto delay = args.Number("trigger-after", 0);
     const auto triggerFile = std::filesystem::u8path(args.Get("trigger-file"));
     LiveCaptureOptions options; options.android = false; options.frames = frames; options.layerDirectory = layer;
@@ -200,6 +212,15 @@ Json Windows(Context& context, const Args& args) {
         }
         if (Cancelled(context)) throw std::runtime_error("Capture cancelled.");
         session.Capture();
+        if(!frames){
+            wait(Timeout(context,Seconds(120)),"manual recording to start",[](const LiveCaptureState& s){return s.phase==LivePhase::Recording;});
+            const auto stopFile=std::filesystem::u8path(args.Get("stop-file"));
+            wait(Timeout(context,Seconds(600)),"the stop file",[&](const LiveCaptureState& s){
+                if(!s.gameRunning||s.phase==LivePhase::Ended)throw std::runtime_error("Game exited during manual recording");
+                return std::filesystem::exists(stopFile);
+            });
+            session.StopCapture();
+        }
         wait(Timeout(context, Seconds(300)), "the capture to finish", [](const LiveCaptureState& s) { return s.phase == LivePhase::Armed && !s.captures.empty(); });
     } catch (...) { close(); throw; }
     const auto captures = session.State().captures;
@@ -211,11 +232,13 @@ void RegisterCaptureCommands() {
     const Option session{"session", "DIR", "Capture session directory printed by 'capture arm'", false, true};
     const Option out{"out", "DIR", "Output/session directory (default: a new directory under <settings>/sessions)"};
     Register({"capture", "arm", "Android: apply journaled capture settings and launch the app with capture tracking armed (nothing is recorded yet)", {},
-        {{"package", "PKG", "Debuggable Android package", false, true}, {"frames", "N", "Frames recorded per trigger, fixed at launch", false, false, "3"},
+        {{"package", "PKG", "Debuggable Android package", false, true}, {"frames", "N", "Frames per trigger; 0 for manual capture start/stop", false, false, "3"},
          {"no-launch", "", "Only apply settings; the next launch of the app is captured"}, {"args", "TEXT", "Launch arguments passed to the activity"}, out}, Arm});
     Register({"capture", "trigger", "Android: record the armed frame count in the running game, retrieve it, hash-verify and index it (repeatable; exit 3 when the phone is locked)", {},
         {session, {"frames", "N", "Must equal the armed frame count (fixed at arm time)"}}, Trigger});
     Register({"capture", "status", "Android: report session state, device lock, game and layer status and retrieved captures", {}, {session}, Status});
+    Register({"capture","start","Android: start manual recording in a session armed with --frames 0; returns when recording begins",{}, {session},StartManual});
+    Register({"capture","stop","Android: finish and retrieve manual recording, keeping the game and capture session running",{}, {session},StopManual});
     Register({"capture", "end", "Android: restore every journaled setting and mark the session ended (exit 3 on restore conflicts)", {},
         {session, {"close-game", "", "Force-stop the game before restoring"}}, End});
     Register({"capture", "restore", "Android: restore settings from a session directory or device-journal.json (also for sessions interrupted before 'end', and GUI sessions)", {},
@@ -224,7 +247,8 @@ void RegisterCaptureCommands() {
         {{"package", "PKG", "Debuggable Android package", false, true}, {"frames", "RANGE", "Frame range such as 100-102 or 1-3,10", false, true}, {"args", "TEXT", "Launch arguments"}, out}, AndroidScheduled});
     Register({"capture", "windows", "Windows: scheduled frame range (--frames RANGE), or 'run' for a blocking on-demand capture (--trigger-after SEC | --trigger-file PATH)", {"[run]"},
         {{"exe", "FILE", "Game executable", false, true}, {"args", "TEXT", "Game arguments"}, {"cwd", "DIR", "Working directory (default: the executable's directory)"},
-         {"frames", "N|RANGE", "Scheduled: frame range such as 100-102. On-demand: frames to record (default 3)"},
+         {"frames", "N|RANGE", "Scheduled: frame range. On-demand: frames to record (default 3); 0 is manual with --stop-file"},
+         {"stop-file","PATH","Manual on-demand: stop recording when this file appears; requires --frames 0"},
          {"trigger-after", "SEC", "On-demand: seconds after the layer arms"}, {"trigger-file", "PATH", "On-demand: capture when this file appears"}, out}, Windows});
 }
 } // namespace gfx::cli

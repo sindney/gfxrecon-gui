@@ -1,4 +1,5 @@
 # Generate a narrowly scoped host-layer event bridge without editing the SDK checkout.
+include("${CMAKE_CURRENT_LIST_DIR}/gui_capture_logging.cmake")
 if(WIN32)
     set_property(DIRECTORY PROPERTY GFX_GUI_ROOT "${CMAKE_CURRENT_LIST_DIR}/..")
     function(gfx_gui_capture_bridge)

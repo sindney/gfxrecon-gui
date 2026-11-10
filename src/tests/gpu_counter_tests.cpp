@@ -90,9 +90,99 @@ Buffer BandwidthTrace(bool optionalSamples = true, bool omitRead = false) {
     }
     return trace;
 }
+Buffer MaliDescriptor() {
+    Buffer descriptor;
+    const char* names[]{"GPU utilization", "Front-end read bytes from external memory", "Shader core count", "Fragments per pixel"};
+    const uint32_t units[]{37, 7, 0, 39}; // PERCENT, BYTE, NONE, FRAGMENT.
+    for (uint32_t i = 0; i < 4; ++i) {
+        Buffer spec; Number(spec, 1, 65536 + i); Text(spec, 2, names[i]);
+        Text(spec, 3, "Mali provider expression; hardware normalization is provider-defined.");
+        Number(spec, 7, units[i]); Number(spec, 8, i == 3 ? 26 : 0); // PIXEL or explicit NONE.
+        Message(descriptor, 1, spec);
+    }
+    Number(descriptor, 3, 1000000); Number(descriptor, 4, 1000000000); return descriptor;
+}
+Buffer MaliTrace(uint32_t clock = 6) {
+    Buffer trace, snapshot, boot, clockPacket, descriptors;
+    Number(boot, 1, 6); Number(boot, 2, 1000000000); Message(snapshot, 1, boot);
+    Number(snapshot, 2, 6); Message(clockPacket, 6, snapshot); Message(trace, 1, clockPacket);
+    Message(descriptors, 1, MaliDescriptor()); Packet(trace, 0, descriptors, 6, true);
+    for (uint64_t i = 0; i < 4; ++i) {
+        Buffer event, bytes, cores;
+        Message(event, 2, Value(65536, double(i) * 12.5));
+        Number(bytes, 1, 65537); Number(bytes, 2, i * 4096); Message(event, 2, bytes);
+        Number(cores, 1, 65538); Number(cores, 2, 12); Message(event, 2, cores);
+        Message(event, 2, Value(65539, 1.25));
+        Packet(trace, 1000000000 + i * 1000000, event, clock);
+    }
+    return trace;
+}
+void ClockPair(Buffer& trace, uint64_t source, uint64_t bootTime, uint32_t clock = 5, uint64_t multiplier = 1, bool incremental = false) {
+    Buffer snapshot, boot, other, packet;
+    Number(boot, 1, 6); Number(boot, 2, bootTime); Message(snapshot, 1, boot);
+    Number(other, 1, clock); Number(other, 2, source); Number(other, 4, multiplier);
+    if (incremental) Number(other, 3, 1);
+    Message(snapshot, 1, other); Message(packet, 6, snapshot); Message(trace, 1, packet);
+}
 }
 
 void GpuCounterTests(const std::filesystem::path& root) {
+    auto maliBytes = Service(MaliDescriptor());
+    Buffer producer; Number(producer, 1, 17); Text(producer, 2, "/data/local/tmp/owned_mali_producer");
+    Number(producer, 3, 2000); Number(producer, 5, 1234); Message(maliBytes, 1, producer);
+    auto maliState = DecodeGpuCounterServiceState(maliBytes);
+    const auto mali = SelectGpuCounters(maliState, 1000000, "all");
+    Require(mali["selected_counter_count"] == 4 && mali["producer"]["pid"] == 1234 &&
+        mali["producer"]["uid"] == 2000 && mali["producer"]["id"] == 17 &&
+        mali["producer"]["name"] == "/data/local/tmp/owned_mali_producer", "Mali catalog lost counters or registered producer identity");
+    const auto originalMaliSpecs = maliState["sources"][0]["specs"];
+    Require(originalMaliSpecs[0]["unit"] == "PERCENT/NONE" && originalMaliSpecs[1]["unit"] == "BYTE/NONE" &&
+        originalMaliSpecs[2]["unit"] == "NONE/NONE" && originalMaliSpecs[3]["unit"] == "FRAGMENT/PIXEL",
+        "Mali raw unit factors were changed during discovery");
+    const auto maliTrace = DecodeGpuCounterTrace(MaliTrace());
+    const auto maliSummary = SummarizeGpuCounterWindow(maliTrace, mali, 1000000000, 1003000000);
+    Require(Counter(maliSummary,65536)["summary"]["mean"] == 18.75 &&
+        Counter(maliSummary,65537)["summary"]["mean"] == 6144 &&
+        Counter(maliSummary,65538)["summary"]["mean"] == 12 &&
+        Counter(maliSummary,65539)["summary"]["mean"] == 1.25 && maliSummary["unavailable_metrics"].empty(),
+        "Mali high IDs, integer counts, zero activity, or double ratios failed window aggregation");
+    Require(Counter(maliSummary,65537)["unit"] == "BYTE/NONE" &&
+        Counter(maliSummary,65537)["denominator_units"] == Json::array({"NONE"}) &&
+        !Counter(maliSummary,65537).contains("bandwidth_semantics") &&
+        maliState["sources"][0]["specs"] == originalMaliSpecs, "Mali counts were relabelled rates or raw definitions mutated");
+    for (uint32_t clock : {3u, 5u}) {
+        auto raw = MaliTrace(clock);
+        // Clock evidence can be emitted after the samples in the trace stream.
+        ClockPair(raw,1000000000,101000000000,clock);
+        ClockPair(raw,1003000000,101003000000,clock);
+        const auto converted = DecodeGpuCounterTrace(raw);
+        Require(converted["samples"][0]["timestamp_boot_ns"] == 101000000000ull &&
+            converted["samples"][0]["source_timestamp_ns"] == 1000000000 && converted["samples"][0]["source_clock_id"] == clock,
+            "Mali source timestamps or BOOTTIME clock conversion lost evidence");
+        const auto normalized = SummarizeGpuCounterWindow(converted,mali,101000000000,101003000000);
+        Require(Counter(normalized,65537)["summary"]["mean"] == 6144 &&
+            normalized["counter_clock_bridges"][0]["observed_offset_spread_ns"] == 0 &&
+            normalized["counter_clock_bridges"][0]["uncertainty_ns"].is_null() &&
+            QualityContains(Counter(normalized,65537),"clock snapshots"), "Mali clock conversion lost window values or alignment limitations");
+    }
+    Fails([&] { DecodeGpuCounterTrace(MaliTrace(5)); }, "BOOTTIME");
+    Fails([&] { DecodeGpuCounterTrace(MaliTrace(64)); }, "unsupported clock");
+    auto badPair = MaliTrace(5); ClockPair(badPair,1000000000,101000000000); ClockPair(badPair,1003000000,101005000000);
+    Fails([&] { DecodeGpuCounterTrace(badPair); }, "offset variation");
+    badPair = MaliTrace(5); ClockPair(badPair,1000000000,101000000000); ClockPair(badPair,1000000000,101000000001);
+    Fails([&] { DecodeGpuCounterTrace(badPair); }, "contradictory");
+    badPair = MaliTrace(5); ClockPair(badPair,1000000000000,1100000000000);
+    Fails([&] { DecodeGpuCounterTrace(badPair); }, "extrapolation");
+    badPair = MaliTrace(5); ClockPair(badPair,1000000000,101000000000,5,1000);
+    Fails([&] { DecodeGpuCounterTrace(badPair); }, "absolute nanoseconds");
+    badPair = MaliTrace(5); ClockPair(badPair,1000000000,101000000000,5,1,true);
+    Fails([&] { DecodeGpuCounterTrace(badPair); }, "incremental");
+    badPair = MaliTrace(5); ClockPair(badPair,1000000000,UINT64_MAX);
+    Fails([&] { DecodeGpuCounterTrace(badPair); }, "overflow");
+    badPair = MaliTrace(5); ClockPair(badPair,1003000000,1);
+    Fails([&] { DecodeGpuCounterTrace(badPair); }, "underflow");
+    maliState["producers"][0]["id"] = 999;
+    Require(SelectGpuCounters(maliState,1000000,"all")["producer"].is_null(), "Missing producer identity was inferred from an unrelated record");
     const auto cancelledOutput = root / "counter-cancelled";
     {
         std::atomic_bool cancel{true};

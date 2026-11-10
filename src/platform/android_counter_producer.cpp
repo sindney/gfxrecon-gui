@@ -1,4 +1,4 @@
-// Small original launcher for the device's existing OEM Perfetto GPU producer.
+// Shared Adreno/Mali launcher for the device's existing OEM Perfetto GPU producer.
 // It writes no PID file and never signals another process. The host owns its PID.
 #include <dlfcn.h>
 #include <signal.h>

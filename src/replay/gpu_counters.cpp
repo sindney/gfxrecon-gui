@@ -160,6 +160,73 @@ std::string Canonical(std::string text) {
     std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return char(std::tolower(c)); }); return text;
 }
 void Cancelled(const std::atomic_bool* cancel) { if (cancel && cancel->load()) throw std::runtime_error("GPU counter collection cancelled"); }
+void NormalizeCounterClocks(Json& trace) {
+    struct Anchor { uint64_t source, boot; int64_t offset; };
+    std::map<uint64_t, std::vector<Anchor>> bridges;
+    std::set<uint64_t> usedClocks;
+    for (const auto& sample : trace.at("samples"))
+        if (sample.contains("source_clock_id")) usedClocks.insert(sample.at("source_clock_id").get<uint64_t>());
+    for (const auto& snapshot : trace.at("clock_snapshots")) {
+        const auto& clocks = snapshot.at("clocks");
+        const auto boot = std::find_if(clocks.begin(), clocks.end(), [](const Json& c) { return c.at("id") == 6; });
+        if (boot == clocks.end()) continue;
+        const auto bootTime = boot->at("timestamp").get<uint64_t>();
+        for (const auto& clock : clocks) {
+            const auto id = clock.at("id").get<uint64_t>();
+            if (!usedClocks.count(id)) continue;
+            const auto source = clock.at("timestamp").get<uint64_t>();
+            if (source > INT64_MAX || bootTime > INT64_MAX) Bad("clock snapshot timestamp overflow");
+            bridges[id].push_back({source, bootTime, int64_t(bootTime) - int64_t(source)});
+        }
+    }
+    std::map<uint64_t, int64_t> spreads;
+    for (auto& [id, anchors] : bridges) {
+        std::sort(anchors.begin(), anchors.end(), [](const Anchor& a, const Anchor& b) { return a.source < b.source; });
+        int64_t low = anchors.front().offset, high = low;
+        for (size_t i = 0; i < anchors.size(); ++i) {
+            const auto& anchor = anchors[i];
+            if (i && ((anchor.source == anchors[i-1].source && anchor.boot != anchors[i-1].boot) || anchor.boot < anchors[i-1].boot))
+                Bad("contradictory clock snapshots");
+            low = std::min(low, anchor.offset); high = std::max(high, anchor.offset);
+        }
+        if (static_cast<long double>(high) - low > 1000000) Bad("clock snapshot offset variation exceeds 1 ms");
+        spreads[id] = high - low;
+    }
+    std::map<uint64_t, uint64_t> extrapolation;
+    for (auto& sample : trace["samples"]) {
+        if (!sample.contains("source_clock_id")) continue;
+        const auto id = sample.at("source_clock_id").get<uint64_t>(), time = sample.at("source_timestamp_ns").get<uint64_t>();
+        const auto bridge = bridges.find(id);
+        if (bridge == bridges.end()) Bad("counter clock lacks a direct BOOTTIME snapshot bridge");
+        const auto& anchors = bridge->second;
+        auto nearest = std::lower_bound(anchors.begin(), anchors.end(), time, [](const Anchor& a, uint64_t t) { return a.source < t; });
+        if (nearest == anchors.end()) nearest = anchors.end() - 1;
+        else if (nearest != anchors.begin() && time - (nearest-1)->source <= nearest->source - time) --nearest;
+        const uint64_t outside = time < anchors.front().source ? anchors.front().source - time : time > anchors.back().source ? time - anchors.back().source : 0;
+        // Perfetto retains new snapshots only when it observes clock drift;
+        // stable clocks can have startup anchors only. Bound offset reuse to
+        // the collector's existing ten-minute maximum trace lifetime.
+        if (outside > 600000000000ull) Bad("counter clock snapshot extrapolation exceeds ten minutes");
+        extrapolation[id] = std::max(extrapolation[id], outside);
+        uint64_t mapped;
+        if (time >= nearest->source) {
+            const auto delta = time - nearest->source;
+            if (delta > UINT64_MAX - nearest->boot) Bad("converted counter timestamp overflow");
+            mapped = nearest->boot + delta;
+        } else {
+            const auto delta = nearest->source - time;
+            if (delta > nearest->boot) Bad("converted counter timestamp underflow");
+            mapped = nearest->boot - delta;
+        }
+        sample["timestamp_boot_ns"] = mapped;
+    }
+    trace["counter_clock_bridges"] = Json::array();
+    for (const auto& [id, distance] : extrapolation)
+        trace["counter_clock_bridges"].push_back({{"source_clock_id",id},{"source_clock",id == 5 ? "MONOTONIC_RAW" : "MONOTONIC"},
+            {"target_clock","BOOTTIME"},{"method","nearest direct clock snapshot offset"},{"snapshot_count",bridges.at(id).size()},
+            {"observed_offset_spread_ns",spreads.at(id)},{"max_extrapolation_ns",distance},{"uncertainty_ns",nullptr},
+            {"limitation","Snapshot acquisition latency and drift between snapshots are unverified; observed offset spread is not an uncertainty bound"}});
+}
 }
 
 Json DecodeGpuCounterServiceState(const std::vector<uint8_t>& bytes) {
@@ -207,10 +274,12 @@ Json DecodeGpuCounterTrace(const std::vector<uint8_t>& bytes) {
         if (const auto* snapshot = Find(packet, 6)) {
             if (snapshot->wire != 2) Bad("invalid clock snapshot");
             const auto clocks = Fields(snapshot->bytes); if (Find(clocks, 2)) primaryClock = Integer(clocks, 2);
-            Json rows = Json::array();
+            Json rows = Json::array(); std::set<uint64_t> clockIds;
             for (const auto& clock : clocks) if (clock.id == 1 && clock.wire == 2) {
                 const auto row = Fields(clock.bytes); const auto id = Integer(row, 1), multiplier = Integer(row, 4, 1);
                 if (Integer(row, 3)) Bad("incremental clock unsupported");
+                if (!clockIds.insert(id).second) Bad("duplicate clock in snapshot");
+                if ((id == 3 || id == 5 || id == 6) && (!Find(row, 2) || multiplier != 1)) Bad("supported clock snapshot must contain absolute nanoseconds");
                 if (id == 6) { if (multiplier != 1) Bad("BOOTTIME clock is not nanoseconds"); bootSnapshot = true; }
                 rows.push_back({{"id", id}, {"timestamp", Integer(row, 2)}, {"unit_multiplier_ns", multiplier}});
             }
@@ -236,7 +305,7 @@ Json DecodeGpuCounterTrace(const std::vector<uint8_t>& bytes) {
             const auto clock = Integer(packet, 58, defaults.count(sequence) ? defaults.at(sequence) : primaryClock);
             for (const auto& value : fields) if (value.id == 2 && value.wire == 2) {
                 if (!Find(packet, 8)) Bad("counter value has no timestamp");
-                if (clock != 6) Bad("GPU counters are not in BOOTTIME; clock bridge unavailable");
+                if (clock != 6 && clock != 3 && clock != 5) Bad("GPU counters use an unsupported clock; BOOTTIME bridge unavailable");
                 const auto row = Fields(value.bytes); const auto id = Integer(row, 1, UINT64_MAX);
                 if (id == UINT64_MAX) Bad("counter sample has no id");
                 const auto* integer = Find(row, 2); const auto* real = Find(row, 3); double number;
@@ -245,13 +314,16 @@ Json DecodeGpuCounterTrace(const std::vector<uint8_t>& bytes) {
                 else { if (real->wire != 1 || real->bytes.size != 8) Bad("invalid double sample"); uint64_t bits = 0; for (size_t i = 0; i < 8; ++i) bits |= uint64_t(real->bytes.data[i]) << (i * 8); std::memcpy(&number, &bits, sizeof(number)); }
                 if (!std::isfinite(number)) Bad("non-finite counter sample");
                 if (result["samples"].size() >= kMaxSamples) Bad("counter sample budget exceeded");
-                result["samples"].push_back({{"timestamp_boot_ns", Integer(packet, 8)}, {"counter_id", id}, {"value", number}});
+                Json sample{{"timestamp_boot_ns", Integer(packet, 8)}, {"counter_id", id}, {"value", number}};
+                if (clock != 6) { sample["source_clock_id"] = clock; sample["source_timestamp_ns"] = Integer(packet, 8); }
+                result["samples"].push_back(std::move(sample));
             }
         }
     }
     if (!bootSnapshot) Bad("trace lacks BOOTTIME clock snapshot evidence");
     if (result["descriptor"].is_null()) Bad("trace lacks counter descriptors");
     if (result["packet_loss"].get<bool>()) Bad("trace reports packet loss/overwritten buffers");
+    NormalizeCounterClocks(result);
     return result;
 }
 
@@ -262,6 +334,10 @@ Json SummarizeGpuCounterWindow(const Json& trace, const Json& selection, uint64_
     const auto period = selection.at("period_ns").get<uint64_t>();
     if (!period || period > 1000000000) Bad("invalid selected counter period");
     Json definitions = Json::array(), counters = Json::array(), unavailable = Json::array();
+    // Index once: Mali catalogs can emit hundreds of values per packet.
+    std::map<uint64_t, std::vector<std::pair<uint64_t,double>>> byCounter;
+    for (const auto& point : trace.at("samples"))
+        byCounter[point.at("counter_id").get<uint64_t>()].emplace_back(point.at("timestamp_boot_ns").get<uint64_t>(), point.at("value").get<double>());
     for (const auto& descriptor : selection.at("specs")) {
         const auto id = descriptor.at("id").get<uint64_t>();
         const auto& emitted = trace.at("descriptor").at("specs");
@@ -279,10 +355,11 @@ Json SummarizeGpuCounterWindow(const Json& trace, const Json& selection, uint64_
         definitions.push_back(std::move(definition));
         const bool usableDefinition=definitionAvailable&&definitionMismatch.empty()&&descriptor.value("collectable",true);
         std::vector<std::pair<uint64_t,double>> rows;
-        for (const auto& point : trace.at("samples")) if (descriptor.value("collectable",true) && point.at("counter_id").get<uint64_t>() == id)
-            rows.emplace_back(point.at("timestamp_boot_ns").get<uint64_t>(),point.at("value").get<double>());
+        if (descriptor.value("collectable",true)) rows = std::move(byCounter[id]);
         std::sort(rows.begin(),rows.end());
         Json samples = Json::array(), quality = Json::array();
+        if (!trace.value("counter_clock_bridges",Json::array()).empty())
+            quality.push_back("Counter timestamps converted from trace clock snapshots; acquisition latency and between-snapshot drift are unverified");
         std::vector<double> measured, intervals;
         long double covered = 0, weighted = 0;
         const auto gapLimit = std::max<uint64_t>(period*4,period+2000000);
@@ -344,7 +421,8 @@ Json SummarizeGpuCounterWindow(const Json& trace, const Json& selection, uint64_
         {"window_begin_boot_ns",beginBootNs},{"window_end_boot_ns",endBootNs},{"period_ns",period},{"profile",selection.value("profile","precision")},
         {"missing_optional_metrics",selection.value("missing_optional_metrics",Json::array())},{"unavailable_metrics",unavailable},
         {"descriptor_sha256",selection.at("descriptor_sha256")},{"trace_descriptor_sha256",trace.at("descriptor").at("descriptor_sha256")},
-        {"selected_definition_sha256",Sha256Text(definitions.dump())},{"counters",counters},{"clock_snapshots",trace.at("clock_snapshots")},{"packet_loss",false}};
+        {"selected_definition_sha256",Sha256Text(definitions.dump())},{"counters",counters},{"clock_snapshots",trace.at("clock_snapshots")},
+        {"counter_clock_bridges",trace.value("counter_clock_bridges",Json::array())},{"packet_loss",false}};
 }
 
 Json SelectGpuCounters(const Json& service, uint64_t periodNs, const std::string& profile) {
@@ -352,7 +430,11 @@ Json SelectGpuCounters(const Json& service, uint64_t periodNs, const std::string
     if (!periodNs || periodNs > 1000000000) throw std::runtime_error("Counter period must be in (0, 1 second]");
     const auto& sources = service.at("sources");
     if (sources.size() != 1) throw std::runtime_error("Missing or multiple GPU counter producers are ambiguous for this session");
-    const auto& descriptor = sources[0]; const auto minimum = descriptor.at("min_sampling_period_ns").get<uint64_t>();
+    auto descriptor = sources[0];
+    descriptor["producer"] = nullptr;
+    for (const auto& producer : service.at("producers"))
+        if (producer.at("id") == descriptor.at("producer_id")) descriptor["producer"] = producer;
+    const auto minimum = descriptor.at("min_sampling_period_ns").get<uint64_t>();
     const auto maximum = descriptor.at("max_sampling_period_ns").get<uint64_t>();
     if ((minimum && periodNs < minimum) || (maximum && periodNs > maximum)) throw std::runtime_error("Requested counter period is outside the provider's supported range");
     if (profile == "all") {
@@ -473,6 +555,15 @@ struct AndroidGpuCounters::Impl {
         return Command({"shell", AndroidCommand(words)}, {}, {}, cleanup,
             cleanup ? std::chrono::seconds(1) : std::chrono::seconds(15)).output;
     }
+    std::string SaveHelperDiagnostics() noexcept {
+        if (!helperLaunchAttempted) return {};
+        try {
+            const auto log = Shell({"cat", remoteHelperLog}, true);
+            std::ofstream file(output / "counter-producer.log", std::ios::binary | std::ios::trunc);
+            file << log;
+            return log.substr(0, 4096);
+        } catch (...) { return {}; }
+    }
     uint64_t SavedPid(const std::string& file) {
         try {
             const auto text = Shell({"cat", file}, true);
@@ -546,7 +637,7 @@ Json AndroidGpuCounters::Discover(const std::string& profile, uint64_t periodNs)
     if (service.value("active_sessions", uint64_t(0))) throw std::runtime_error("Device busy: another Perfetto tracing session is active");
     auto sources = service.at("sources");
     if (sources.empty()) {
-        if (!std::filesystem::is_regular_file(state.helper)) throw std::runtime_error("Adreno counter producer helper is missing; configure gpu_counter_producer and build the Android helper");
+        if (!std::filesystem::is_regular_file(state.helper)) throw std::runtime_error("OEM GPU counter producer helper is missing; configure gpu_counter_producer and build the Android helper (Adreno/Mali)");
         const auto digest = Sha256File(state.helper, state.cancel);
         std::ifstream capability(state.helper.u8string() + ".capabilities.json");
         if (!capability) throw std::runtime_error("Counter producer helper lacks an identity-bound capability file");
@@ -569,9 +660,10 @@ Json AndroidGpuCounters::Discover(const std::string& profile, uint64_t periodNs)
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             service = state.Query("counter-service-ready.pb"); sources = service.at("sources");
             if (!sources.empty()) break;
-            if (!state.OwnsPid(state.helperPid, state.remoteHelper, false)) throw std::runtime_error("Counter producer helper exited before registration");
+            if (!state.OwnsPid(state.helperPid, state.remoteHelper, false))
+                throw std::runtime_error("OEM GPU counter producer helper exited before registration: " + state.SaveHelperDiagnostics());
         }
-        if (sources.empty()) throw std::runtime_error("Adreno OEM counter provider did not register; counters are required");
+        if (sources.empty()) throw std::runtime_error("OEM GPU counter provider did not register: " + state.SaveHelperDiagnostics());
     } else state.reusedProvider = true;
     state.selection = SelectGpuCounters(service, periodNs, profile);
     state.selection["provider_reused"] = state.reusedProvider;
@@ -590,7 +682,8 @@ void AndroidGpuCounters::Start(uint64_t durationMs) {
     if (state.started || durationMs == 0 || durationMs > 600000) throw std::runtime_error("Invalid or duplicate counter trace start; duration must be at most ten minutes");
     const auto service = state.Query("counter-service-prestart.pb");
     if (service.value("active_sessions", uint64_t(0))) throw std::runtime_error("Device busy: another trace started before measurement");
-    std::vector<uint8_t> buffer, gpu, config, dataSource, source;
+    std::vector<uint8_t> buffer, gpu, config, dataSource, source, builtin;
+    Number(builtin, 5, 6); Number(builtin, 6, 100); Number(builtin, 7, 1); Message(config, 20, builtin);
     Number(buffer, 1, 32768); Number(buffer, 4, 1); Message(config, 1, buffer); // RING_BUFFER, detect any loss during decode.
     Number(gpu, 1, state.selection.at("period_ns").get<uint64_t>());
     for (const auto& descriptor : state.selection.at("specs")) if(descriptor.value("collectable",true)) Number(gpu, 2, descriptor.at("id").get<uint64_t>());
@@ -645,6 +738,7 @@ void AndroidGpuCounters::Cleanup() noexcept {
     if (state.helperLaunchAttempted && !state.helperPid) state.helperPid = state.SavedPid(state.remoteHelperPid);
     try { state.StopOwned(state.tracePid, "/system/bin/perfetto"); } catch (...) {}
     try { state.StopOwned(state.helperPid, state.remoteHelper); } catch (...) {}
+    state.SaveHelperDiagnostics();
     // Preserve a partial trace when cancellation/protocol failure interrupted
     // normal readback. It remains diagnostic data, never a successful result.
     std::error_code ignored;

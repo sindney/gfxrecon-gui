@@ -1,5 +1,6 @@
 #include "gui/workspace.h"
 #include "analysis/image_details.h"
+#include "analysis/image_subresources.h"
 #include <misc/cpp/imgui_stdlib.h>
 #include <tuple>
 #include "gui/refresh_overlay.h"
@@ -26,7 +27,7 @@ void Workspace::DrawBoundImages(const char* id,bool compact){
     for(const auto& category:{std::string("output"),std::string("input")}){
         ImGui::SeparatorText(category=="output"?"Render targets":"Textures");
         std::vector<const ResourceArtifact*> images;
-        for(const auto& image:resources_)if(IsViewableImage(image)&&image.metadata.value("category","")==category)images.push_back(&image);
+        for(const auto* image:ImageBindingRepresentatives(resources_))if(IsViewableImage(*image)&&image->metadata.value("category","")==category)images.push_back(image);
         auto number=[](const Json& object,const char* key){const auto value=object.find(key);return value!=object.end()&&value->is_number()?value->get<uint64_t>():0;};
         std::stable_sort(images.begin(),images.end(),[&](const auto* a,const auto* b){return std::make_tuple(a->metadata.value("stage",std::string{}),number(a->metadata,"set"),number(a->metadata,"binding"),number(a->metadata,"arrayIndex"),number(a->metadata,"location"),a->metadata.value("aspect",std::string{}))<std::make_tuple(b->metadata.value("stage",std::string{}),number(b->metadata,"set"),number(b->metadata,"binding"),number(b->metadata,"arrayIndex"),number(b->metadata,"location"),b->metadata.value("aspect",std::string{}));});
         if(images.empty()){ImGui::TextDisabled("None readable");continue;}
@@ -51,11 +52,11 @@ void Workspace::InvalidateDrawResources(){
     resources_.clear();dumpExecution_=-1;dumpBlock_=0;drawHasInputs_=false;
     executionStatuses_.clear();
     ResetImageDocuments();resourceMode_=0;imageShownGeneration_=0;
-    diagnosticResources_.clear();diagnosticErrors_.clear();diagnosticExecution_=-1;uvDetail_.clear();
+    diagnosticResources_.clear();diagnosticErrors_.clear();diagnosticExecution_=-1;uvDetail_.clear();pendingImageSelection_.reset();
 }
 void Workspace::DrawStageImages(const std::string& stage,bool outputs){
     std::vector<const ResourceArtifact*> images;
-    for(const auto& asset:resources_)if(IsViewableImage(asset)&&asset.metadata.value("category","")== (outputs?"output":"input")&&(outputs||asset.metadata.value("stage","")==stage))images.push_back(&asset);
+    for(const auto* asset:ImageBindingRepresentatives(resources_))if(IsViewableImage(*asset)&&asset->metadata.value("category","")== (outputs?"output":"input")&&(outputs||asset->metadata.value("stage","")==stage))images.push_back(asset);
     std::stable_sort(images.begin(),images.end(),[](const auto* a,const auto* b){return std::make_tuple(Number(a->metadata,"set"),Number(a->metadata,"binding"),Number(a->metadata,"arrayIndex"),Number(a->metadata,"location"))<std::make_tuple(Number(b->metadata,"set"),Number(b->metadata,"binding"),Number(b->metadata,"arrayIndex"),Number(b->metadata,"location"));});
     if(images.empty()){ImGui::TextDisabled("None bound / no readable images");return;}
     if(ImGui::BeginTable("stage-images",5,ImGuiTableFlags_RowBg|ImGuiTableFlags_Resizable|ImGuiTableFlags_BordersInnerV)){
@@ -97,11 +98,14 @@ void Workspace::ResetImageDocuments(){
 void Workspace::DrawImages(){
     if(focusImage_){ImGui::SetNextWindowFocus();focusImage_=false;}
     if(!ImGui::Begin("Image")){ImGui::End();return;}
+    // Resource loads allocate GL textures and must run on the GUI context,
+    // including cached mode switches requested by automation.
+    if(!Busy()&&!pendingDraw_)RestoreImageSelection();
     {
     RefreshOverlay refresh(Refreshing("Image"));
     const std::function<void()> drawVisualizationToolbar = [this]{
         const bool drawSelected=capture_&&selectedExecution_>=0&&selectedEvent_<capture_->events.size()&&capture_->events[selectedEvent_].name.rfind("vkCmdDraw",0)==0;
-        const float selectorWidth = ImGui::GetFontSize()*8;
+        const float selectorWidth = ImGui::GetFontSize()*5;
         ImGui::BeginDisabled(!drawSelected);
         int mode=drawVisualization_; ImGui::SetNextItemWidth(selectorWidth);
         if(ImGui::Combo("##draw-visualization",&mode,"Original\0Solid coverage\0Wireframe\0Depth pass & fail\0UV density\0Orange outline\0"))SetDrawVisualization(mode,selectedSubdraw_);
@@ -124,11 +128,33 @@ void Workspace::DrawImages(){
             }
         ImGui::EndDisabled();
         ImGui::SetItemTooltip("Choose a subdraw for indirect events with a known draw count.\nEarlier subdraws replay normally; the chosen subdraw is inspected or highlighted. Later subdraws are omitted.");
+        {
+            const bool selected=resourceMode_!=2&&imageTab_>=0&&imageTab_<int(imageTabs_.size());
+            const auto metadata=selected?imageTabs_[imageTab_].metadata:Json::object();
+            const auto mip=Number(metadata,"mipLevel"),count=Number(metadata,"mipLevels");const auto preview="Mip "+std::to_string(mip);
+            const bool input=metadata.value("category","")=="input";
+            const bool alternatives=count>1&&(input||std::any_of(resources_.begin(),resources_.end(),[&](const auto& candidate){return ImageBindingKey(candidate.metadata)==ImageBindingKey(metadata)&&Number(candidate.metadata,"mipLevel")!=mip;}));
+            ImGui::SameLine();ImGui::BeginDisabled(Busy()||!selected||!alternatives);ImGui::SetNextItemWidth(selectorWidth);
+            if(ImGui::BeginCombo("##image-mip",preview.c_str())){
+                for(uint32_t level=0;level<std::min<uint64_t>(count,32);++level){
+                    const bool available=input||std::any_of(resources_.begin(),resources_.end(),[&](const auto& candidate){return ImageBindingKey(candidate.metadata)==ImageBindingKey(metadata)&&Number(candidate.metadata,"mipLevel")==level;});
+                    ImGui::BeginDisabled(!available);
+                    if(ImGui::Selectable(("Mip "+std::to_string(level)).c_str(),mip==level))SelectImageMip(level);
+                    ImGui::EndDisabled();
+                }ImGui::EndCombo();
+            }ImGui::EndDisabled();
+            if(ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip|ImGuiHoveredFlags_AllowWhenDisabled)){
+                const auto help=!selected?std::string("Mip selection applies to image resources; this view has no selectable mip levels."):
+                    count?std::to_string(count)+(count==1?" mip level. No other level to select.":" mip levels. Level numbers start at zero.\nInput levels are read on demand; outputs expose levels present in their readback."):
+                    std::string("The image's mip count is unavailable.");
+                ImGui::SetTooltip("%s\nThis is the preview level, not the shader's per-pixel LOD.",help.c_str());
+            }
+        }
     };
     const bool matches=capture_&&selectedExecution_>=0&&dumpExecution_==selectedExecution_&&dumpBlock_==capture_->events[selectedEvent_].block;
     if(matches&&imageShownGeneration_==selectionGeneration_&&diagnosticExecution_==selectedExecution_){
         const auto error=diagnosticErrors_.find(drawVisualization_);
-        if(error!=diagnosticErrors_.end())ImGui::TextWrapped("%s. Showing original color.",error->second.c_str());
+        if(error!=diagnosticErrors_.end())ImGui::TextWrapped("%s. Showing original image.",error->second.c_str());
     }
     if(resourceMode_==2){
         if(drawVisualizationToolbar) drawVisualizationToolbar();
@@ -186,7 +212,7 @@ void Workspace::DrawImages(){
         else{
             int row=0;bool decoded=false,any=false;
             std::vector<const ResourceArtifact*> assets;
-            for(const auto& asset:resources_)if(IsViewableImage(asset)&&asset.metadata.value("category","")== (imageSidebar_?"output":"input"))assets.push_back(&asset);
+            for(const auto* asset:ImageBindingRepresentatives(resources_))if(IsViewableImage(*asset)&&asset->metadata.value("category","")== (imageSidebar_?"output":"input"))assets.push_back(asset);
             std::stable_sort(assets.begin(),assets.end(),[](const auto* a,const auto* b){return std::make_tuple(a->metadata.value("stage",std::string{}),Number(a->metadata,"set"),Number(a->metadata,"binding"),Number(a->metadata,"arrayIndex"),Number(a->metadata,"location"),a->metadata.value("aspect",std::string{}))<std::make_tuple(b->metadata.value("stage",std::string{}),Number(b->metadata,"set"),Number(b->metadata,"binding"),Number(b->metadata,"arrayIndex"),Number(b->metadata,"location"),b->metadata.value("aspect",std::string{}));});
             for(const auto* item:assets){const auto& asset=*item;
                 any=true;ImGui::PushID(row++);auto& thumbnail=assetThumbnails_[asset.file];
@@ -195,7 +221,7 @@ void Workspace::DrawImages(){
                     try{thumbnail.LoadThumbnailBmp(asset.file,asset.metadata.value("aspect",std::string{}),asset.metadata.value("format",std::string{}));}catch(...){failedThumbnails_.insert(asset.file);}decoded=true;
                 }
                 const auto label=ImageBinding(asset);
-                const bool selected=selectedDrawImage_==asset.file&&resourceMetadata_==asset.metadata&&imageTab_>=0;
+                const bool selected=imageTab_>=0&&resourceMetadata_.is_object()&&ImageBindingKey(resourceMetadata_)==ImageBindingKey(asset.metadata);
                 if(thumbnail.DrawPreview((label+"##asset").c_str(),ImVec2(std::max(100.0f,ImGui::GetContentRegionAvail().x),112),selected))OpenResource(asset);
                 ImGui::SetItemTooltip("%s",ImageDetails(asset.metadata).c_str());
                 ImGui::TextWrapped("%s",label.c_str());ImGui::TextDisabled("%s",ImageName(asset).c_str());ImGui::Spacing();ImGui::PopID();

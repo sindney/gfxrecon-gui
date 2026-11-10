@@ -6,6 +6,8 @@
 #include "core/artifacts.h"
 #include "analysis/cache.h"
 #include "analysis/import.h"
+#include "analysis/image_subresources.h"
+#include "core/image_io.h"
 #include "core/tools.h"
 #include "shaders/decode.h"
 #include "platform/device_lock.h"
@@ -24,6 +26,7 @@
 
 namespace gfx {
 namespace {
+bool CaptureSetupJob(const std::string& name){return name=="Checking capture setup"||name=="Discovering Android devices";}
 std::string ReadText(const std::filesystem::path& file) {
     std::ifstream input(file, std::ios::binary);
     if (!input) throw std::runtime_error("Cannot read " + file.u8string());
@@ -216,9 +219,10 @@ bool Workspace::RestoreInspection(size_t execution) {
     return false;
 }
 void Workspace::Start(const std::string& name, std::function<WorkspaceResult()> work, JobKind kind, uint32_t frame) {
-    if (Busy() && autoReplayRunning_) {
+    if (Busy() && (autoReplayRunning_||CaptureSetupJob(jobName_))) {
         deferredJob_ = DeferredJob{name, std::move(work), kind, frame};
-        cancel_ = true; status_ = name + " queued; cancelling the previous preview."; return;
+        captureLaunchPending_=captureResumeLaunch_=false;
+        cancel_ = true; status_ = name + " queued; cancelling background work."; return;
     }
     if (Busy()) { status_ = "Wait for or cancel the current job before starting another operation."; return; }
     cancel_ = false;
@@ -259,13 +263,22 @@ void Workspace::Poll() {
         if (cancel_ && !result.savedCapture) {
             status_ = "Operation cancelled.";
             CompleteOperation(PanelState::Inactive, status_); LOGI("jobs") << status_; loggedStatus_ = status_;
-            if (captureInProgress_) { captureInProgress_ = false; captureStep_ = 2; captureError_ = status_; }
+            if (captureInProgress_) { captureInProgress_ = false; captureError_ = status_; }
+            captureLaunchPending_=false;
             RefreshRecoveries(); return;
         }
         if (result.selectionGeneration && result.selectionGeneration != selectionGeneration_) {
             status_ = "Job finished for a previous selection; its artifacts were retained.";
             CompleteOperation(PanelState::Inactive, status_); LOGI("jobs") << status_; loggedStatus_ = status_;
             return;
+        }
+        if(result.captureProbe){
+            if(result.deviceInfo)deviceInfo_=std::move(result.deviceInfo);
+            captureSetupReady_=result.captureSetupReady;captureSetupIssue_=result.captureSetupIssue;captureError_=result.captureSetupError;
+            if(!captureSetupReady_){captureLaunchPending_=false;captureRepairOpen_=true;}
+            status_=result.message;CompleteOperation(captureSetupReady_?PanelState::Success:PanelState::Failed,status_);
+            if(captureSetupReady_){LOGI("capture")<<status_;}else{LOGE("capture")<<status_;}
+            loggedStatus_=status_;return;
         }
         if (result.perfOperation) {
             if (result.perfProbe) perfCapabilities_ = std::move(result.perfData);
@@ -354,7 +367,10 @@ void Workspace::Poll() {
         }
         if (!result.versions.empty()) versions_ = std::move(result.versions);
         if (!result.toolReady.empty()) toolReady_ = std::move(result.toolReady);
-        if (result.devicesUpdated) devices_ = std::move(result.devices);
+        if (result.devicesUpdated) {
+            devices_ = std::move(result.devices);SelectCaptureDevice(captureSelectFirst_);captureSelectFirst_=false;
+            if(!CaptureTargetLocked()&&captureMode_==0&&!captureSerial_.empty())captureInspectPending_=true;
+        }
         if (result.deviceInfo) deviceInfo_ = std::move(result.deviceInfo);
         if (result.captureSetupReady) captureSetupReady_ = true;
         if (!result.completedCaptures.empty()) completedCaptures_ = std::move(result.completedCaptures);
@@ -368,7 +384,7 @@ void Workspace::Poll() {
             }
             captureError_.clear();
         }
-        if (result.liveSession) { liveCapture_ = std::move(result.liveSession); captureStep_ = 3; }
+        if (result.liveSession) { liveCapture_ = std::move(result.liveSession); }
         if (!result.replayImage.empty() && !result.drawPreview && !result.meshPreview) image_.LoadBmp(result.replayImage);
         if(!result.indirectParameters.is_null())indirectParameters_=std::move(result.indirectParameters);
         if (result.replayResult) {
@@ -432,6 +448,14 @@ void Workspace::Poll() {
             catch (const std::exception& error) { meshDiagnostic_ = error.what(); LOGW("mesh") << meshDiagnostic_; }
         }
         if (!result.meshError.empty()) { meshDiagnostic_ = result.meshError; meshGeneration_ = 0;meshRequestGeneration_=selectionGeneration_; }
+        if(result.mipResource){
+            const auto asset=*result.mipResource;resources_.push_back(asset);
+            for(auto& [mode,assets]:diagnosticResources_)assets.push_back(asset);
+            OpenResource(asset,0,false);
+            for(const auto& cached:inspectionCache_)if(cached.key==displayedInspectionKey_){
+                auto snapshot=cached.result;snapshot.diagnosticResources=diagnosticResources_;snapshot.resources=resources_;CacheInspection(snapshot);break;
+            }
+        }
         if (result.resourcePage) { resourcePage_ = std::move(*result.resourcePage); resourceMode_ = 0; resourceTab_=4;resourceTabRequest_=true;focusResources_=true; }
         if(result.shader){shaderDocuments_[ShaderKey(result.shaderInfo)]=std::make_shared<WorkspaceResult>(result);ShowShaderDocument(result,true);}
         else if(!result.text.empty())deviceOutput_=result.text;
@@ -443,7 +467,7 @@ void Workspace::Poll() {
             pendingDraw_=true;previewPaused_=false;drawRequestedAt_=std::chrono::steady_clock::now();
             if(selectedExecution_>=0)executionStatuses_[selectedExecution_]={PanelState::Running,"Queued requested view"};
         }
-        if (captureInProgress_) { captureInProgress_ = false; captureStep_ = 4; }
+        if (captureInProgress_) { captureInProgress_ = false; }
         LOGI("jobs") << status_;
         loggedStatus_ = status_;
     } catch (const AndroidUnlockRequired& e) {
@@ -455,7 +479,7 @@ void Workspace::Poll() {
         // Another GUI/CLI process holds this phone; nothing on the device was touched.
         jobFailed_ = true; status_ = e.what(); captureError_ = status_;
         CompleteOperation(PanelState::Failed, status_);
-        if (captureInProgress_) { captureInProgress_ = false; captureStep_ = 2; }
+        if (captureInProgress_) { captureInProgress_ = false; }
         LOGW("jobs") << status_; loggedStatus_ = status_;
     } catch (const std::exception& e) {
         jobFailed_ = !cancel_;
@@ -463,7 +487,7 @@ void Workspace::Poll() {
         if(validationReport_.is_object()&&validationReport_.value("status",std::string{})=="running")validationReport_={{"status","failed"},{"message",status_}};
         CompleteOperation(cancel_ ? PanelState::Inactive : PanelState::Failed, status_);
         if (automatic && !cancel_) failedFrames_[currentReplayFrame_] = status_;
-        if (captureInProgress_) { captureInProgress_ = false; captureStep_ = 2; }
+        if (captureInProgress_) { captureInProgress_ = false; }
         if (cancel_) { LOGI("jobs") << status_; }
         else { LOGE("jobs") << status_; }
         loggedStatus_ = status_;
@@ -475,7 +499,8 @@ bool Workspace::HasUnsavedEdits() const {
 }
 void Workspace::Open(const std::string& path) {
     if (HasUnsavedEdits()) { status_ = "Export or revert shader edits before opening another document."; return; }
-    if (Busy() && autoReplayRunning_) {
+    if (Busy() && (autoReplayRunning_||CaptureSetupJob(jobName_))) {
+        captureLaunchPending_=captureResumeLaunch_=false;
         pendingOpen_ = path; deferredJob_.reset(); cancel_ = true; pendingFrame_ = 0; thumbnailQueue_.clear(); return;
     }
     auto file = std::filesystem::u8path(path);
@@ -522,6 +547,7 @@ void Workspace::SelectEvent(size_t index, bool preserveImages) {
     catch (const std::exception& e) { arguments_ = e.what(); }
 }
 void Workspace::SelectExecution(size_t index, bool preview) {
+    pendingImageSelection_.reset();
     if (!capture_ || index >= capture_->executions.size()) return;
     if (preview && !Busy() && imageView_ == 1 && displayedDraw_ == static_cast<int>(index) && selectedExecution_ == static_cast<int>(index) &&
         diagnosticExecution_ == static_cast<int>(index) && imageShownGeneration_ == selectionGeneration_ &&
@@ -546,6 +572,7 @@ void Workspace::SelectExecution(size_t index, bool preview) {
 void Workspace::SetDrawVisualization(int mode,int subdraw){
     if(!capture_||selectedExecution_<0||mode<0||mode>5||subdraw< -1)return;
     if(drawVisualization_==mode&&selectedSubdraw_==subdraw)return;
+    if(imageTab_>=0&&imageTab_<int(imageTabs_.size()))pendingImageSelection_=imageTabs_[imageTab_].metadata;
     drawVisualization_=mode;
     if(selectedSubdraw_==subdraw){
         if(imageShownGeneration_==selectionGeneration_&&diagnosticExecution_==selectedExecution_&&diagnosticSubdraw_==subdraw&&
@@ -811,6 +838,7 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
             else r.validationReport={{"status","failed"},{"message",error.what()}};}
             r.failed=true;r.message=error.what();return r;
         }
+        for(auto& asset:result.resources)if(asset.metadata.contains("imageId"))EnrichImageMetadata(*capture,asset.metadata);
         r.replayImage = result.image; r.replayTarget = result.target;
         r.resources = result.resources;
         if(dump&&subdraw<0)r.indirectParameters=reuseDraw?cachedIndirect:ReadDrawParameters(run,capture->events[capture->executions[execution].event].block);
@@ -865,7 +893,53 @@ void Workspace::ReplayFrame(bool dump, bool revert, uint32_t requestedFrame, boo
                     const auto output=ReplayCapture(pass,target,tools,&cancel_);
                     auto& assets=r.diagnosticResources[diagnostic];
                     for(const auto& asset:result.resources)if(asset.metadata.value("category","")!="output")assets.push_back(asset);
-                    for(const auto& asset:output.resources)if(asset.metadata.value("category","")=="output")assets.push_back(asset);
+                    for(const auto& asset:output.resources)if(asset.metadata.value("category","")=="output"&&asset.metadata.value("aspect","")=="COLOR")assets.push_back(asset);
+                    const bool scalar=std::any_of(result.resources.begin(),result.resources.end(),[](const auto& asset){const auto aspect=asset.metadata.value("aspect","");return asset.metadata.value("category","")=="output"&&(aspect=="DEPTH"||aspect=="STENCIL");});
+                    std::filesystem::path overlay;std::string overlayError;uint32_t overlayWidth=0,overlayHeight=0;
+                    if(scalar)try{
+                        auto color=[](const auto& resources)->const ResourceArtifact&{
+                            for(const auto& asset:resources)if(asset.metadata.value("category","")=="output"&&asset.metadata.value("aspect","")=="COLOR"&&asset.metadata.value("location",0u)==0)return asset;
+                            throw std::runtime_error("No readable COLOR 0 diagnostic for this render pass");
+                        };
+                        const auto display=color(output.resources);std::filesystem::path coverageA=display.file,coverageB;
+                        if(diagnostic==5){
+                            coverageA=color(r.diagnosticResources.at(1)).file;
+                            for(const auto& asset:output.resources)if(asset.role=="Diagnostic coverage")coverageB=asset.file;
+                        }else{
+                            auto maskPass=pass;maskPass.output=NewSession(sessionsDir_);maskPass.coverageVariant=true;
+                            if(diagnostic==4){
+                                maskPass.visualization="solid";maskPass.uvShader.clear();
+                                if(r.diagnosticResources.count(1)){
+                                    coverageA=color(r.diagnosticResources.at(1)).file;
+                                    for(const auto& asset:r.diagnosticResources.at(1))if(asset.role=="Coverage variant")coverageB=asset.file;
+                                }else{
+                                    auto solid=maskPass;solid.output=NewSession(sessionsDir_);solid.coverageVariant=false;
+                                    coverageA=color(ReplayCapture(solid,target,tools,&cancel_).resources).file;
+                                }
+                            }
+                            if(coverageB.empty()){
+                                const auto alternate=ReplayCapture(maskPass,target,tools,&cancel_);coverageB=color(alternate.resources).file;
+                            }
+                        }
+                        if(coverageA.empty()||coverageB.empty())throw std::runtime_error("Diagnostic coverage mask was not returned");
+                        const auto rgba=MakeDrawOverlay(LoadImage(coverageA),LoadImage(coverageB),LoadImage(display.file),
+                            SourceEncodingForImage(display.metadata.value("format",std::string{})),diagnostic==5,diagnostic==2?255:192);
+                        overlay=pass.output/"scalar-overlay.png";WritePng(overlay,rgba);
+                        overlayWidth=rgba.width;overlayHeight=rgba.height;
+                        assets.push_back({overlay,std::filesystem::file_size(overlay),"Geometry overlay",{{"category","overlay"}}});
+                        assets.push_back({coverageB,std::filesystem::file_size(coverageB),"Coverage variant",{{"category","coverage"}}});
+                    }catch(const std::exception& error){if(cancel_.load())throw;overlayError=error.what();LOGW("replay")<<"Scalar overlay: "<<overlayError;}
+                    // Diagnostic pipelines intentionally disable depth/stencil writes.
+                    // Keep original scalar readbacks and attach a display-only annotation.
+                    for(auto asset:result.resources)if(asset.metadata.value("category","")=="output"&&asset.metadata.value("aspect","")!="COLOR"){
+                        if(!overlay.empty()){
+                            const auto dimensions=asset.metadata.value("dimensions",asset.metadata.value("extent",Json::array()));
+                            if(dimensions.is_array()&&dimensions.size()>=2&&dimensions[0]==overlayWidth&&dimensions[1]==overlayHeight)
+                                asset.metadata["overlayFile"]=overlay.u8string();
+                            else asset.metadata["overlayUnavailable"]="Attachment extent differs from the color diagnostic";
+                        }else asset.metadata["overlayUnavailable"]=overlayError;
+                        assets.push_back(std::move(asset));
+                    }
                 }catch(const AndroidUnlockRequired& error){r.failed=true;r.message=error.what();r.unlockRequired=error.state;return r;}
                 catch(const std::exception& error){if(cancel_.load())throw;r.diagnosticErrors[diagnostic]=error.what();LOGW("replay")<<modes[diagnostic]<<": "<<error.what();}
             }
@@ -1190,6 +1264,7 @@ void Workspace::DrawReplayDeviceDialog(){
     ImGui::EndPopup();
 }
 void Workspace::DrawToolSettings() {
+    DrawCaptureEnvironment();
 #ifdef __APPLE__
     ImGui::TextWrapped("Local replay on this Mac needs a Vulkan runtime. Install the LunarG Vulkan SDK (loader and MoltenVK), configure the host tools, and launch with the SDK environment. Offline inspection does not require the local Vulkan runtime.");
     ImGui::TextLinkOpenURL("Download Vulkan SDK for macOS", "https://vulkan.lunarg.com/sdk/home#mac");
@@ -1211,6 +1286,7 @@ void Workspace::DrawToolSettings() {
         operation("Android setup / replay", ToolAvailable("adb"), "ADB and a compatible installed replay APK");
         ImGui::TextWrapped("Android capture/replay requires SDK Platform-Tools (adb), an authorized Vulkan device, and our compatible debug replay/layer APK. NDK and JDK are only needed when building the APKs.");
     }
+    if(captureFocusTools_){ImGui::SetNextItemOpen(true);captureFocusTools_=false;}
     if (ImGui::CollapsingHeader("Tool configuration")) {
         ImGui::BeginDisabled(Busy());
         const float labels=ImGui::CalcTextSize("gpu_counter_producer").x+ImGui::CalcTextSize("Missing").x+ImGui::GetStyle().ItemSpacing.x*3;

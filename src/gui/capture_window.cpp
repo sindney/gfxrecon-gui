@@ -8,13 +8,40 @@
 
 namespace gfx {
 void Workspace::RequestCapture() {
-    showCapture_=true;captureError_.clear();captureStep_=0;
-    if(captureInProgress_){captureStep_=3;return;}
-    if(!completedCaptures_.empty()){captureStep_=4;return;}
-    if(liveCapture_) {
-        const auto session=liveCapture_->State();
-        if((session.phase!=LivePhase::Ended&&session.phase!=LivePhase::Failed)||session.gameRunning||!session.captures.empty())captureStep_=3;
+    showCapture_=true;captureError_.clear();
+    if(CaptureTargetLocked())return;
+    if(!Busy())SelectCaptureDevice(true);captureSelectFirst_=true;
+#ifdef IMGUI_TEMPLATE_TESTS
+    if(captureUiFixture_)return;
+#endif
+    captureDiscoverPending_=ToolAvailable("adb");
+}
+bool Workspace::CaptureTargetLocked()const{
+    const auto state=LiveState();
+    return captureInProgress_||(state&&(state->commandPending||state->gameRunning||(state->phase!=LivePhase::Ended&&state->phase!=LivePhase::Failed)));
+}
+void Workspace::SelectCaptureDevice(bool first){
+    if(CaptureTargetLocked()||(!first&&captureMode_==1))return;
+    const auto ready=[&](const AndroidDevice& d){return d.state=="device"&&d.serial==captureSerial_;};
+    if(!first&&std::any_of(devices_.begin(),devices_.end(),ready))return;
+    const auto found=std::find_if(devices_.begin(),devices_.end(),[](const AndroidDevice& d){return d.state=="device";});
+    const auto serial=found==devices_.end()?std::string{}:found->serial;
+    if(found!=devices_.end())captureMode_=0;
+    if(captureSerial_!=serial){captureSerial_=serial;deviceInfo_.reset();captureSetupReady_=false;}
+}
+void Workspace::PollCaptureSetup(){
+#ifdef IMGUI_TEMPLATE_TESTS
+    if(captureUiFixture_){captureDiscoverPending_=captureInspectPending_=false;return;}
+#endif
+    if(Busy()||captureInProgress_)return;
+    const auto retryId=ImGui::GetID("##capture-discovery-retry");auto* storage=ImGui::GetStateStorage();
+    if(!CaptureTargetLocked()&&captureMode_==0&&captureSerial_.empty()&&ToolAvailable("adb")&&
+       ImGui::GetTime()>=storage->GetFloat(retryId,0))captureDiscoverPending_=true;
+    if(captureDiscoverPending_){
+        storage->SetFloat(retryId,static_cast<float>(ImGui::GetTime()+2));captureDiscoverPending_=false;RefreshDevices();return;
     }
+    if(captureInspectPending_){captureInspectPending_=false;CheckCaptureSetup();return;}
+    if(captureLaunchPending_&&captureSetupReady_){captureLaunchPending_=false;StartCapture();}
 }
 namespace {
 std::filesystem::path Session(const std::filesystem::path& root) {
@@ -38,19 +65,45 @@ void Workspace::RefreshRecoveries() {
         }
     } catch (const std::exception& e) { LOGW("recovery") << e.what(); }
 }
-void Workspace::InspectCaptureDevice() {
-    const auto tools = tools_; const auto serial = androidSerial_;
-    Start("Inspecting capture device", [this, tools, serial] {
-        const auto target = ResolveReplayTarget(ReplayMode::Android, true, serial, tools.at("adb"), &cancel_);
-        WorkspaceResult r;
-        r.deviceInfo = InspectAndroidDevice({tools.at("adb"), target.serial, &cancel_});
-        r.captureSetupReady = std::find(r.deviceInfo->packages.begin(), r.deviceInfo->packages.end(), "com.lunarg.gfxreconstruct.replay") != r.deviceInfo->packages.end();
-        r.message = "Device inspected: " + r.deviceInfo->model + " / Android " + r.deviceInfo->androidVersion;
+void Workspace::CheckCaptureSetup(bool launchAfter) {
+    if(Busy()||CaptureSessionActive())return;
+    captureLaunchPending_=captureResumeLaunch_=launchAfter;captureSetupReady_=false;captureError_.clear();
+    const auto fail=[&](const std::string& issue,const std::string& message){captureSetupIssue_=issue;captureError_=message;captureRepairOpen_=true;captureLaunchPending_=false;};
+    if(!ToolAvailable("convert")){fail("tools","Configure the capture converter in Settings.");return;}
+    if(captureMode_==0&&!ToolAvailable("adb")){fail("tools","Configure Android Platform-Tools (adb) in Settings.");return;}
+    if(captureStyle_==0&&(captureLength_<1||captureLength_>1000000)){fail("options","Choose 1 to 1,000,000 frames in recording options.");return;}
+    if(captureStyle_==2)try{ValidateCaptureFrames(captureFrames_);}catch(const std::exception& e){fail("options",e.what());return;}
+    const auto tools=tools_;const auto serial=captureSerial_,package=capturePackage_,executable=captureExecutable_;const auto mode=captureMode_;
+    Start("Checking capture setup",[this,tools,serial,package,executable,mode,launchAfter]{
+        WorkspaceResult r;r.captureProbe=true;r.captureSetupIssue="tools";
+        try{
+            if(mode==0){
+                r.captureSetupIssue="device";
+                if(serial.empty())throw std::runtime_error("Connect and authorize a phone, then refresh devices.");
+                const auto target=ResolveReplayTarget(ReplayMode::Android,true,serial,tools.at("adb"),&cancel_);
+                AdbConnection adb{tools.at("adb"),target.serial,&cancel_};r.deviceInfo=InspectAndroidDevice(adb);
+                r.captureSetupIssue="replay-apk";
+                if(std::find(r.deviceInfo->packages.begin(),r.deviceInfo->packages.end(),"com.lunarg.gfxreconstruct.replay")==r.deviceInfo->packages.end())
+                    throw std::runtime_error("Install the compatible replay APK to provide the capture layer.");
+                if(launchAfter){
+                    r.captureSetupIssue="device";RequireAndroidUnlocked(adb);r.captureSetupIssue="target";
+                    if(package.empty()||package.find('.')==std::string::npos||package.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._")!=std::string::npos)
+                        throw std::runtime_error("Choose a valid Android package.");
+                    adb.Shell({"run-as",package,"id"});
+                }
+            }else{
+                if(!std::filesystem::is_regular_file(std::filesystem::u8path(tools.at("layer"))/"VkLayer_gfxreconstruct.json")||
+                   !std::filesystem::is_regular_file(std::filesystem::u8path(tools.at("layer"))/"capture-control.json"))
+                    throw std::runtime_error("Configure the compatible Windows capture layer in Settings.");
+                if(launchAfter&&!std::filesystem::is_regular_file(std::filesystem::u8path(executable))){r.captureSetupIssue="target";throw std::runtime_error("Choose an existing Vulkan executable.");}
+            }
+            r.captureSetupReady=true;r.captureSetupIssue.clear();r.message="Capture setup ready.";
+        }catch(const std::exception& e){r.captureSetupError=e.what();r.message=r.captureSetupError;}
         return r;
     });
 }
 void Workspace::InstallReplayApk(bool sample) {
-    const auto tools = tools_; const auto serial = androidSerial_;
+    const auto tools = tools_; const auto serial = captureSerial_;
     Start(sample ? "Installing Vulkan sample APK" : "Installing replay APK", [this, tools, serial, sample] {
         const auto target = ResolveReplayTarget(ReplayMode::Android, true, serial, tools.at("adb"), &cancel_);
         AdbConnection adb{tools.at("adb"), target.serial, &cancel_};
@@ -71,12 +124,13 @@ void Workspace::StartCapture() {
     if (captureStyle_ != 2) { StartLiveCapture(); return; }
     if (HasUnsavedEdits()) { status_ = "Export or revert shader edits before starting a new capture."; return; }
     if (Busy()) return;
-    captureInProgress_ = true; captureStep_ = 3; captureError_.clear();
+    liveCapture_.reset();liveCaptureDetail_.clear();
+    captureInProgress_ = true; captureError_.clear();
     completedCaptures_.clear();
     SetCaptureProgress("Preparing capture");
     captureSession_ = Session(sessionsDir_);
     const auto session = captureSession_;
-    const auto tools = tools_; const auto serial = androidSerial_;
+    const auto tools = tools_; const auto serial = captureSerial_;
     const auto package = capturePackage_, arguments = captureArguments_, frames = captureFrames_;
     const auto executable = captureExecutable_, working = captureWorkingDirectory_, windowsArgs = windowsArguments_;
     const auto mode = captureMode_;
@@ -102,7 +156,7 @@ void Workspace::StartCapture() {
 }
 void Workspace::StartLiveCapture() {
     if (Busy() || HasUnsavedEdits()) { status_ = "Finish the current operation or export/revert shader edits first."; return; }
-    if (liveCapture_ && (liveCapture_->Active() || liveCapture_->State().gameRunning)) { captureStep_ = 3; return; }
+    if (liveCapture_ && liveCapture_->Active())return;
     if (captureStyle_ == 0 && (captureLength_ < 1 || captureLength_ > 1000000)) { captureError_ = "Choose 1 to 1,000,000 frames per trigger."; return; }
     liveCapture_.reset(); captureSession_ = Session(sessionsDir_); captureError_.clear();
     completedCaptures_.clear();
@@ -113,7 +167,7 @@ void Workspace::StartLiveCapture() {
     options.layerDirectory = tools_.at("layer"); options.infoTool = tools_.at("info");
     options.process.executable = captureExecutable_; options.process.arguments = SplitProcessArguments(windowsArguments_);
     options.process.workingDirectory = captureWorkingDirectory_;
-    const auto tools = tools_; const auto serial = androidSerial_;
+    const auto tools = tools_; const auto serial = captureSerial_;
     Start("Arming capture session", [this, options, tools, serial] {
         WorkspaceResult result;
         if (options.android) {
@@ -128,6 +182,7 @@ void Workspace::PollLiveCapture() {
     const bool running=state.phase==LivePhase::Starting||state.phase==LivePhase::Triggering||state.phase==LivePhase::Recording||state.phase==LivePhase::Stopping||state.phase==LivePhase::Retrieving;
     if(state.detail!=liveCaptureDetail_){
         liveCaptureDetail_=state.detail;
+        if(state.phase==LivePhase::Failed){captureError_=state.detail;captureSetupIssue_="runtime";captureResumeLaunch_=false;captureRepairOpen_=true;}
         const auto indicator=state.phase==LivePhase::Failed?PanelState::Failed:running?PanelState::Running:state.phase==LivePhase::Armed&&!state.captures.empty()?PanelState::Success:PanelState::Inactive;
         panelStatuses_["Console"]={indicator,state.detail};
     }

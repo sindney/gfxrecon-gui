@@ -76,8 +76,22 @@ The GUI itself and offline inspection do not require the local Vulkan runtime.
 Android capture/replay needs [SDK Platform-Tools (adb)](https://developer.android.com/tools/releases/platform-tools)
 and our compatible debug replay/layer APK; capture targets must be debuggable
 Vulkan apps. NDK, JDK and the remaining Android build tools are needed only when
-building those APKs.
-See [Android prerequisites](docs/BUILD.md#android-device-capture-and-replay).
+building those APKs. Install the replay APK through **Settings > Tools and devices >
+Capture environment > Install replay APK** before capturing; it supplies the capture layer.
+On Android 11+, this button also handles package visibility with
+`--force-queryable`, usually avoiding target APK manifest changes. The inspector
+enables the layer before restarting the target and writes captures to app-private
+storage, so the target needs no embedded capture SDK or extra storage permissions.
+See [Android capture setup and troubleshooting](docs/BUILD.md#android-capture-setup)
+for the manual install command and common failures.
+
+For capture, open **File > Capture application**. The first ready connected phone
+is selected automatically; choose the app and click **Launch**, then **Capture**
+when the scene is ready. Missing prerequisites open setup guidance. Unavailable
+actions stay visible and gray; hover for details. Recording mode and arguments
+are shown inline. **End session** finishes any recording and asks whether to close
+the app; the title-bar X only hides the controls. Advanced manual start/stop
+controls are available through the [CLI](docs/CLI.md#capture).
 
 ## CLI
 

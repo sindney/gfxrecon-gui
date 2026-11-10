@@ -171,6 +171,7 @@ Json PrepareOptimized(ReplayRequest& replay, const std::string& sourceHash,
 }
 bool HasVisualization(const ReplayRequest& r){return r.visualization!="original"||r.indirectSubdraw>=0;}
 Json VisualizationConfig(const ReplayRequest& r){return {{"protocol",r.visualization=="silhouette"?3:r.visualization=="uv"?2:1},{"mode",r.visualization},{"pipeline",r.visualizationPipeline},{"subdraw",r.indirectSubdraw},{"draw_id_safe",r.indirectDrawIdSafe},{"uv_shader_sha256",r.uvShader.empty()?std::string{}:CachedSha256File(r.uvShader)},
+    {"coverage_variant",r.coverageVariant},
     {"outline_base_sha256",r.outlineBaseImage.empty()?std::string{}:CachedSha256File(r.outlineBaseImage)},{"outline_coverage_sha256",r.outlineCoverageImage.empty()?std::string{}:CachedSha256File(r.outlineCoverageImage)}};}
 Json DumpOptions(const ReplayRequest& r, const std::string& output) {
     return {{"OutputDir", output}, {"ImageFormat", r.imageFormat},
@@ -289,8 +290,8 @@ ReplayResult RunAndroid(const ReplayRequest& r, const ReplayTarget& target, cons
     if (!base.empty()) {
         if (!captureReused) {
             adb.Put(kPackage, r.capture, base + "/capture.partial");
-            // exec-in may return before the receiver finishes. Keep an explicit
-            // checksum acknowledgment before atomically publishing the upload.
+            // Put waits for the receiver's content acknowledgement. Verify actual
+            // contents before atomically publishing the reusable capture cache.
             adb.Shell({"run-as", kPackage, "sh", "-c", "set -e; checksum=$(sha256sum " + QuoteAndroidArgument(base + "/capture.partial") +
                 "); test \"${checksum%% *}\" = " + QuoteAndroidArgument(captureHash) + " || { echo 'Uploaded capture checksum did not match' >&2; exit 1; }; mv " +
                 QuoteAndroidArgument(base + "/capture.partial") + " " + QuoteAndroidArgument(base + "/capture.gfxr")});
@@ -802,15 +803,18 @@ ReplayResult ReplayCapture(const ReplayRequest& request, const ReplayTarget& tar
         const auto report=ReadJson(reportFile);
         if(report.value("protocol",0)!=VisualizationConfig(r).at("protocol").get<int>()||report.value("mode",std::string{})!=r.visualization||report.value("subdraw",-2)!=r.indirectSubdraw||report.value("pipeline",uint64_t(0))!=r.visualizationPipeline)
             throw std::runtime_error("Replay visualization provenance does not match the selected draw");
+        if(report.value("coverage_variant",false)!=r.coverageVariant)throw std::runtime_error("Replay backend does not support diagnostic coverage variants; update the replay tool/APK");
         if(!report.value("applied",false)||!report.value("error",std::string{}).empty())throw std::runtime_error("Draw visualization unavailable: "+report.value("error",std::string("selected draw was not reached")));
     }
     if(r.visualization=="silhouette"){
         bool composed=false;
         for(const auto& asset:result.resources)if(asset.metadata.value("category","")=="output"&&asset.metadata.value("aspect","")=="COLOR"&&asset.metadata.value("location",0u)==0&&asset.file.extension()==".bmp"){
+            const auto coverage=r.output/"outline-coverage.bmp";std::filesystem::copy_file(asset.file,coverage);
             WriteBmp(asset.file,ComposeDrawOutline(LoadImage(r.outlineBaseImage),LoadImage(r.outlineCoverageImage),LoadImage(asset.file),2,
                 SourceEncodingForImage(asset.metadata.value("format",std::string{}))));composed=true;
         }
         if(!composed)throw std::runtime_error("Orange outline requires a readable COLOR 0 attachment");
+        result.resources.push_back({r.output/"outline-coverage.bmp",std::filesystem::file_size(r.output/"outline-coverage.bmp"),"Diagnostic coverage",{{"category","coverage"}}});
     }
     if (CachedSha256File(r.capture, cancel) != captureHash) throw std::runtime_error("Capture changed during replay; artifacts were not published");
     if(r.capture!=request.capture && CachedSha256File(request.capture,cancel)!=sourceHash)

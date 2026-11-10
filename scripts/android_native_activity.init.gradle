@@ -26,9 +26,23 @@ gradle.beforeProject { project ->
                     def generated = new File(project.layout.buildDirectory.get().asFile,
                                              'gfxrecon-gui-manifest/AndroidManifest.xml')
                     generated.parentFile.mkdirs()
-                    generated.setText(original.replace('android:hasCode="false"', 'android:hasCode="true"'), 'UTF-8')
+                    def content = original.replace('android:hasCode="false"', 'android:hasCode="true"')
+                    // Android package visibility also applies when the Vulkan
+                    // loader locates the replay APK's debug capture layer.
+                    if (project.name == 'test_launcher') {
+                        content = content.replace('</manifest>', '<queries><package android:name="com.lunarg.gfxreconstruct.replay" /></queries></manifest>')
+                    }
+                    generated.setText(content, 'UTF-8')
                     project.android.sourceSets.main.manifest.srcFile generated
                 }
+            }
+        }
+    }
+    project.plugins.withId('com.android.library') {
+        if (project.name == 'layer') {
+            def hook = new File(gradle.startParameter.initScripts[0].parentFile.parentFile, 'cmake/gui_capture_logging.cmake')
+            project.androidComponents.finalizeDsl { extension ->
+                extension.defaultConfig.externalNativeBuild.cmake.arguments.add("-DCMAKE_PROJECT_INCLUDE=${hook.absolutePath.replace('\\', '/')}")
             }
         }
     }

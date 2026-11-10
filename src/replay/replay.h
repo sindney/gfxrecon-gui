@@ -52,6 +52,7 @@ struct ReplayRequest {
     bool descriptorImages = false;
     bool drawInspection = false;
     std::string visualization="original";
+    bool coverageVariant=false; // alternate diagnostic colors for background-independent coverage
     std::filesystem::path uvShader;
     std::filesystem::path outlineBaseImage,outlineCoverageImage;
     uint64_t visualizationPipeline=0;
