@@ -104,7 +104,7 @@ void ReviewScreenshot(ImGuiTestContext* ctx,const char* suffix){
     const auto folder=std::getenv("GFXRECON_GUI_REVIEW_DIR");if(!folder)return;
     std::filesystem::create_directories(std::filesystem::u8path(folder));ctx->Yield(4);
     const auto path=std::filesystem::u8path(folder)/(std::string(suffix)+".png");const auto* viewport=ImGui::GetMainViewport();ctx->CaptureReset();
-    const int flags=std::string(suffix)=="phone-unlock-notice"||(std::string(suffix)=="settings-dialog"||std::string(suffix)=="settings-tools"||std::string(suffix)=="replay-device")||std::string(suffix).rfind("perf-popup",0)==0||std::string(suffix).rfind("capture-",0)==0?ImGuiCaptureFlags_IncludePopups:0;
+    const int flags=std::string(suffix)=="phone-unlock-notice"||(std::string(suffix)=="settings-dialog"||std::string(suffix)=="settings-tools"||std::string(suffix)=="replay-device")||std::string(suffix).find("problem")!=std::string::npos||std::string(suffix).rfind("perf-popup",0)==0||std::string(suffix).rfind("capture-",0)==0?ImGuiCaptureFlags_IncludePopups:0;
     ctx->CaptureArgs->InCaptureRect=ImRect(viewport->Pos,ImVec2(viewport->Pos.x+viewport->Size.x,viewport->Pos.y+viewport->Size.y));
     std::snprintf(ctx->CaptureArgs->InOutputFile,sizeof(ctx->CaptureArgs->InOutputFile),"%s",path.u8string().c_str());IM_CHECK(ctx->CaptureScreenshot(flags));
 }
@@ -1054,6 +1054,82 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         IM_CHECK(found);
     };
 
+    t = IM_REGISTER_TEST(engine, "shell", "console follows physical log lines and preserves manual scrolling");
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        ctx->WindowFocus("//Console");ctx->Yield(3);ctx->SetRef("//Console");
+        ctx->ItemInputValue("##filter","console-scroll-regression");ctx->ItemClick("Clear");
+        for(int i=0;i<100;++i)LOGI("test")<<"console-scroll-regression row "<<i;
+        ctx->Yield(5);
+        auto* log=ctx->WindowInfo("//Console/##log").Window;
+        IM_CHECK(log!=nullptr);IM_CHECK(log->ScrollMax.y>0);
+        IM_CHECK(std::abs(log->Scroll.y-log->ScrollMax.y)<1);
+        const float before=log->ScrollMax.y;
+        std::string message="console-scroll-regression multiline";
+        for(int i=0;i<60;++i)message+="\r\ncontinuation "+std::to_string(i);
+        message+="\n\nlast physical line";
+        LOGE("test")<<message;
+        ctx->Yield(5);
+        IM_CHECK(log->ScrollMax.y-before>ImGui::GetTextLineHeightWithSpacing()*60);
+        IM_CHECK(std::abs(log->Scroll.y-log->ScrollMax.y)<1);
+        ReviewScreenshot(ctx,"console-multiline-tail");
+        ctx->MouseMoveToPos(log->InnerRect.GetCenter());ctx->MouseWheelY(10);ctx->Yield(4);
+        const float scrolled=log->Scroll.y;IM_CHECK(scrolled<log->ScrollMax.y-20);
+        LOGW("test")<<"console-scroll-regression append while reading\ncontinuation";
+        ctx->Yield(4);IM_CHECK(std::abs(log->Scroll.y-scrolled)<1);
+        ctx->SetRef("//Console");ctx->ItemClick("Auto-scroll");ctx->ItemClick("Auto-scroll");ctx->Yield(5);
+        IM_CHECK(std::abs(log->Scroll.y-log->ScrollMax.y)<1);
+        ctx->ItemClick("Clear");ctx->Yield(4);IM_CHECK_EQ(log->ScrollMax.y,0.0f);
+        ctx->ItemInputValue("##filter","");
+    };
+
+    t = IM_REGISTER_TEST(engine,"shell","problem dialogs queue complete messages and stay dismissed");t->UserData=app;
+    t->TestFunc=[](ImGuiTestContext* ctx){
+        auto& w=static_cast<App*>(ctx->Test->UserData)->Workspace();
+        std::string message="First problem line";
+        for(int i=0;i<60;++i)message+="\nProblem detail "+std::to_string(i);
+        message+="\nLast problem line";
+        w.ReportProblem("Replay unavailable",message,"dialog-regression");
+        w.ReportProblem("Replay unavailable",message,"dialog-regression");
+        w.ReportProblem("Image unavailable","Second queued problem");ctx->Yield(4);
+        ctx->SetRef("//Problem");IM_CHECK(ctx->ItemExists("OK"));
+        IM_CHECK(!ctx->ItemExists("Cancel")&&!ctx->ItemExists("Close"));
+        auto* details=ctx->WindowInfo("//Problem/problem-message").Window;
+        IM_CHECK(details!=nullptr&&details->ScrollMax.y>0);
+        IM_CHECK(VisibleUiText(ctx).find("First problem line")!=std::string::npos);
+        details->ScrollTarget.y=details->ScrollMax.y;details->ScrollTargetCenterRatio.y=0;ctx->Yield(3);
+        IM_CHECK(VisibleUiText(ctx).find("Last problem line")!=std::string::npos);
+        ReviewScreenshot(ctx,"problem-dialog-multiline");
+        ctx->ItemClick("OK");ctx->Yield(4);ctx->SetRef("//Problem");
+        IM_CHECK(VisibleUiText(ctx).find("Second queued problem")!=std::string::npos);
+        ctx->ItemClick("OK");ctx->Yield(10);
+        w.ReportProblem("Replay unavailable",message,"dialog-regression");ctx->Yield(5);
+        IM_CHECK(ImGui::GetTopMostPopupModal()==nullptr);
+        ctx->MenuClick("//##MainMenuBar/File/Settings...");ctx->Yield(3);
+        w.ReportProblem("Tool unavailable","A problem while settings are open");ctx->Yield(4);
+        ctx->SetRef("//Problem");IM_CHECK(ctx->ItemExists("OK"));ctx->KeyPress(ImGuiKey_Escape);ctx->Yield(3);
+        IM_CHECK(ctx->ItemExists("OK"));ctx->ItemClick("OK");ctx->Yield(3);
+        ctx->SetRef("//Settings");IM_CHECK(ctx->ItemExists("Close"));ctx->ItemClick("Close");
+        const auto capture=w.CurrentCapture();
+        w.Open((std::filesystem::temp_directory_path()/"gfxrecon-missing-capture-for-dialog.gfxr").u8string());WaitForWorkspace(ctx,w);
+        IM_CHECK(w.CurrentCapture()==capture);ctx->SetRef("//Problem");IM_CHECK(ctx->ItemExists("OK"));ctx->ItemClick("OK");ctx->Yield(3);
+        IM_CHECK(ImGui::GetTopMostPopupModal()==nullptr);
+    };
+
+    t=IM_REGISTER_TEST(engine,"inspection","unsupported draw visualization reports a dialog and restores original mode");t->UserData=app;
+    t->TestFunc=[](ImGuiTestContext* ctx){
+        auto& w=static_cast<App*>(ctx->Test->UserData)->Workspace();
+        w.SetReplayMode(gfx::ReplayMode::Local);
+        w.Open((std::filesystem::current_path()/"samples/windows-triangle.gfxr").u8string());WaitForWorkspace(ctx,w);
+        w.SelectExecution(0,true);WaitForWorkspace(ctx,w);ctx->WindowFocus("//Image");ctx->Yield(3);
+        const int width=w.SelectedImage().Width();IM_CHECK(width>0);
+        w.SetDrawDiagnosticErrorForTests(2,"Draw visualization unavailable: The replay device does not support fillModeNonSolid.");
+        w.SetDrawVisualization(2);ctx->Yield(5);IM_CHECK_EQ(w.DrawVisualization(),0);
+        IM_CHECK_EQ(w.SelectedImage().Width(),width);ctx->SetRef("//Problem");IM_CHECK(ctx->ItemExists("OK"));
+        IM_CHECK(VisibleUiText(ctx).find("fillModeNonSolid")!=std::string::npos);
+        ReviewScreenshot(ctx,"draw-visualization-problem");ctx->ItemClick("OK");ctx->Yield(10);
+        IM_CHECK(ImGui::GetTopMostPopupModal()==nullptr);IM_CHECK_EQ(w.DrawVisualization(),0);
+    };
+
     t = IM_REGISTER_TEST(engine, "shell", "palette shortcut filters and dispatches settings");
     t->TestFunc = [](ImGuiTestContext* ctx) {
         ctx->KeyPress(kShortcutModifier | ImGuiKey_P);
@@ -1253,6 +1329,17 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
                     ctx->SetRef("//Image");
                 }
                 IM_CHECK_EQ(workspace.DrawVisualization(),0);
+            }else{
+                ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);
+                ctx->ComboClick("##draw-visualization/Wireframe");wait();
+                if(workspace.DrawVisualization()==0){
+                    ctx->SetRef("//Problem");IM_CHECK(ctx->ItemExists("OK"));
+                    ReviewScreenshot(ctx,"android-draw-visualization-problem");ctx->ItemClick("OK");
+                }else{
+                    IM_CHECK(workspace.ExecutionState(0)==gfx::PanelState::Success);
+                    workspace.SetDrawVisualization(0);wait();
+                }
+                IM_CHECK(workspace.SelectedImage().Width()>0);
             }
             ImGui::SetWindowFocus("Pipeline");ctx->Yield(3);ctx->SetRef("//Pipeline");
             ctx->ItemClick("**/VTX");IM_CHECK_EQ(workspace.PipelineStage(),0);
@@ -1266,6 +1353,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
                     IM_CHECK(workspace.Status().find("local GPU lacks a Vulkan extension") != std::string::npos);
                     IM_CHECK_EQ(workspace.BaselineImage().Width(), originalWidth);
                     IM_CHECK(workspace.FrameStateFor(1) == gfx::PanelState::Failed);
+                    ctx->SetRef("//Problem");ctx->ItemClick("OK");
                 } else {
                     IM_CHECK(workspace.StateFor("Frames") == gfx::PanelState::Success);
                     IM_CHECK(workspace.FrameStateFor(1) == gfx::PanelState::Success);
@@ -1381,6 +1469,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             ctx->SetRef("//Shader"); ctx->ItemClick("Compile"); wait();
             IM_CHECK(workspace.Status().find("ERROR") != std::string::npos);
             IM_CHECK(workspace.StateFor("Shader") == gfx::PanelState::Failed);
+            ctx->SetRef("//Problem");ctx->ItemClick("OK");ctx->SetRef("//Shader");
             IM_CHECK((ctx->ItemInfo("Apply").ItemFlags & ImGuiItemFlags_Disabled) != 0);
             IM_CHECK(workspace.BaselineImage().Pixel(workspace.BaselineImage().Width() / 2, workspace.BaselineImage().Height() / 2) == pixel);
             // Change selection before yielding to Poll: a warm cache hit can
@@ -1399,6 +1488,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
                 ctx->ItemClick("Reset shader");wait();IM_CHECK(workspace.Status().find("Simulated reset replay failure")!=std::string::npos);
                 IM_CHECK_EQ(workspace.Editor().GetText(),authored);IM_CHECK(workspace.HasUnsavedEdits());
                 IM_CHECK(workspace.BaselineImage().Pixel(workspace.BaselineImage().Width()/2,workspace.BaselineImage().Height()/2)==pixel);
+                ctx->SetRef("//Problem");ctx->ItemClick("OK");ctx->SetRef("//Shader");
             }
 #endif
             ImGui::SetWindowFocus("Shader");ctx->Yield(3);ctx->SetRef("//Shader");ctx->ItemClick("Reset shader");wait();
@@ -1649,6 +1739,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             IM_CHECK(!w.Refreshing("Pipeline")&&!w.Refreshing("Image"));
             w.ConfigureReplayFixture((std::filesystem::temp_directory_path()/"gfxrecon-missing-backend.exe").u8string());w.SelectExecution(2,true);WaitForWorkspace(ctx,w);
             IM_CHECK(w.ExecutionState(2)==gfx::PanelState::Failed);IM_CHECK(!w.Refreshing("Pipeline")&&!w.Refreshing("Image"));
+            ctx->SetRef("//Problem");ctx->ItemClick("OK");
             w.ConfigureReplayFixture(replay);w.SelectExecution(2,true);WaitForWorkspace(ctx,w);IM_CHECK(w.ExecutionState(2)==gfx::PanelState::Success);
 #endif
         };
@@ -1712,6 +1803,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             captureSaveChoice=(folder/"invalid.txt").u8string();ctx->MenuClick("//##MainMenuBar/File/Save capture as...");WaitForWorkspace(ctx,w);
             IM_CHECK(w.CurrentCapture()->source==saved);IM_CHECK(w.Status().find(".gfxr extension")!=std::string::npos);
             IM_CHECK(!std::filesystem::exists(folder/"invalid.txt"));IM_CHECK(gfx::Sha256File(original)==hash);
+            ctx->SetRef("//Problem");ctx->ItemClick("OK");
             w.Open(std::getenv("GFXRECON_GUI_TEST_CAPTURE"));WaitForWorkspace(ctx,w);
             IM_CHECK(!std::filesystem::is_symlink(folder)&&std::filesystem::equivalent(folder.parent_path(),std::filesystem::temp_directory_path()));std::filesystem::remove_all(folder);
         };

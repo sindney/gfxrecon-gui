@@ -1,12 +1,13 @@
 #pragma once
 #include "analysis/mesh.h"
 #include <memory>
+#include <functional>
 namespace gfx {
 class MeshViewer {
 public:
     MeshViewer(); ~MeshViewer();
     void SetData(std::shared_ptr<MeshData> data);
-    void Draw();
+    void Draw(const std::function<void(const std::string&)>& reportProblem = {});
     void Release();
     size_t ScreenVertexCount() const;
     MeshPosition ScreenVertex(size_t index) const;

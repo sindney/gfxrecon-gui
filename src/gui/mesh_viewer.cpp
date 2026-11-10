@@ -172,7 +172,7 @@ MeshPosition MeshViewer::ScreenVertex(size_t index)const{return impl_->screen.at
 size_t MeshViewer::InputVertexCount()const{return impl_&&impl_->data&&!impl_->data->attributes.empty()?impl_->data->attributes.front().values.size():0;}
 const std::string& MeshViewer::Diagnostic()const{static const std::string empty;return impl_?impl_->diagnostic:empty;}
 std::array<uint8_t,4> MeshViewer::PreviewCenter()const{return impl_?impl_->centerPixel:std::array<uint8_t,4>{};}
-void MeshViewer::Draw(){
+void MeshViewer::Draw(const std::function<void(const std::string&)>& reportProblem){
     if(!impl_){ImGui::TextDisabled("Select a draw and load its mesh readback.");return;}auto& m=*impl_;
     if(!m.all->records.empty()){
         ImGui::SetNextItemWidth(240);const auto label=m.record<0?"All drawable meshes":"Draw "+std::to_string(m.record);
@@ -188,7 +188,7 @@ void MeshViewer::Draw(){
             m.record=selected;m.data=selected<0?m.all:m.all->records[selected];m.screen.clear();m.attribute=0;m.uploadedSpace=m.uploadedAttribute=-1;m.dirty=true;
             if(m.data){for(size_t i=0;i<m.data->attributes.size();++i)if(m.data->attributes[i].location==location){m.attribute=static_cast<int>(i);break;}m.Evaluate();}
         }
-        if(!m.data){ImGui::TextWrapped("%s",m.all->recordDiagnostics[m.record].c_str());return;}
+        if(!m.data){if(reportProblem)reportProblem(m.all->recordDiagnostics[m.record]);return;}
     }
     const float available=ImGui::GetContentRegionAvail().x;
     ImGui::SetNextItemWidth(std::max(100.0f,std::min(180.0f,available*.55f)));m.dirty|=ImGui::Combo("##mesh-space",&m.space,"Local (input)\0Screen (post-VS)\0");ImGui::SameLine();ImGui::SetNextItemWidth(std::max(75.0f,std::min(100.0f,ImGui::GetContentRegionAvail().x)));m.dirty|=ImGui::Combo("##mesh-mode",&m.mode,"Solid\0Wireframe\0Points\0");
@@ -196,9 +196,9 @@ void MeshViewer::Draw(){
     if(ImGui::Button("Fit")){m.yaw=.5f;m.pitch=.25f;m.distance=3;m.panX=m.panY=m.screenPanX=m.screenPanY=0;m.screenZoom=1;m.dirty=true;}
     if(!m.space&&!m.data->attributes.empty()){std::string label="Location "+std::to_string(m.data->attributes[m.attribute].location);ImGui::SetNextItemWidth(180);
         if(ImGui::BeginCombo("Position",label.c_str())){for(size_t i=0;i<m.data->attributes.size();++i)if(ImGui::Selectable(("Location "+std::to_string(m.data->attributes[i].location)).c_str(),m.attribute==i)){m.attribute=static_cast<int>(i);m.dirty=true;}ImGui::EndCombo();}}
-    if((m.space&&m.screen.empty())||(!m.space&&m.data->attributes.empty())){ImGui::TextWrapped("%s",m.space?m.diagnostic.c_str():m.data->diagnostic.c_str());if(m.space&&!m.data->attributes.empty()&&ImGui::Button("Show input geometry")){m.space=0;m.dirty=true;}return;}
+    if((m.space&&m.screen.empty())||(!m.space&&m.data->attributes.empty())){if(reportProblem)reportProblem(m.space?m.diagnostic:m.data->diagnostic);if(m.space&&!m.data->attributes.empty()&&ImGui::Button("Show input geometry")){m.space=0;m.dirty=true;}return;}
     const auto& positions=m.space?m.screen:m.data->attributes[m.attribute].values;
-    for (const auto& point : positions) for (int c=0;c<3;++c) if(!std::isfinite(point[c])) { ImGui::TextDisabled("The selected position attribute contains non-finite values."); return; }
+    for (const auto& point : positions) for (int c=0;c<3;++c) if(!std::isfinite(point[c])) { if(reportProblem)reportProblem("The selected position attribute contains non-finite values."); return; }
     if(!ImGui::BeginTabBar("mesh-views",ImGuiTabBarFlags_AutoSelectNewTabs))return;
     if(ImGui::BeginTabItem("Preview")){
     const auto size=ImGui::GetContentRegionAvail();const int w=std::clamp(static_cast<int>(size.x),32,2048),h=std::clamp(static_cast<int>(size.y-ImGui::GetTextLineHeightWithSpacing()),32,2048);

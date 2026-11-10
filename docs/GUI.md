@@ -29,6 +29,14 @@ A draw click fetches shaders, geometry, images and the selected view in the
 background. Previous images stay visible under the refresh overlay. Select a
 different draw to supersede a query, or **File > Cancel current operation**.
 Event/frame dots show progress; **Console** contains diagnostics.
+Operation failures and unavailable inspection views open a **Problem** dialog
+with one **OK** button. Long messages scroll inside the dialog; details are also
+logged in Console. Dismissing a warning keeps it closed while that view remains
+unchanged. Unsupported draw visualizations return to **Original**.
+
+Console's **Auto-scroll** follows every line of multiline messages. Scrolling up
+pauses following so you can read earlier output; return to the bottom or re-enable
+Auto-scroll to resume.
 
 ## GPU performance
 
@@ -139,7 +147,7 @@ unchanged. Geometry coverage is not evidence that the draw wrote depth or stenci
 it does not emulate fragment discard, stencil tests or shader-written depth.
 Passes without a compatible color target, unsupported diagnostic pipelines and
 attachments with mismatched extents retain the original image and explain the
-limitation in its tooltip.
+limitation in a **Problem** dialog.
 
 **sRGB** is enabled by default. The viewer first interprets source pixels using
 the captured resource format, applies the display range in linear RGB, then

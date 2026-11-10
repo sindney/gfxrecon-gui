@@ -18,6 +18,7 @@
 #include <mutex>
 #include <set>
 #include <list>
+#include <deque>
 
 namespace gfx {
 enum class PanelState { Inactive, Running, Success, Failed, Warning };
@@ -117,6 +118,7 @@ public:
     const ImageViewer& SelectedImage() const {return resourceImage_;}
     const Json& ValidationReport() const {return validationReport_;}
 #ifdef IMGUI_TEMPLATE_TESTS
+    void SetDrawDiagnosticErrorForTests(int mode, const std::string& message){diagnosticErrors_[mode]=message;}
     void OpenImageForTests(const ResourceArtifact& asset){pendingImageSelection_=asset.metadata;}
     const Json& ImageMetadataForTests()const{return resourceMetadata_;}
     size_t ImageDocumentCountForTests()const{return imageTabs_.size();}
@@ -173,6 +175,8 @@ public:
     uint64_t InspectedPipeline() const { return inspectedPipeline_; }
     void CancelJob();
     void DrawPanelStatuses();
+    void ReportProblem(const std::string& title, const std::string& message, const std::string& key = {});
+    void DrawProblemDialog();
     PanelState StateFor(const std::string& panel) const;
     PanelState FrameStateFor(uint32_t frame) const;
     bool Refreshing(const std::string& panel) const;
@@ -262,6 +266,10 @@ private:
     std::atomic_bool cancel_{false};
     std::string jobName_, status_ = "Open a GFXReconstruct capture or shader to begin.";
     std::string loggedStatus_;
+    struct Problem { std::string title, message; };
+    std::deque<Problem> problems_;
+    std::map<std::string, std::string> reportedProblems_;
+    int problemDialogFrame_ = -1;
     std::map<std::string, PanelStatus> panelStatuses_;
     std::map<uint32_t, PanelStatus> frameStatuses_;
     std::map<size_t,PanelStatus> executionStatuses_;
@@ -307,7 +315,7 @@ private:
     bool readOnly_ = true;
     bool dirty_ = false;
     bool resetShaderScroll_ = false;
-    std::string shaderPath_, deviceOutput_, shaderSearch_;
+    std::string shaderPath_, shaderSearch_;
     ImageViewer image_;
     MeshViewer mesh_;
     bool focusMesh_ = false;

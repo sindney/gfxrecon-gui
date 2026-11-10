@@ -35,7 +35,7 @@ void Workspace::OpenResource(const ResourceArtifact& artifact, uint64_t offset,b
         if(astc){
             const auto png=DecodedPngPath(file);std::error_code ec;
             {std::lock_guard<std::mutex> lock(g_decodeFailuresMutex);const auto failed=g_decodeFailures.find(file);
-                if(failed!=g_decodeFailures.end()){resourceImage_.Release();status_=failed->second;return;}}
+                if(failed!=g_decodeFailures.end()){resourceImage_.Release();status_=failed->second;ReportProblem("Image decode unavailable",status_,"image-decode");return;}}
             if(!(std::filesystem::is_regular_file(png,ec)&&std::filesystem::last_write_time(png,ec)>=std::filesystem::last_write_time(file,ec))){
                 const auto metadata=artifact.metadata;const auto tools=tools_;
                 Start("Decoding ASTC image",[file,png,metadata,tools,generation,this]{
@@ -45,20 +45,21 @@ void Workspace::OpenResource(const ResourceArtifact& artifact, uint64_t offset,b
                     else{
                         const auto reason="ASTC image not decoded: "+decoded.value("reason",std::string{"unknown"});
                         {std::lock_guard<std::mutex> lock(g_decodeFailuresMutex);g_decodeFailures[file]=reason;}
-                        result.message=reason;
+                        result.message=reason;result.failed=true;
                     }
                     return result;
                 },JobKind::Resource);
                 return;
             }
             try{resourceImage_.LoadPng(png,artifact.metadata.value("format",std::string{}));resourceMode_=1;if(activate){focusImage_=true;status_="Replay resource: "+png.u8string();}}
-            catch(const std::exception& error){resourceImage_.Release();status_=error.what();LOGE("resources")<<status_;}
+            catch(const std::exception& error){resourceImage_.Release();status_=error.what();LOGE("resources")<<status_;ReportProblem("Image could not be opened",status_,"image-open");}
             return;
         }
         try{resourceImage_.LoadBmp(file,artifact.metadata.value("aspect",std::string{}),artifact.metadata.value("format",std::string{}));
-            if(artifact.metadata.contains("overlayFile"))try{resourceImage_.SetOverlay(std::filesystem::u8path(artifact.metadata.at("overlayFile").get<std::string>()));}catch(const std::exception& error){status_="Geometry overlay unavailable: "+std::string(error.what());}
+            if(artifact.metadata.contains("overlayFile"))try{resourceImage_.SetOverlay(std::filesystem::u8path(artifact.metadata.at("overlayFile").get<std::string>()));}catch(const std::exception& error){ReportProblem("Geometry overlay unavailable",error.what(),"image-overlay");}
+            else if(artifact.metadata.contains("overlayUnavailable"))ReportProblem("Geometry overlay unavailable",artifact.metadata.at("overlayUnavailable").get<std::string>(),"image-overlay");
             resourceMode_=1;if(activate){focusImage_=true;status_="Replay resource: "+file.u8string();LOGI("resources")<<status_;}}
-        catch(const std::exception& error){resourceImage_.Release();status_=error.what();LOGE("resources")<<status_;}
+        catch(const std::exception& error){resourceImage_.Release();status_=error.what();LOGE("resources")<<status_;ReportProblem("Image could not be opened",status_,"image-open");}
         return;
     }
     bufferMetadata_=artifact.metadata;
@@ -135,8 +136,8 @@ void Workspace::DrawResources() {
             else {
                 ImGui::Text("Last dump: block %llu | %zu files", dumpBlock_, resources_.size());
                 ImGui::TextDisabled("%s", lastReplayTarget_.c_str());
-                if (capture_ && (capture_->events[selectedEvent_].block != dumpBlock_ || selectedExecution_ != dumpExecution_))
-                    ImGui::TextWrapped("This is a previous event's dump. Dump the new selection to refresh its resource contents.");
+                if (!Busy() && !pendingDraw_ && capture_ && (capture_->events[selectedEvent_].block != dumpBlock_ || selectedExecution_ != dumpExecution_))
+                    ReportProblem("Resource data is from a previous selection","Dump the new selection to refresh its resource contents.","stale-resources");
                 if (ImGui::BeginTable("resource-files", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV)) {
                     ImGui::TableSetupColumn("File"); ImGui::TableSetupColumn("Role"); ImGui::TableSetupColumn("Bytes"); ImGui::TableHeadersRow();
                     for (const auto& artifact : resources_) {
@@ -221,12 +222,14 @@ void Workspace::DrawBuffer() {
         }
         if (ImGui::BeginTabItem("Values")) {
             ImGui::SetNextItemWidth(160);
-            ImGui::Combo("Type", &scalarType_, "uint8\0uint16\0uint32\0uint64\0float32\0float64\0");
-            ImGui::SetNextItemWidth(100); ImGui::SliderInt("Values per row", &bufferColumns_, 1, 8);
+            bool formatChanged = ImGui::Combo("Type", &scalarType_, "uint8\0uint16\0uint32\0uint64\0float32\0float64\0");
+            ImGui::SetNextItemWidth(100); formatChanged |= ImGui::SliderInt("Values per row", &bufferColumns_, 1, 8);
             ImGui::SetNextItemWidth(100); ImGui::InputInt("Stride (bytes)", &bufferStride_);
+            const bool strideCommitted = ImGui::IsItemDeactivatedAfterEdit();
             const int widths[] = {1, 2, 4, 8, 4, 8};
-            if (bufferStride_ < bufferColumns_ * widths[scalarType_] || bufferStride_ > 4096)
-                ImGui::TextWrapped("Set a stride large enough for the selected values (maximum 4096 bytes).");
+            if (bufferStride_ < bufferColumns_ * widths[scalarType_] || bufferStride_ > 4096) {
+                if (formatChanged || strideCommitted) ReportProblem("Buffer preview unavailable","Set a stride large enough for the selected values (maximum 4096 bytes).");
+            }
             else if (ImGui::BeginTable("typed-values", bufferColumns_ + 1, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX)) {
                 ImGui::TableSetupColumn("Byte offset", ImGuiTableColumnFlags_WidthFixed, 120);
                 for (int c = 0; c < bufferColumns_; ++c) ImGui::TableSetupColumn(std::to_string(c).c_str(), ImGuiTableColumnFlags_WidthFixed, 130);

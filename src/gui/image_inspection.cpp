@@ -154,7 +154,10 @@ void Workspace::DrawImages(){
     const bool matches=capture_&&selectedExecution_>=0&&dumpExecution_==selectedExecution_&&dumpBlock_==capture_->events[selectedEvent_].block;
     if(matches&&imageShownGeneration_==selectionGeneration_&&diagnosticExecution_==selectedExecution_){
         const auto error=diagnosticErrors_.find(drawVisualization_);
-        if(error!=diagnosticErrors_.end())ImGui::TextWrapped("%s. Showing original image.",error->second.c_str());
+        if(error!=diagnosticErrors_.end()){
+            ReportProblem("Draw visualization unavailable",error->second+"\n\nThe original image is retained.");
+            drawVisualization_=0;
+        }
     }
     if(resourceMode_==2){
         if(drawVisualizationToolbar) drawVisualizationToolbar();
@@ -207,8 +210,8 @@ void Workspace::DrawImages(){
         }
         ImGui::BeginChild("asset-list");
         if(!imageSidebar_&&capture_&&selectedExecution_>=0&&capture_->events[selectedEvent_].name.rfind("vkCmdDispatch",0)==0)
-            ImGui::TextWrapped("Image input inspection is not supported for compute dispatches yet.");
-        else if(!matches&&!Refreshing("Image"))ImGui::TextWrapped("No image readback for this selection. The last successful image is retained.");
+            ReportProblem("Image inspection unavailable","Image input inspection is not supported for compute dispatches yet.","compute-inputs");
+        else if(!matches&&!Refreshing("Image"))ImGui::TextDisabled("No image readback for this selection.");
         else{
             int row=0;bool decoded=false,any=false;
             std::vector<const ResourceArtifact*> assets;

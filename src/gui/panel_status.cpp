@@ -4,6 +4,56 @@
 #include <algorithm>
 
 namespace gfx {
+void Workspace::ReportProblem(const std::string& title, const std::string& message, const std::string& key) {
+    if (message.empty()) return;
+    const auto prefix = title + ": ";
+    const auto detail = message.rfind(prefix, 0) == 0 ? message.substr(prefix.size()) : message;
+    const auto identity = title + "\n" + detail;
+    if (!key.empty()) {
+        if (reportedProblems_[key] == identity) return;
+        reportedProblems_[key] = identity;
+    }
+    for (const auto& problem : problems_)
+        if (problem.title == title && problem.message == detail) return;
+    problems_.push_back({title, detail});
+    LOGW("ui") << title << ": " << detail;
+}
+void Workspace::DrawProblemDialog() {
+    if (problems_.empty() || problemDialogFrame_ == ImGui::GetFrameCount()) return;
+    if (!ImGui::IsPopupOpen("Problem")) {
+        // Nest within an active settings dialog, or wait until another modal
+        // closes. Opening a root popup over it would replace that dialog.
+        const auto* modal = ImGui::GetTopMostPopupModal();
+        if (modal && modal != ImGui::GetCurrentWindow()) return;
+        ImGui::OpenPopup("Problem");
+    }
+    problemDialogFrame_ = ImGui::GetFrameCount();
+    const auto* viewport = ImGui::GetMainViewport();
+    const float width = std::min(viewport->WorkSize.x * .9f, ImGui::GetFontSize() * 38);
+    ImGui::SetNextWindowPos(viewport->GetWorkCenter(), ImGuiCond_Appearing, ImVec2(.5f, .5f));
+    ImGui::SetNextWindowSize(ImVec2(width, 0), ImGuiCond_Always);
+    if (!ImGui::BeginPopupModal("Problem", nullptr, ImGuiWindowFlags_AlwaysAutoResize |
+                               ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking)) return;
+    const auto& problem = problems_.front();
+    ImGui::TextUnformatted(problem.title.c_str());
+    ImGui::Separator();
+    const float textWidth = ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ScrollbarSize;
+    const float height = std::min(ImGui::CalcTextSize(problem.message.c_str(), nullptr, false, textWidth).y +
+                                 ImGui::GetStyle().WindowPadding.y * 2, viewport->WorkSize.y * .55f);
+    if (ImGui::BeginChild("problem-message", ImVec2(0, height))) {
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextUnformatted(problem.message.c_str());
+        ImGui::PopTextWrapPos();
+    }
+    ImGui::EndChild();
+    ImGui::Separator();
+    if (ImGui::Button("OK", ImVec2(100, 0))) {
+        problems_.pop_front();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SetItemDefaultFocus();
+    ImGui::EndPopup();
+}
 PanelState Workspace::StateFor(const std::string& panel) const {
     const auto found = panelStatuses_.find(panel);
     return found == panelStatuses_.end() ? PanelState::Inactive : found->second.state;

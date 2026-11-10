@@ -46,7 +46,7 @@ void ConsoleWindow::Draw(bool* open) {
         ImGui::EndCombo();
     }
     ImGui::SameLine();
-    ImGui::Checkbox("Auto-scroll", &autoScroll_);
+    const bool resumeScrolling = ImGui::Checkbox("Auto-scroll", &autoScroll_) && autoScroll_;
     ImGui::SameLine();
     if (ImGui::Button("Clear"))
         Log::Instance().ClearHistory();
@@ -62,25 +62,43 @@ void ConsoleWindow::Draw(bool* open) {
         // step submits no items, which filtering inside the loop would cause.
         // Keep the snapshot alive in `records` for the whole draw.
         std::vector<LogRecord> records = Log::Instance().RecentRecords();
-        std::vector<const LogRecord*> visible;
+        struct Line { LogLevel level; const char* begin; const char* end; };
+        std::vector<Line> visible;
         for (const LogRecord& r : records) {
             if (!levelVisible_[(int)r.level])
                 continue;
             if (filter_[0] && !strstr(r.formatted.c_str(), filter_))
                 continue;
-            visible.push_back(&r);
+            // The clipper needs equal-height rows, not records: an ADB error
+            // can contain many physical lines. Filter whole records so their
+            // continuation lines keep the same visibility and severity.
+            const char* begin = r.formatted.data();
+            const char* end = begin + r.formatted.size();
+            for (;;) {
+                const char* newline = static_cast<const char*>(memchr(begin, '\n', end - begin));
+                const char* lineEnd = newline ? newline : end;
+                if (lineEnd > begin && lineEnd[-1] == '\r') --lineEnd;
+                visible.push_back({r.level, begin, lineEnd});
+                if (!newline) break;
+                begin = newline + 1;
+            }
         }
+        const bool follow = autoScroll_ && (resumeScrolling || ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f);
         ImGuiListClipper clipper;
         clipper.Begin((int)visible.size(), ImGui::GetTextLineHeightWithSpacing());
+        // Submit the final row even when a large append put it outside the
+        // viewport; SetScrollHereY must target that row rather than a clipped item.
+        if (follow && !visible.empty()) clipper.IncludeItemByIndex((int)visible.size() - 1);
         while (clipper.Step()) {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-                const LogRecord& r = *visible[i];
-                ImGui::PushStyleColor(ImGuiCol_Text, LevelColor(r.level));
-                ImGui::TextUnformatted(r.formatted.c_str());
+                const auto& line = visible[i];
+                ImGui::PushStyleColor(ImGuiCol_Text, LevelColor(line.level));
+                if (line.begin == line.end) ImGui::TextUnformatted(" ");
+                else ImGui::TextUnformatted(line.begin, line.end);
                 ImGui::PopStyleColor();
             }
         }
-        if (autoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
+        if (follow && !visible.empty())
             ImGui::SetScrollHereY(1.0f);
     }
     ImGui::EndChild();

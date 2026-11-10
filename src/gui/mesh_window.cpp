@@ -12,11 +12,11 @@ void Workspace::DrawMesh() {
     if (!ImGui::Begin("Mesh", nullptr, ImGuiWindowFlags_NoScrollWithMouse)) { ImGui::End(); return; }
     if (!capture_ || selectedExecution_ < 0) { ImGui::TextDisabled("Select a submitted draw to inspect its geometry."); ImGui::End(); return; }
     if (CaptureSessionActive()) {
-        ImGui::TextWrapped("End the live capture session to replay mesh inputs. The game can keep running.");
+        ReportProblem("Mesh preview unavailable","End the live capture session to replay mesh inputs. The game can keep running.","mesh-session");
         ImGui::End(); return;
     }
     const auto& event = capture_->events[selectedEvent_];
-    if (!SupportsMeshDraw(event.name)) { ImGui::TextWrapped("This draw path is not supported by the mesh preview yet."); ImGui::End(); return; }
+    if (!SupportsMeshDraw(event.name)) { ReportProblem("Mesh preview unavailable","This draw path is not supported by the mesh preview yet.","mesh-path"); ImGui::End(); return; }
     { RefreshOverlay refresh(Refreshing("Mesh"));
     ImGui::BeginDisabled(Busy());
     if (ImGui::Button("Reload mesh")) { meshRequestGeneration_ = meshGeneration_ = 0; previewPaused_ = false; }
@@ -27,10 +27,10 @@ void Workspace::DrawMesh() {
         meshRequestGeneration_ = selectionGeneration_; meshDiagnostic_.clear(); ReplayFrame(true, false, 0, false, true);
         autoReplayRunning_ = Busy(); currentReplayFrame_ = 0;
     }
-    if (meshGeneration_ == selectionGeneration_) mesh_.Draw();
+    if (meshGeneration_ == selectionGeneration_) mesh_.Draw([this](const std::string& message){ReportProblem("Mesh preview unavailable",message,"mesh-preview");});
     else if (Busy()) ImGui::TextDisabled("Reading selected draw geometry through replay...");
-    else if (previewPaused_) ImGui::TextWrapped("Mesh readback is paused. Reload mesh to replay the selected draw.");
-    else ImGui::TextWrapped("%s", meshDiagnostic_.empty() ? "Select a draw or Reload mesh to read its geometry." : meshDiagnostic_.c_str());
+    else if (!meshDiagnostic_.empty()) ReportProblem("Mesh preview unavailable",meshDiagnostic_,"mesh-readback");
+    else ImGui::TextDisabled(previewPaused_?"Mesh readback is paused.":"Select a draw or Reload mesh to read its geometry.");
     }
     ImGui::End();
 }

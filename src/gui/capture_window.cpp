@@ -182,7 +182,7 @@ void Workspace::PollLiveCapture() {
     const bool running=state.phase==LivePhase::Starting||state.phase==LivePhase::Triggering||state.phase==LivePhase::Recording||state.phase==LivePhase::Stopping||state.phase==LivePhase::Retrieving;
     if(state.detail!=liveCaptureDetail_){
         liveCaptureDetail_=state.detail;
-        if(state.phase==LivePhase::Failed){captureError_=state.detail;captureSetupIssue_="runtime";captureResumeLaunch_=false;captureRepairOpen_=true;}
+        if(state.phase==LivePhase::Failed){captureError_=state.detail;captureSetupIssue_="runtime";captureResumeLaunch_=false;ReportProblem("Capture failed",state.detail);}
         const auto indicator=state.phase==LivePhase::Failed?PanelState::Failed:running?PanelState::Running:state.phase==LivePhase::Armed&&!state.captures.empty()?PanelState::Success:PanelState::Inactive;
         panelStatuses_["Console"]={indicator,state.detail};
     }

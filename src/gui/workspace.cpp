@@ -286,7 +286,7 @@ void Workspace::Poll() {
             status_ = result.message;
             jobFailed_ = result.failed;
             CompleteOperation(result.failed ? PanelState::Failed : PanelState::Success, status_);
-            if (result.failed) { LOGE("perf") << status_; }
+            if (result.failed) { LOGE("perf") << status_; ReportProblem(jobName_,status_); }
             else { LOGI("perf") << status_; }
             if (!result.failed && !result.perfProbe && perfResult_.is_object()) {
                 std::string warning;
@@ -332,7 +332,7 @@ void Workspace::Poll() {
             blockedReplay_=result;openReplayUnlock_=true;previewPaused_=true;
             if(validationReport_.is_object()&&validationReport_.value("status",std::string{})=="running")validationReport_={{"status","unavailable"},{"enabled",false},{"message",result.message}};
         }
-        if(result.failed){if(!result.validationReport.is_null()){validationReport_=std::move(result.validationReport);resourceTab_=2;resourceTabRequest_=true;focusResources_=true;}status_=result.message;jobFailed_=true;CompleteOperation(PanelState::Failed,status_);LOGE("replay")<<status_;return;}
+        if(result.failed){if(!result.validationReport.is_null()){validationReport_=std::move(result.validationReport);resourceTab_=2;resourceTabRequest_=true;focusResources_=true;}status_=result.message;jobFailed_=true;CompleteOperation(PanelState::Failed,status_);LOGE("replay")<<status_;if(!result.unlockRequired)ReportProblem(jobName_,status_);return;}
         if (result.drawPreview && !validationReplay_) { CacheInspection(result); displayedInspectionKey_ = result.inspectionCacheKey; }
         if (result.capture) {
             mesh_.Release(); meshGeneration_ = meshRequestGeneration_ = 0; meshInstance_ = 0;
@@ -437,7 +437,7 @@ void Workspace::Poll() {
         }
         if (!result.resourceImage.empty()) {
             try { if (result.resourceImage.extension() == ".png") resourceImage_.LoadPng(result.resourceImage,resourceMetadata_.value("format",std::string{})); else resourceImage_.LoadBmp(result.resourceImage,resourceMetadata_.value("aspect",std::string{}),resourceMetadata_.value("format",std::string{})); resourceMode_ = 1; focusImage_ = true; }
-            catch (const std::exception& error) { resourceImage_.Release(); status_ = error.what(); LOGE("resources") << status_; }
+            catch (const std::exception& error) { resourceImage_.Release(); status_ = error.what(); LOGE("resources") << status_; ReportProblem("Image could not be opened",status_); }
         }
         if (result.mesh) {
             try {
@@ -458,7 +458,7 @@ void Workspace::Poll() {
         }
         if (result.resourcePage) { resourcePage_ = std::move(*result.resourcePage); resourceMode_ = 0; resourceTab_=4;resourceTabRequest_=true;focusResources_=true; }
         if(result.shader){shaderDocuments_[ShaderKey(result.shaderInfo)]=std::make_shared<WorkspaceResult>(result);ShowShaderDocument(result,true);}
-        else if(!result.text.empty())deviceOutput_=result.text;
+        else if(!result.text.empty()){LOGI("tools")<<result.text;}
         status_ = result.message;
         if(validationErrors){resourceTab_=2;resourceTabRequest_=true;focusResources_=true;}
         CompleteOperation(validationErrors?PanelState::Failed:PanelState::Success, status_);
@@ -481,6 +481,7 @@ void Workspace::Poll() {
         CompleteOperation(PanelState::Failed, status_);
         if (captureInProgress_) { captureInProgress_ = false; }
         LOGW("jobs") << status_; loggedStatus_ = status_;
+        ReportProblem(jobName_,status_);
     } catch (const std::exception& e) {
         jobFailed_ = !cancel_;
         status_ = e.what(); captureError_ = status_;
@@ -489,7 +490,7 @@ void Workspace::Poll() {
         if (automatic && !cancel_) failedFrames_[currentReplayFrame_] = status_;
         if (captureInProgress_) { captureInProgress_ = false; }
         if (cancel_) { LOGI("jobs") << status_; }
-        else { LOGE("jobs") << status_; }
+        else { LOGE("jobs") << status_; ReportProblem(jobName_,status_); }
         loggedStatus_ = status_;
     }
     RefreshRecoveries();
@@ -1257,10 +1258,10 @@ void Workspace::DrawReplayDeviceDialog(){
     if(ImGui::Button("Refresh Android devices"))RefreshDevices();
     ImGui::EndDisabled();
     if(!ToolAvailable("adb"))ImGui::TextWrapped("Configure ADB in Settings > Tools and devices to discover phones.");
-    if(!deviceOutput_.empty())ImGui::TextWrapped("%s",deviceOutput_.c_str());
     if(Busy())ImGui::TextDisabled("%s",jobName_.c_str());
     ImGui::Separator();
-    if(ImGui::Button("Close")||ImGui::IsKeyPressed(ImGuiKey_Escape))ImGui::CloseCurrentPopup();
+    if(ImGui::Button("Close")||(ImGui::IsKeyPressed(ImGuiKey_Escape)&&ImGui::GetTopMostPopupModal()==ImGui::GetCurrentWindow()))ImGui::CloseCurrentPopup();
+    DrawProblemDialog();
     ImGui::EndPopup();
 }
 void Workspace::DrawToolSettings() {
