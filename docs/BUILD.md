@@ -261,6 +261,9 @@ python3 scripts/test_workflow.py --android SERIAL --screenshot .sessions/android
 
 This installs the configured replay/sample APKs, checks cancelled capture
 restoration, records the sample and exercises inspection and shader replay.
+Add `--use-installed-apks` when compatible replay/sample APKs are already installed
+and installation requires on-device confirmation; capture, restoration and replay
+checks still run.
 Validation is a separate opt-in replay check; review its reported errors even
 when the capture/replay workflow completes successfully.
 

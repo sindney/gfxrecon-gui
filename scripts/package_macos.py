@@ -128,10 +128,12 @@ def verify_extracted(directory, scratch, build):
         if not tools.get('artifact_transport',{}).get('available') or Path(tools['artifact_transport']['path']).resolve()!=helper.resolve():
             raise ValueError("Bundled artifact transport helper was not resolved")
     samples = directory / APP / "Contents/Resources/samples"
-    expected_samples = {"windows-triangle.gfxr", "android-triangle.gfxr", "indexed-cube.gfxr", "indirect-triangles.gfxr"}
-    if not expected_samples.issubset({file.name for file in samples.glob("*.gfxr")}):
+    expected_samples = {"windows-triangle.gfxr", "android-triangle.gfxr", "indexed-cube.gfxr", "indirect-triangles.gfxr",
+                        "mip-depth-stencil.gfxr"}
+    packaged_samples = sorted(samples.glob("*.gfxr"))
+    if not expected_samples.issubset({file.name for file in packaged_samples}):
         raise ValueError("Packaged public captures are incomplete")
-    for sample in sorted(samples.glob("*.gfxr")):
+    for sample in packaged_samples:
         info = invoke(["info", "--capture", sample])
         if info["frame_count"] != 3 or info["execution_count"] < 1:
             raise ValueError(f"Packaged capture did not decode correctly: {sample}")
@@ -165,7 +167,7 @@ def verify_extracted(directory, scratch, build):
     verify_manifest(directory)  # launching GUI/CLI must not modify the signed app or distribution
     (build / "packaged-macos-workflow.log").write_text("\n".join(logs))
     return {"architecture": manifest["platform"], "hashes_and_signature": "passed", "icon": "passed",
-            "clean_path_tools": "passed", "astc_roundtrip": "passed", "samples_decoded": 4, "shader_roundtrip": "passed",
+            "clean_path_tools": "passed", "astc_roundtrip": "passed", "samples_decoded": len(packaged_samples), "shader_roundtrip": "passed",
             "gui_sample_and_launch_services": "passed", "package_unchanged_after_launch": True,
             "local_frame_and_full_draw_replays": 6 if runtime else "skipped; no explicit Vulkan loader configured",
             "device_access": "disabled", "vulkan_runtime": "external; local replay requires SDK environment"}

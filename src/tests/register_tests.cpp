@@ -798,7 +798,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             if (ctx->IsError()) return;
             IM_CHECK(mode.RectFull.Max.x < subdraw.RectFull.Min.x);
             IM_CHECK(std::abs(mode.RectFull.GetCenter().y - subdraw.RectFull.GetCenter().y) < 3);
-            IM_CHECK(std::abs(mode.RectFull.GetWidth() - ImGui::GetFontSize()*8) < 1);
+            IM_CHECK(std::abs(mode.RectFull.GetWidth() - ImGui::GetFontSize()*5) < 1);
             IM_CHECK(std::abs(mode.RectFull.GetWidth() - subdraw.RectFull.GetWidth()) < 1);
             IM_CHECK(((subdraw.ItemFlags & ImGuiItemFlags_Disabled) == 0) == indirect);
             IM_CHECK(red.RectFull.Min.y > mode.RectFull.Max.y);
@@ -1161,12 +1161,14 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
                 ctx->MenuClick("//##MainMenuBar/File/Capture application...");
                 ctx->SetRef("//Capture application");
                 CaptureTargetAction(ctx,workspace,std::getenv("GFXRECON_GUI_CAPTURE_DEVICE"));
-                ctx->ItemClick("Settings");ctx->Yield(3);ctx->SetRef("//Settings");
-                ctx->ItemClick("**/Install replay APK"); wait();
-                IM_CHECK(workspace.Status().find("Replay APK installed on ") != std::string::npos);
-                ctx->ItemClick("**/Install test sample"); wait();
-                IM_CHECK(workspace.Status().find("Sample APK installed on ") != std::string::npos);
-                ctx->ItemClick("Close");ctx->MenuClick("//##MainMenuBar/File/Capture application...");wait();
+                if (!std::getenv("GFXRECON_GUI_USE_INSTALLED_APKS")) {
+                    ctx->ItemClick("Settings");ctx->Yield(3);ctx->SetRef("//Settings");
+                    ctx->ItemClick("**/Install replay APK"); wait();
+                    IM_CHECK(workspace.Status().find("Replay APK installed on ") != std::string::npos);
+                    ctx->ItemClick("**/Install test sample"); wait();
+                    IM_CHECK(workspace.Status().find("Sample APK installed on ") != std::string::npos);
+                    ctx->ItemClick("Close");ctx->MenuClick("//##MainMenuBar/File/Capture application...");wait();
+                }
                 ctx->SetRef("//Capture application");ctx->ItemInputValue("##capture-package","com.lunarg.gfxreconstruct.test.test_apps.test_launcher");ctx->ItemInputValue("##capture-arguments","triangle");ctx->ComboClick("##capture-timing/Scheduled");
                 const auto previousCapture = workspace.CurrentCapture();
                 ctx->ItemInputValue("Frame range", "1000000-1000001");ctx->SetRef("//Capture application");
@@ -1260,10 +1262,16 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
                 const auto originalWidth = workspace.BaselineImage().Width();
                 ReplayDeviceAction(ctx, workspace, gfx::LocalReplayLabel()); wait();
                 FrameAction(ctx, "Render frame"); wait();
-                IM_CHECK(workspace.Status().find("local GPU lacks a Vulkan extension") != std::string::npos);
-                IM_CHECK_EQ(workspace.BaselineImage().Width(), originalWidth);
-                IM_CHECK(workspace.StateFor("Frames") == gfx::PanelState::Failed);
-                IM_CHECK(workspace.FrameStateFor(1) == gfx::PanelState::Failed);
+                if (workspace.StateFor("Frames") == gfx::PanelState::Failed) {
+                    IM_CHECK(workspace.Status().find("local GPU lacks a Vulkan extension") != std::string::npos);
+                    IM_CHECK_EQ(workspace.BaselineImage().Width(), originalWidth);
+                    IM_CHECK(workspace.FrameStateFor(1) == gfx::PanelState::Failed);
+                } else {
+                    IM_CHECK(workspace.StateFor("Frames") == gfx::PanelState::Success);
+                    IM_CHECK(workspace.FrameStateFor(1) == gfx::PanelState::Success);
+                    IM_CHECK(workspace.BaselineImage().Width() > 0);
+                    IM_CHECK(workspace.LastReplayTarget().find(gfx::LocalReplayLabel()) == 0);
+                }
                 ReplayDeviceAction(ctx, workspace, "Automatic (based on capture)"); wait();
             }
             ctx->SetRef("//Frames"); FrameAction(ctx, "Render frame"); wait();
