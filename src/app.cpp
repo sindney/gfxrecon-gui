@@ -108,7 +108,6 @@ bool App::Draw() {
 
     AboutInfo about{"GFXReconstruct Inspector", "0.1.0", lastOpenedFile_};
     ShowAboutModal(about);
-    workspace_.DrawProblemDialog();
 
     return !quitRequested_;
 }
@@ -239,6 +238,7 @@ void App::DrawSettings() {
         ImGui::CloseCurrentPopup();
     if(ImGui::IsKeyPressed(ImGuiKey_Escape)&&ImGui::GetTopMostPopupModal()==ImGui::GetCurrentWindow())ImGui::CloseCurrentPopup();
 
+    if (workspace_.ProblemDialogRequested()) workspace_.OpenProblemDialog();
     workspace_.DrawProblemDialog();
     ImGui::EndPopup();
 }
@@ -336,6 +336,8 @@ void App::DrawDockspace() {
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetFontSize(), ImGui::GetStyle().FramePadding.y));
     ImGui::DockSpace(dockspaceId, ImVec2(0, 0), ImGuiDockNodeFlags_PassthruCentralNode);
     ImGui::PopStyleVar();
+    if (workspace_.ProblemDialogRequested()) workspace_.OpenProblemDialog();
+    workspace_.DrawProblemDialog();
     ImGui::End();
 }
 

@@ -146,6 +146,10 @@ public:
     void LoadDrawFixture(const std::filesystem::path& directory){const auto generation=selectionGeneration_;const auto execution=selectedExecution_;const auto block=capture_->events[selectedEvent_].block;Start("Loading draw fixture",[directory,generation,execution,block]{WorkspaceResult r;r.replayResult=true;r.drawPreview=true;r.descriptorImages=true;r.resources=CollectResources(directory);r.selectionGeneration=generation;r.dumpExecution=execution;r.dumpBlock=block;return r;});}
 #endif
     void SetReplayMode(ReplayMode mode);
+#ifdef IMGUI_TEMPLATE_TESTS
+    void SetValidationReplayForTests(bool enabled) { validationReplay_ = enabled; }
+    bool ValidationReplayForTests() const { return validationReplay_; }
+#endif
     void SetDrawVisualization(int mode,int subdraw=-1);
     int DrawVisualization()const{return drawVisualization_;}
     size_t CachedDrawModeCount()const{return diagnosticResources_.size();}
@@ -176,6 +180,8 @@ public:
     void CancelJob();
     void DrawPanelStatuses();
     void ReportProblem(const std::string& title, const std::string& message, const std::string& key = {});
+    bool ProblemDialogRequested() const;
+    void OpenProblemDialog();
     void DrawProblemDialog();
     PanelState StateFor(const std::string& panel) const;
     PanelState FrameStateFor(uint32_t frame) const;
@@ -270,6 +276,8 @@ private:
     std::deque<Problem> problems_;
     std::map<std::string, std::string> reportedProblems_;
     int problemDialogFrame_ = -1;
+    bool problemDialogRequested_ = false;
+    bool problemDialogSettingsRequested_ = false;
     std::map<std::string, PanelStatus> panelStatuses_;
     std::map<uint32_t, PanelStatus> frameStatuses_;
     std::map<size_t,PanelStatus> executionStatuses_;

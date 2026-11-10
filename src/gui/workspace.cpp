@@ -1261,6 +1261,7 @@ void Workspace::DrawReplayDeviceDialog(){
     if(Busy())ImGui::TextDisabled("%s",jobName_.c_str());
     ImGui::Separator();
     if(ImGui::Button("Close")||(ImGui::IsKeyPressed(ImGuiKey_Escape)&&ImGui::GetTopMostPopupModal()==ImGui::GetCurrentWindow()))ImGui::CloseCurrentPopup();
+    if(ProblemDialogRequested())OpenProblemDialog();
     DrawProblemDialog();
     ImGui::EndPopup();
 }

@@ -17,6 +17,7 @@
 
 #include <imgui_te_context.h>
 #include <imgui_te_engine.h>
+#include <imgui_te_internal.h>
 #include <imgui_internal.h>
 #include <imgui_capture_tool.h>
 #include <implot.h>
@@ -66,6 +67,21 @@ void WaitForWorkspace(ImGuiTestContext* ctx, gfx::Workspace& workspace) {
         ctx->Yield(); std::this_thread::sleep_for(std::chrono::milliseconds(5));
         if (!workspace.Busy() && !workspace.HasPendingWork()) { ctx->Yield(2); if (!workspace.Busy() && !workspace.HasPendingWork()) return; }
     } while (std::chrono::steady_clock::now() < deadline && !ctx->IsError());
+}
+void WaitForInspectionControls(ImGuiTestContext* ctx, gfx::Workspace& workspace) {
+    WaitForWorkspace(ctx, workspace);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while ((workspace.Refreshing("Pipeline") || workspace.Refreshing("Image") || workspace.Refreshing("Mesh") ||
+            workspace.Refreshing("Resources")) && std::chrono::steady_clock::now() < deadline && !ctx->IsError()) {
+        ctx->Yield(); std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    IM_CHECK(!workspace.Refreshing("Pipeline") && !workspace.Refreshing("Image") &&
+             !workspace.Refreshing("Mesh") && !workspace.Refreshing("Resources"));
+}
+void CheckTestModal(ImGuiTestContext* ctx) {
+    const auto* modal = ImGui::GetTopMostPopupModal();
+    if (modal) ctx->LogError("Test started with modal '%s'", modal->Name);
+    IM_CHECK(modal == nullptr);
 }
 void CaptureTargetAction(ImGuiTestContext* ctx,gfx::Workspace& workspace,const std::string& label){
     WaitForWorkspace(ctx,workspace);ctx->SetRef("//Capture application");ctx->ItemClick("##capture-device");
@@ -125,11 +141,25 @@ void ReplayDeviceAction(ImGuiTestContext* ctx,gfx::Workspace& workspace,const ch
     FrameAction(ctx,"Render frame");
 }
 
+ImGuiWindow* SettingsContent(ImGuiTestContext* ctx) {
+    auto* content = ctx->WindowInfo("//Settings/settings-content").Window;
+    if (!content) {
+        if (const auto* modal = ImGui::GetTopMostPopupModal())
+            ctx->LogError("Settings unavailable; active modal is '%s'", modal->Name);
+        else
+            ctx->LogError("Settings unavailable; no settings-content window");
+        IM_CHECK_RETV(content != nullptr, nullptr);
+    }
+    return content;
+}
 ImGuiID SettingsItem(ImGuiTestContext* ctx,const char* label){
-    return ctx->GetID(label,ctx->WindowInfo("//Settings/settings-content").Window->ID);
+    auto* content = SettingsContent(ctx);
+    return content ? ctx->GetID(label, content->ID) : 0;
 }
 void SettingsCombo(ImGuiTestContext* ctx,const char* value){
-    ctx->SetRef(ctx->WindowInfo("//Settings/settings-content").Window);ctx->ComboClick(value);ctx->SetRef("//Settings");
+    auto* content = SettingsContent(ctx);
+    if (!content) return;
+    ctx->SetRef(content);ctx->ComboClick(value);ctx->SetRef("//Settings");
 }
 
 void ClickFrame(ImGuiTestContext* ctx, int frame) {
@@ -204,6 +234,13 @@ void RegisterMacTests(ImGuiTestEngine* engine);
 
 void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
     (void)app;
+    for (int index = 0; index < engine->TestsAll.Size; ++index) {
+        auto* test = engine->TestsAll[index];
+        if (test->GuiFunc) continue;
+        test->GuiFunc = [](ImGuiTestContext* ctx) {
+            if (ctx->FirstGuiFrame) CheckTestModal(ctx);
+        };
+    }
     ImGuiTest* t = nullptr;
 
     t = IM_REGISTER_TEST(engine, "image", "source encoding display range thumbnails and difference");
@@ -1104,14 +1141,32 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         ctx->ItemClick("OK");ctx->Yield(10);
         w.ReportProblem("Replay unavailable",message,"dialog-regression");ctx->Yield(5);
         IM_CHECK(ImGui::GetTopMostPopupModal()==nullptr);
-        ctx->MenuClick("//##MainMenuBar/File/Settings...");ctx->Yield(3);
-        w.ReportProblem("Tool unavailable","A problem while settings are open");ctx->Yield(4);
-        ctx->SetRef("//Problem");IM_CHECK(ctx->ItemExists("OK"));ctx->KeyPress(ImGuiKey_Escape);ctx->Yield(3);
-        IM_CHECK(ctx->ItemExists("OK"));ctx->ItemClick("OK");ctx->Yield(3);
-        ctx->SetRef("//Settings");IM_CHECK(ctx->ItemExists("Close"));ctx->ItemClick("Close");
         const auto capture=w.CurrentCapture();
         w.Open((std::filesystem::temp_directory_path()/"gfxrecon-missing-capture-for-dialog.gfxr").u8string());WaitForWorkspace(ctx,w);
         IM_CHECK(w.CurrentCapture()==capture);ctx->SetRef("//Problem");IM_CHECK(ctx->ItemExists("OK"));ctx->ItemClick("OK");ctx->Yield(3);
+        IM_CHECK(ImGui::GetTopMostPopupModal()==nullptr);
+        w.ReportProblem("Replay unavailable","Panel switch must not reopen a problem");ctx->Yield(3);
+        ctx->SetRef("//Problem");IM_CHECK(ctx->ItemExists("OK"));
+        auto* pipeline=ImGui::FindWindowByName("Pipeline");
+        IM_CHECK(pipeline!=nullptr&&pipeline->DockNode!=nullptr&&pipeline->DockNode->TabBar!=nullptr);
+        if(!pipeline||!pipeline->DockNode||!pipeline->DockNode->TabBar)return;
+        const auto* tab=ImGui::TabBarFindTabByID(pipeline->DockNode->TabBar,pipeline->TabId);IM_CHECK(tab!=nullptr);if(!tab)return;
+        const auto& bar=pipeline->DockNode->TabBar->BarRect;
+        ctx->MouseMoveToPos(ImVec2(bar.Min.x+tab->Offset+tab->Width*.5f,bar.GetCenter().y));ctx->MouseClick(0);ctx->Yield(5);ctx->SetRef("//Problem");IM_CHECK(ctx->ItemExists("OK"));
+        ImGui::CloseCurrentPopup();ctx->Yield(4);ctx->SetRef("//Problem");IM_CHECK(ctx->ItemExists("OK"));
+        ctx->ItemClick("OK");ctx->Yield(3);IM_CHECK(ImGui::GetTopMostPopupModal()==nullptr);
+    };
+
+    t = IM_REGISTER_TEST(engine,"shell","problem nested in settings preserves settings after dismissal");t->UserData=app;
+    t->TestFunc=[](ImGuiTestContext* ctx){
+        auto& w=static_cast<App*>(ctx->Test->UserData)->Workspace();
+        ctx->MenuClick("//##MainMenuBar/File/Settings...");ctx->Yield(3);
+        ctx->SetRef("//Settings");IM_CHECK(ctx->ItemExists("Close"));
+        w.ReportProblem("Tool unavailable","A problem while settings are open");ctx->Yield(4);
+        ctx->SetRef("//Problem");IM_CHECK(ctx->ItemExists("OK"));ctx->ItemClick("OK");ctx->Yield(4);
+        const auto* modal=ImGui::GetTopMostPopupModal();
+        IM_CHECK(modal!=nullptr&&std::string_view(modal->Name)=="Settings");
+        ctx->SetRef("//Settings");IM_CHECK(ctx->ItemExists("Close"));ctx->ItemClick("Close");ctx->Yield(3);
         IM_CHECK(ImGui::GetTopMostPopupModal()==nullptr);
     };
 
@@ -1348,7 +1403,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
             if (android) {
                 const auto originalWidth = workspace.BaselineImage().Width();
                 ReplayDeviceAction(ctx, workspace, gfx::LocalReplayLabel()); wait();
-                FrameAction(ctx, "Render frame"); wait();
+                WaitForInspectionControls(ctx, workspace);
                 if (workspace.StateFor("Frames") == gfx::PanelState::Failed) {
                     IM_CHECK(workspace.Status().find("local GPU lacks a Vulkan extension") != std::string::npos);
                     IM_CHECK_EQ(workspace.BaselineImage().Width(), originalWidth);
@@ -1517,8 +1572,9 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         t=IM_REGISTER_TEST(engine,"integration","indexed input geometry and post-VS uniform replay preview");t->UserData=app;
         t->TestFunc=[](ImGuiTestContext* ctx){
             auto& workspace=static_cast<App*>(ctx->Test->UserData)->Workspace();
-            workspace.SetReplayMode(gfx::ReplayMode::Local);workspace.Open(std::getenv("GFXRECON_GUI_MESH_CAPTURE"));WaitForWorkspace(ctx,workspace);
+            workspace.SetReplayMode(gfx::ReplayMode::Local);workspace.SetValidationReplayForTests(false);workspace.Open(std::getenv("GFXRECON_GUI_MESH_CAPTURE"));WaitForWorkspace(ctx,workspace);
             IM_CHECK(workspace.CurrentCapture()!=nullptr);workspace.SelectExecution(0);
+            WaitForInspectionControls(ctx, workspace);
             ImGui::SetWindowFocus("Pipeline");ctx->Yield(3);ctx->SetRef("//Pipeline");ctx->ItemClick("**/VTX");ctx->ItemClick("**/Mesh");WaitForWorkspace(ctx,workspace);
             IM_CHECK_EQ(workspace.Mesh().InputVertexCount(),36);
             IM_CHECK_EQ(workspace.Mesh().ScreenVertexCount(),36);
@@ -1610,8 +1666,8 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
     if(std::getenv("GFXRECON_GUI_SUBRESOURCE_CAPTURE")){
         t=IM_REGISTER_TEST(engine,"integration","mip preview reads levels on demand and scalar diagnostics preserve values");t->UserData=app;
         t->TestFunc=[](ImGuiTestContext* ctx){
-            auto& w=static_cast<App*>(ctx->Test->UserData)->Workspace();w.SetReplayMode(gfx::ReplayMode::Local);w.SetFullDrawReplay(false);
-            w.Open(std::getenv("GFXRECON_GUI_SUBRESOURCE_CAPTURE"));WaitForWorkspace(ctx,w);w.SelectExecution(0,true);WaitForWorkspace(ctx,w);
+            auto& w=static_cast<App*>(ctx->Test->UserData)->Workspace();w.SetReplayMode(gfx::ReplayMode::Local);w.SetFullDrawReplay(false);w.SetValidationReplayForTests(false);
+            w.Open(std::getenv("GFXRECON_GUI_SUBRESOURCE_CAPTURE"));WaitForWorkspace(ctx,w);w.SelectExecution(0,true);WaitForInspectionControls(ctx,w);
             ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);IM_CHECK(ctx->ItemExists("##image-mip"));
             const auto selectorWidth=ctx->ItemInfo("##image-mip").RectFull.GetWidth();
             IM_CHECK_EQ(ctx->ItemInfo("##draw-visualization").RectFull.GetWidth(),selectorWidth);
@@ -1650,8 +1706,8 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         t=IM_REGISTER_TEST(engine,"integration","native indirect batch visualization and latest subdraw selection");t->UserData=app;
         t->TestFunc=[](ImGuiTestContext* ctx){
             auto& w=static_cast<App*>(ctx->Test->UserData)->Workspace();
-            w.SetReplayMode(gfx::ReplayMode::Local);w.Open(std::getenv("GFXRECON_GUI_INDIRECT_CAPTURE"));WaitForWorkspace(ctx,w);
-            w.SelectExecution(0,true);WaitForWorkspace(ctx,w);ctx->WindowFocus("//Image");ctx->Yield(3);
+            w.SetReplayMode(gfx::ReplayMode::Local);w.SetValidationReplayForTests(false);w.Open(std::getenv("GFXRECON_GUI_INDIRECT_CAPTURE"));WaitForWorkspace(ctx,w);
+            w.SelectExecution(0,true);WaitForInspectionControls(ctx,w);ctx->WindowFocus("//Image");ctx->Yield(3);
             ctx->SetRef(ctx->WindowInfo("//Image/image-document").Window);
             IM_CHECK(ctx->ItemExists("##indirect-subdraw"));
             auto orange=[&](){const auto& image=w.SelectedImage();size_t count=0;for(int y=0;y<image.Height();++y)for(int x=0;x<image.Width();++x){const auto p=image.Pixel(x,y);if(p[0]>250&&p[1]>120&&p[1]<240&&p[2]<5)++count;}return count;};
@@ -1766,7 +1822,18 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
     if(desktopFixture&&std::getenv("GFXRECON_GUI_VALIDATE_FIXTURE")) {
         t=IM_REGISTER_TEST(engine,"integration","fresh replay enables Khronos validation and reports diagnostics");t->UserData=app;
         t->TestFunc=[](ImGuiTestContext* ctx){
-            auto& w=static_cast<App*>(ctx->Test->UserData)->Workspace();w.Open(std::getenv("GFXRECON_GUI_TEST_CAPTURE"));WaitForWorkspace(ctx,w);
+            auto& w=static_cast<App*>(ctx->Test->UserData)->Workspace();
+            struct RestoreValidation {
+                gfx::Workspace& workspace; bool original; ImGuiTestContext* ctx;
+                ~RestoreValidation() {
+                    workspace.SetValidationReplayForTests(original);
+                    if (const auto* modal = ImGui::GetTopMostPopupModal(); modal &&
+                        (std::string_view(modal->Name) == "Settings" || std::string_view(modal->Name) == "Problem")) {
+                        ImGui::ClosePopupToLevel(0, true); ctx->Yield(2);
+                    }
+                }
+            } restore{w, w.ValidationReplayForTests(), ctx};
+            w.Open(std::getenv("GFXRECON_GUI_TEST_CAPTURE"));WaitForWorkspace(ctx,w);
             ctx->MenuClick("//##MainMenuBar/File/Settings...");ctx->SetRef("//Settings");ctx->ItemClick(SettingsItem(ctx,"Vulkan validation"));ctx->ItemClick("Close");
             FrameAction(ctx,"Render frame");WaitForWorkspace(ctx,w);
             IM_CHECK(w.ValidationReport().is_object());IM_CHECK(w.ValidationReport().value("enabled",false));
@@ -1960,7 +2027,8 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
     t=IM_REGISTER_TEST(engine,"shell","Settings keeps user size while tab content scrolls");t->UserData=app;
     t->TestFunc=[](ImGuiTestContext* ctx){
         ctx->MenuClick("//##MainMenuBar/File/Settings...");ctx->SetRef("//Settings");ctx->Yield(3);
-        auto* dialog=ctx->WindowInfo("//Settings").Window;const auto original=dialog->Size;
+        auto* dialog=ctx->WindowInfo("//Settings").Window;IM_CHECK(dialog!=nullptr);if(!dialog)return;
+        const auto original=dialog->Size;
         const auto sameSize=[](ImVec2 a,ImVec2 b){return std::abs(a.x-b.x)<1&&std::abs(a.y-b.y)<1;};
         IM_CHECK((dialog->Flags&(ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoResize))==0);
         ctx->ItemClick("settings-tabs/Tools and devices");ctx->Yield(3);
@@ -1970,6 +2038,7 @@ void RegisterAppTests(ImGuiTestEngine* engine, App* app) {
         ctx->WindowResize("//Settings",requested);ctx->Yield(3);const auto resized=dialog->Size;
         IM_CHECK(resized.x<original.x-30&&resized.y<original.y-50);
         auto* content=ctx->WindowInfo("//Settings/settings-content").Window;
+        IM_CHECK(content!=nullptr);if(!content)return;
         IM_CHECK(content->ScrollMax.y>0);
         ctx->MouseMoveToPos(content->InnerRect.GetCenter());ctx->MouseWheelY(-8);ctx->Yield(5);
         IM_CHECK(content->Scroll.y>0);IM_CHECK(sameSize(dialog->Size,resized));

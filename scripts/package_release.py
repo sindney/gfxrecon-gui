@@ -371,12 +371,12 @@ def package_runtime(args):
             environment["GFXRECON_GUI_SUBRESOURCE_CAPTURE"] = str(unpacked / "samples/mip-depth-stencil.gfxr")
         if args.verify_android: environment["GFXRECON_GUI_CAPTURE_DEVICE"] = args.verify_android
         from test_workflow import registered_layer
-        with registered_layer(True, unpacked / "tools/layer/VkLayer_gfxreconstruct.json"), registered_layer(True,unpacked/'tools/validation/VkLayer_khronos_validation.json'):
-            tested = subprocess.run([str(unpacked / "gfxrecon_gui_tests.exe"), "--test"], cwd=unpacked,
-                                    env=environment, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=240)
-        (build / "packaged-workflow.log").write_text(tested.stdout + tested.stderr, encoding="utf-8")
+        with (build / "packaged-workflow.log").open("w", encoding="utf-8") as log:
+            with registered_layer(True, unpacked / "tools/layer/VkLayer_gfxreconstruct.json"), registered_layer(True,unpacked/'tools/validation/VkLayer_khronos_validation.json'):
+                tested = subprocess.run([str(unpacked / "gfxrecon_gui_tests.exe"), "--test"], cwd=unpacked,
+                                        env=environment, stdout=log, stderr=subprocess.STDOUT, timeout=600)
         if tested.returncode:
-            raise ValueError(f"Packaged GUI capture/replay workflow failed:\n{tested.stdout}\n{tested.stderr}")
+            raise ValueError(f"Packaged GUI capture/replay workflow failed (see {build / 'packaged-workflow.log'})")
         print("Extracted ZIP: file hashes and app startup/shutdown passed", flush=True)
         checksum = temporary / (ARCHIVE + ".sha256")
         checksum.write_text(sha256(archive_path) + "  " + ARCHIVE + "\n", encoding="ascii")

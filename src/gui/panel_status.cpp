@@ -16,16 +16,30 @@ void Workspace::ReportProblem(const std::string& title, const std::string& messa
     for (const auto& problem : problems_)
         if (problem.title == title && problem.message == detail) return;
     problems_.push_back({title, detail});
+    problemDialogRequested_ = true;
     LOGW("ui") << title << ": " << detail;
+}
+bool Workspace::ProblemDialogRequested() const {
+    return problemDialogRequested_ && !problems_.empty();
+}
+void Workspace::OpenProblemDialog() {
+    const auto* modal = ImGui::GetTopMostPopupModal();
+    const bool nested = modal && (std::string_view(modal->Name) == "Settings" || std::string_view(modal->Name) == "Replay device");
+    if (modal && !nested) return;
+    if (modal && ImGui::GetCurrentWindow() != modal) return;
+    if (!modal && ImGui::GetCurrentWindow() != ImGui::FindWindowByName("##dockspace-host")) return;
+    const auto problemId = ImGui::GetID("Problem");
+    if (!ImGui::IsPopupOpen(problemId, ImGuiPopupFlags_AnyPopupLevel)) ImGui::OpenPopup(problemId);
+    problemDialogSettingsRequested_ = nested;
+    problemDialogRequested_ = false;
 }
 void Workspace::DrawProblemDialog() {
     if (problems_.empty() || problemDialogFrame_ == ImGui::GetFrameCount()) return;
-    if (!ImGui::IsPopupOpen("Problem")) {
-        // Nest within an active settings dialog, or wait until another modal
-        // closes. Opening a root popup over it would replace that dialog.
-        const auto* modal = ImGui::GetTopMostPopupModal();
-        if (modal && modal != ImGui::GetCurrentWindow()) return;
-        ImGui::OpenPopup("Problem");
+    const auto problemId = ImGui::GetID("Problem");
+    if (!ImGui::IsPopupOpen(problemId, ImGuiPopupFlags_AnyPopupLevel)) {
+        if (problemDialogSettingsRequested_) problemDialogSettingsRequested_ = false;
+        else problemDialogRequested_ = true; // Recover if the popup closes without acknowledging the problem.
+        return;
     }
     problemDialogFrame_ = ImGui::GetFrameCount();
     const auto* viewport = ImGui::GetMainViewport();
@@ -49,7 +63,12 @@ void Workspace::DrawProblemDialog() {
     ImGui::Separator();
     if (ImGui::Button("OK", ImVec2(100, 0))) {
         problems_.pop_front();
+        problemDialogRequested_ = !problems_.empty();
         ImGui::CloseCurrentPopup();
+    }
+    if (problemDialogSettingsRequested_) {
+        problemDialogSettingsRequested_ = false;
+        problemDialogRequested_ = true;
     }
     ImGui::SetItemDefaultFocus();
     ImGui::EndPopup();
